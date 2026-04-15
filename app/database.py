@@ -30,6 +30,21 @@ def _validate_identifier(value: str, field_name: str) -> str:
     return value
 
 
+def _coerce_int(value: Any, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {field_name}: {value!r}") from None
+
+
+def _normalize_loop_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    valid_modes = {"off", "song", "queue"}
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid loop mode: {value!r}. Expected one of: {', '.join(sorted(valid_modes))}")
+    return mode
+
+
 
 def _extract_youtube_video_id(video_url: str | None) -> str | None:
     if not video_url:
@@ -418,14 +433,19 @@ class PanelDatabase:
                     "rows": processed_rows
                 }
 
-    async def control_bot(self, bot_key: str, guild_id: str, action: str, payload: str = None):
+    async def control_bot(self, bot_key: str, guild_id: str, action: str, payload: Any = None) -> dict[str, Any]:
         bot = BOT_INDEX.get(bot_key)
-        if not bot: raise ValueError("Invalid bot")
+        if not bot:
+            raise ValueError("Invalid bot")
+        if bot.kind != "music" or not bot.db_schema or not bot.table_prefix:
+            raise ValueError("This action is only supported for music bots")
+
         schema = bot.db_schema
         prefix = bot.table_prefix
-        
-        try: gid = int(guild_id)
-        except: gid = 0
+        gid = _coerce_int(guild_id, "guild_id")
+        action = str(action or "").strip().upper()
+
+        result: dict[str, Any] = {"action": action}
 
         async with self.pool.acquire() as conn:
             # Explicit DictCursor fixes Shuffle crashes, explicit commit fixes silent rollbacks
@@ -433,21 +453,33 @@ class PanelDatabase:
                 if action in ["PAUSE", "RESUME", "SKIP", "STOP"]:
                     await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
                     await cur.execute(f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, bot_key, action))
+                    result["message"] = f"{bot.display_name} will {action.lower()} in guild {gid}."
                 
                 elif action == "RESTART":
                     # Update global health table so the node's system manager actually restarts it
                     await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.swarm_health (bot_name VARCHAR(50) PRIMARY KEY, status VARCHAR(20), last_pulse TIMESTAMP)")
                     await cur.execute(f"UPDATE `{schema}`.swarm_health SET status = 'RESTART' WHERE bot_name = %s", (bot_key,))
                     # Simulate a global playback stall so the watchdog auto-resumes upon booting back up
-                    try: await cur.execute(f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE")
-                    except: pass
-                    
+                    try:
+                        await cur.execute(f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE")
+                    except Exception:
+                        pass
+                    result["message"] = f"Restart requested for {bot.display_name}."
+
                 elif action == "CLEAR":
                     await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s", (gid,))
-                    
+                    result["message"] = f"Cleared the queue for guild {gid} on {bot.display_name}."
+
                 elif action == "LOOP":
-                    await cur.execute(f"UPDATE `{schema}`.`{prefix}_guild_settings` SET loop_mode = %s WHERE guild_id = %s", (payload, gid))
-                    
+                    mode = _normalize_loop_mode(payload)
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, loop_mode) VALUES (%s, %s) "
+                        f"ON DUPLICATE KEY UPDATE loop_mode = VALUES(loop_mode)",
+                        (gid, mode),
+                    )
+                    result["loop_mode"] = mode
+                    result["message"] = f"Loop mode set to {mode} for guild {gid} on {bot.display_name}."
+
                 elif action == "SHUFFLE":
                     await cur.execute(f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s ORDER BY id ASC", (gid,))
                     q = await cur.fetchall()
@@ -467,5 +499,36 @@ class PanelDatabase:
                         for row in l:
                             values = tuple(row[c] for c in cols)
                             await cur.execute(f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})", values)
+                    result["message"] = f"Shuffled the queue for guild {gid} on {bot.display_name}."
+
+                elif action == "PLAY":
+                    if not isinstance(payload, dict):
+                        raise ValueError("PLAY payload must be an object with source_url and voice_channel_id")
+
+                    source_url = str(payload.get("source_url") or payload.get("query") or "").strip()
+                    if not source_url:
+                        raise ValueError("Missing source_url for PLAY action")
+
+                    voice_channel_id = _coerce_int(payload.get("voice_channel_id"), "voice_channel_id")
+                    text_channel_raw = payload.get("text_channel_id")
+                    text_channel_id = _coerce_int(text_channel_raw, "text_channel_id") if text_channel_raw not in (None, "", 0, "0") else 0
+
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
+                        "id INT AUTO_INCREMENT PRIMARY KEY, "
+                        "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
+                        "command VARCHAR(50), data TEXT)"
+                    )
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
+                        "(bot_name, guild_id, vc_id, text_channel_id, command, data) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (bot_key, gid, voice_channel_id, text_channel_id, "PLAY", source_url),
+                    )
+                    result["message"] = f"Queued a direct PLAY order for {bot.display_name} in guild {gid}."
+
+                else:
+                    raise ValueError(f"Unsupported action: {action}")
             
             await conn.commit() # FORCE COMMIT TO DATABASE
+        return result

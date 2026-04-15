@@ -3,6 +3,9 @@
 // ================================
 const API_BASE = "/api";
 let controlCooldown = false;
+let dashboardBotsState = [];
+let botCatalogState = [];
+let controlInventoryState = null;
 
 // ================================
 // 🔒 AUTH HELPER
@@ -35,6 +38,7 @@ async function fetchDashboard() {
         const data = await res.json();
 
         const bots = data.bots || [];
+        dashboardBotsState = bots;
 
         renderBots(bots);
 
@@ -53,6 +57,7 @@ async function fetchDashboard() {
 
         renderSessions(allSessions);
         renderNowPlaying(allSessions);
+        syncControlSelectionsFromDashboard();
 
         const meta = document.getElementById('dashboard-meta');
         if (meta && data.generated_at) {
@@ -125,6 +130,7 @@ function renderNowPlaying(sessions) {
                         ${pos}
                     </span>
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
+                    ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${s.loop_mode}</span>` : ''}
                     ${s.queue_count > 0 ? `<span class="np-stat">+${s.queue_count} queued</span>` : ''}
                 </div>
                 <div class="np-controls">
@@ -239,6 +245,7 @@ function renderSessions(sessions) {
             <td>${session.is_playing ? "▶️ Playing" : "⏸️ Paused"}</td>
             <td>${session.title || "—"}</td>
             <td>${session.filter_mode || "none"}</td>
+            <td>${session.loop_mode || "off"}</td>
             <td>${session.queue_count || 0}</td>
             <td>${formatDuration(session.position_seconds)}</td>
             <td>
@@ -246,6 +253,9 @@ function renderSessions(sessions) {
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
                 <button class="tbl-btn" data-action="SKIP"   data-bot="${session.bot_key}" data-guild="${session.guild_id}">Skip</button>
                 <button class="tbl-btn tbl-btn-stop" data-action="STOP" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Stop</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="off" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Off</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="song" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Song</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="queue" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Queue</button>
             </td>
         `;
         table.appendChild(row);
@@ -255,27 +265,34 @@ function renderSessions(sessions) {
 // ================================
 // 🎮 SEND COMMAND (event delegation)
 // ================================
-async function sendCommand(bot_key, guild_id, action) {
+async function sendCommand(bot_key, guild_id, action, payload = null, options = {}) {
     if (controlCooldown) return;
     controlCooldown = true;
+    const { refresh = true } = options;
 
     try {
         const res = await fetch(`${API_BASE}/bots/control`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ bot_key, guild_id, action })
+            body: JSON.stringify({ bot_key, guild_id, action, payload })
         });
 
         if (handle401(res)) return;
 
+        const data = await res.json().catch(() => ({}));
+
         if (!res.ok) {
-            console.error("❌ Backend rejected request:", await res.text());
+            const detail = data.detail || "Unknown control error";
+            console.error("❌ Backend rejected request:", detail);
+            return { ok: false, error: detail, data };
         }
 
-        fetchDashboard();
+        if (refresh) fetchDashboard();
+        return { ok: true, data };
 
     } catch (err) {
         console.error("❌ Command failed:", err);
+        return { ok: false, error: String(err) };
     } finally {
         setTimeout(() => (controlCooldown = false), 500);
     }
@@ -288,7 +305,8 @@ document.addEventListener('click', (e) => {
     const action = btn.dataset.action;
     const bot = btn.dataset.bot;
     const guild = btn.dataset.guild || '0';
-    if (action && bot) sendCommand(bot, guild, action);
+    const payload = btn.dataset.payload || null;
+    if (action && bot) sendCommand(bot, guild, action, payload);
 });
 
 // ================================
@@ -296,14 +314,25 @@ document.addEventListener('click', (e) => {
 // ================================
 async function loadBotSelect() {
     const sel = document.getElementById('bot-select');
+    const controlSel = document.getElementById('control-bot-select');
     if (!sel) return;
     try {
         const res = await fetch(`${API_BASE}/bots`);
         if (handle401(res)) return;
         const data = await res.json();
-        sel.innerHTML = (data.bots || [])
+        const allBots = data.bots || [];
+        botCatalogState = allBots.filter(b => b.kind === 'music');
+        const inventoryOptionsHtml = allBots
             .map(b => `<option value="${b.key}">${b.display_name}</option>`)
             .join('');
+        const controlOptionsHtml = botCatalogState
+            .map(b => `<option value="${b.key}">${b.display_name}</option>`)
+            .join('');
+        sel.innerHTML = inventoryOptionsHtml;
+        if (controlSel) controlSel.innerHTML = controlOptionsHtml;
+        if (controlSel?.value) {
+            loadControlInventory(controlSel.value);
+        }
     } catch (err) {
         console.error("❌ Failed to load bot list:", err);
     }
@@ -322,6 +351,179 @@ async function loadInventory() {
     } catch (err) {
         out.textContent = `Error: ${err}`;
     }
+}
+
+function setControlStatus(message, isError = false) {
+    const status = document.getElementById('control-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('error', Boolean(isError));
+}
+
+function getDashboardSession(botKey, guildId) {
+    const guildKey = String(guildId);
+    for (const bot of dashboardBotsState) {
+        if (bot.key !== botKey || !Array.isArray(bot.sessions)) continue;
+        const session = bot.sessions.find(item => String(item.guild_id) === guildKey);
+        if (session) return session;
+    }
+    return null;
+}
+
+function getSelectedControlGuild() {
+    const guildId = document.getElementById('control-guild-select')?.value;
+    return controlInventoryState?.guilds?.find(guild => String(guild.id) === String(guildId)) || null;
+}
+
+function populateControlGuilds() {
+    const guildSel = document.getElementById('control-guild-select');
+    if (!guildSel) return;
+
+    const guilds = controlInventoryState?.guilds || [];
+    const previousValue = guildSel.value;
+    guildSel.innerHTML = guilds
+        .map(guild => `<option value="${guild.id}">${guild.name}</option>`)
+        .join('');
+
+    if (previousValue && guilds.some(guild => String(guild.id) === previousValue)) {
+        guildSel.value = previousValue;
+    }
+
+    populateControlChannels();
+}
+
+function populateControlChannels() {
+    const voiceSel = document.getElementById('control-voice-select');
+    const textSel = document.getElementById('control-text-select');
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guild = getSelectedControlGuild();
+    if (!voiceSel || !textSel) return;
+
+    const previousVoice = voiceSel.value;
+    const previousText = textSel.value;
+    const channels = guild?.channels || [];
+    const voiceChannels = channels.filter(channel => channel.type === 2 || channel.type === 13);
+    const textChannels = channels.filter(channel => channel.type === 0 || channel.type === 5);
+    const session = botKey && guild ? getDashboardSession(botKey, guild.id) : null;
+
+    voiceSel.innerHTML = voiceChannels.length
+        ? voiceChannels.map(channel => `<option value="${channel.id}">${channel.name}</option>`).join('')
+        : '<option value="">No voice channels found</option>';
+
+    textSel.innerHTML = [
+        '<option value="0">No text channel</option>',
+        ...textChannels.map(channel => `<option value="${channel.id}">${channel.name}</option>`),
+    ].join('');
+
+    if (previousVoice && voiceChannels.some(channel => String(channel.id) === previousVoice)) {
+        voiceSel.value = previousVoice;
+    } else if (session?.channel_id && voiceChannels.some(channel => String(channel.id) === String(session.channel_id))) {
+        voiceSel.value = String(session.channel_id);
+    }
+
+    if (previousText && (previousText === '0' || textChannels.some(channel => String(channel.id) === previousText))) {
+        textSel.value = previousText;
+    }
+
+    syncControlSelectionsFromDashboard();
+}
+
+function syncControlSelectionsFromDashboard() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const loopSel = document.getElementById('control-loop-select');
+    const voiceSel = document.getElementById('control-voice-select');
+    if (!botKey || !guildId) return;
+
+    const session = getDashboardSession(botKey, guildId);
+    if (loopSel && session?.loop_mode) {
+        loopSel.value = session.loop_mode;
+    }
+
+    if (voiceSel && session?.channel_id) {
+        const voiceOption = Array.from(voiceSel.options).find(option => option.value === String(session.channel_id));
+        if (voiceOption) voiceSel.value = String(session.channel_id);
+    }
+}
+
+async function loadControlInventory(botKey) {
+    const controlSel = document.getElementById('control-bot-select');
+    if (!botKey && controlSel) botKey = controlSel.value;
+    if (!botKey) return;
+
+    setControlStatus('Loading bot servers and channels...');
+    try {
+        const res = await fetch(`${API_BASE}/bots/${encodeURIComponent(botKey)}/inventory`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) {
+            setControlStatus(data.detail || 'Failed to load bot inventory.', true);
+            return;
+        }
+        controlInventoryState = data;
+        populateControlGuilds();
+        setControlStatus(`Loaded ${data.guilds?.length || 0} guilds for ${data.bot?.display_name || botKey}.`);
+    } catch (err) {
+        console.error("❌ Failed to load control inventory:", err);
+        setControlStatus(`Failed to load bot inventory: ${err}`, true);
+    }
+}
+
+async function queueFromPanel() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const voiceChannelId = document.getElementById('control-voice-select')?.value;
+    const textChannelId = document.getElementById('control-text-select')?.value || '0';
+    const sourceInput = document.getElementById('control-source-input');
+    const sourceUrl = sourceInput?.value?.trim();
+
+    if (!botKey || !guildId) {
+        setControlStatus('Select a bot and guild first.', true);
+        return;
+    }
+    if (!voiceChannelId) {
+        setControlStatus('Choose the voice channel that bot should use.', true);
+        return;
+    }
+    if (!sourceUrl) {
+        setControlStatus('Paste a track, playlist URL, livestream, or search text first.', true);
+        return;
+    }
+
+    setControlStatus('Sending play request to the selected bot...');
+    const result = await sendCommand(botKey, guildId, 'PLAY', {
+        source_url: sourceUrl,
+        voice_channel_id: voiceChannelId,
+        text_channel_id: textChannelId,
+    });
+
+    if (!result?.ok) {
+        setControlStatus(result?.error || 'Failed to queue media on the selected bot.', true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || 'Play request sent.');
+    if (sourceInput) sourceInput.value = '';
+}
+
+async function applyLoopModeFromPanel() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const loopMode = document.getElementById('control-loop-select')?.value || 'off';
+
+    if (!botKey || !guildId) {
+        setControlStatus('Select a bot and guild before changing loop mode.', true);
+        return;
+    }
+
+    setControlStatus('Applying loop mode...');
+    const result = await sendCommand(botKey, guildId, 'LOOP', loopMode);
+    if (!result?.ok) {
+        setControlStatus(result?.error || 'Failed to update loop mode.', true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || `Loop mode set to ${loopMode}.`);
 }
 
 // ================================
@@ -471,6 +673,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('load-inventory')
         ?.addEventListener('click', loadInventory);
+
+    document.getElementById('control-bot-select')
+        ?.addEventListener('change', (event) => loadControlInventory(event.target.value));
+
+    document.getElementById('control-guild-select')
+        ?.addEventListener('change', populateControlChannels);
+
+    document.getElementById('queue-from-panel')
+        ?.addEventListener('click', queueFromPanel);
+
+    document.getElementById('apply-loop-mode')
+        ?.addEventListener('click', applyLoopModeFromPanel);
 
     document.getElementById('refresh-db')
         ?.addEventListener('click', loadDbSchemas);

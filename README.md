@@ -3,6 +3,8 @@ Web control panel for all 8 music bots plus Aria.
 
 ## Features
 - Live dashboard across all bot nodes (track, guild/channel, filter, queue depth, heartbeat).
+- Direct bot controls from the panel to queue a track or playlist on a specific worker node.
+- Per-guild loop controls from the panel with `off`, `song`, and `queue` modes.
 - Bot explorer to view each bot's guilds and channels.
 - Database control section to truncate a specific table or all tables in a schema.
 - Session login protection for panel access.

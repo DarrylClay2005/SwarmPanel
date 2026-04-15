@@ -283,14 +283,16 @@ class BotControlRequest(BaseModel):
     bot_key: str
     guild_id: str | int
     action: str
-    payload: str | None = None
+    payload: Any | None = None
 
 @app.post("/api/bots/control")
 async def api_bot_control(request: Request, req: BotControlRequest):
     require_api_auth(request)
     try:
-        await db.control_bot(req.bot_key, req.guild_id, req.action, req.payload)
-        return {"ok": True}
+        result = await db.control_bot(req.bot_key, req.guild_id, req.action, req.payload)
+        return {"ok": True, **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -353,7 +355,7 @@ def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):
         raise HTTPException(403,"Unauthorized")
 
-VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","RESTART"}
+VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","PLAY","RESTART"}
 
 @app.on_event("startup")
 async def startup_tasks():

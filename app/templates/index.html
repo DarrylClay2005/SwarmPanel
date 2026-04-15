@@ -48,6 +48,7 @@
               <th>Status</th>
               <th>Track</th>
               <th>Filter</th>
+              <th>Loop</th>
               <th>Queue</th>
               <th>Position</th>
               <th>Actions</th>
@@ -56,6 +57,57 @@
           <tbody id="sessions-body"></tbody>
         </table>
       </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <h2>Direct Bot Controls</h2>
+      </div>
+      <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
+
+      <div class="direct-control-grid">
+        <label class="control-field">
+          <span>Bot</span>
+          <select id="control-bot-select"></select>
+        </label>
+
+        <label class="control-field">
+          <span>Guild</span>
+          <select id="control-guild-select"></select>
+        </label>
+
+        <label class="control-field">
+          <span>Voice Channel</span>
+          <select id="control-voice-select"></select>
+        </label>
+
+        <label class="control-field">
+          <span>Text Channel</span>
+          <select id="control-text-select"></select>
+        </label>
+      </div>
+
+      <label class="control-field control-field-wide">
+        <span>Track / Playlist URL</span>
+        <input id="control-source-input" type="text" placeholder="Paste a YouTube link, livestream, playlist URL, or search text" />
+      </label>
+
+      <div class="row">
+        <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
+
+        <label class="control-inline">
+          <span>Loop Mode</span>
+          <select id="control-loop-select">
+            <option value="off">Off</option>
+            <option value="song">Song</option>
+            <option value="queue">Queue</option>
+          </select>
+        </label>
+
+        <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
+      </div>
+
+      <div id="control-status" class="status"></div>
     </section>
 
     <section class="panel">
