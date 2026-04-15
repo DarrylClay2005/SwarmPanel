@@ -322,6 +322,16 @@ async def broadcast(data: dict):
     for ws in dead:
         active_connections.remove(ws)
 
+async def execute_bot_command(cmd: dict):
+    bot_key = cmd.get("bot_key")
+    guild_id = cmd.get("guild_id", "0")
+    action = cmd.get("action")
+    payload = cmd.get("payload")
+    if not bot_key or not action:
+        raise ValueError(f"Invalid command: {cmd}")
+    await db.control_bot(bot_key, guild_id, action, payload)
+    await broadcast({"type": "command_ack", "data": {"bot_key": bot_key, "action": action, "timestamp": str(time.time())}})
+
 async def command_worker():
     while True:
         cmd = await command_queue.get()

@@ -2,6 +2,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import aiomysql
 
@@ -12,6 +13,14 @@ from .config import Settings
 logger = logging.getLogger("swarm_panel")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
+YOUTUBE_HOSTS = {
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+    "www.youtu.be",
+}
 
 
 def _validate_identifier(value: str, field_name: str) -> str:
@@ -19,6 +28,43 @@ def _validate_identifier(value: str, field_name: str) -> str:
     if not IDENTIFIER_RE.fullmatch(value):
         raise ValueError(f"Invalid {field_name}: {value!r}")
     return value
+
+
+
+def _extract_youtube_video_id(video_url: str | None) -> str | None:
+    if not video_url:
+        return None
+
+    try:
+        parsed = urlparse(video_url.strip())
+    except Exception:
+        return None
+
+    host = (parsed.netloc or "").lower()
+    if host not in YOUTUBE_HOSTS:
+        return None
+
+    if host.endswith("youtu.be"):
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+        return video_id or None
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if parsed.path == "/watch":
+        video_id = parse_qs(parsed.query).get("v", [None])[0]
+        return video_id or None
+
+    if len(path_parts) >= 2 and path_parts[0] in {"shorts", "embed", "live"}:
+        return path_parts[1] or None
+
+    return None
+
+
+
+def _derive_thumbnail_url(video_url: str | None) -> str | None:
+    video_id = _extract_youtube_video_id(video_url)
+    if not video_id:
+        return None
+    return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
 class PanelDatabase:
@@ -210,6 +256,7 @@ class PanelDatabase:
                     "channel_id": playback.get("channel_id"),
                     "title": playback.get("title"),
                     "video_url": playback.get("video_url"),
+                    "thumbnail": _derive_thumbnail_url(playback.get("video_url")),
                     "position_seconds": int(playback.get("position_seconds") or 0),
                     "is_playing": is_playing,
                     "filter_mode": settings.get("filter_mode", "none"),
