@@ -1,4 +1,5 @@
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ discord_service = DiscordInventoryService()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 action_logger = logging.getLogger("swarm_panel.actions")
+background_tasks: list[asyncio.Task[Any]] = []
 
 
 class TruncateTableRequest(BaseModel):
@@ -38,6 +40,17 @@ class TruncateSchemaRequest(BaseModel):
     confirm_text: str
 
 
+def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
+    return {
+        "type": event_type,
+        "level": level,
+        "title": title,
+        "description": description,
+        "source": source,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
@@ -45,7 +58,27 @@ async def lifespan(_: FastAPI):
     except Exception as exc:
         logging.getLogger("swarm_panel").warning("Initial DB connection failed at startup: %s", exc)
     await discord_service.connect()
+    background_tasks.clear()
+    background_tasks.extend(
+        [
+            asyncio.create_task(command_worker(), name="swarm_panel_command_worker"),
+            asyncio.create_task(monitor_bots(), name="swarm_panel_monitor_bots"),
+        ]
+    )
+    recent_feed_events.append(
+        _feed_event(
+            "info",
+            "Event Feed Ready",
+            "SwarmPanel live event feed is online.",
+            source="system",
+        )
+    )
     yield
+    for task in background_tasks:
+        task.cancel()
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+    background_tasks.clear()
     await discord_service.close()
     await db.close()
 
@@ -292,8 +325,10 @@ async def api_bot_control(request: Request, req: BotControlRequest):
         result = await db.control_bot(req.bot_key, req.guild_id, req.action, req.payload)
         return {"ok": True, **result}
     except ValueError as e:
+        await push_feed_event("warning", "Invalid Bot Control", str(e), source="api")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        await push_feed_event("error", "Bot Control Failed", str(e), source="api")
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- WEBSOCKET + QUEUE + HEALTH ---
@@ -303,6 +338,7 @@ import asyncio, time, json, os
 active_connections=[]
 command_queue=asyncio.Queue()
 bot_health={}
+recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -324,6 +360,28 @@ async def broadcast(data: dict):
     for ws in dead:
         active_connections.remove(ws)
 
+
+async def push_feed_event(
+    level: str,
+    title: str,
+    description: str,
+    *,
+    source: str = "panel",
+    event_type: str = "feed_event",
+) -> dict[str, str]:
+    event = _feed_event(level, title, description, source=source, event_type=event_type)
+    recent_feed_events.append(event)
+    await broadcast(event)
+    return event
+
+
+@app.get("/api/events")
+async def list_events(request: Request, limit: int = 50):
+    require_api_auth(request)
+    bounded_limit = max(1, min(int(limit), 100))
+    events = list(recent_feed_events)[-bounded_limit:]
+    return {"events": events}
+
 async def execute_bot_command(cmd: dict):
     bot_key = cmd.get("bot_key")
     guild_id = cmd.get("guild_id", "0")
@@ -332,7 +390,13 @@ async def execute_bot_command(cmd: dict):
     if not bot_key or not action:
         raise ValueError(f"Invalid command: {cmd}")
     await db.control_bot(bot_key, guild_id, action, payload)
-    await broadcast({"type": "command_ack", "data": {"bot_key": bot_key, "action": action, "timestamp": str(time.time())}})
+    await push_feed_event(
+        "info",
+        "Command Acknowledged",
+        f"{action} accepted for bot {bot_key} in guild {guild_id}.",
+        source="worker",
+        event_type="command_ack",
+    )
 
 async def command_worker():
     while True:
@@ -340,7 +404,7 @@ async def command_worker():
         try:
             await execute_bot_command(cmd)
         except Exception as e:
-            await broadcast({"type":"error","data":{"title":"Command Error","description":str(e),"timestamp":str(time.time())}})
+            await push_feed_event("error", "Command Error", str(e), source="worker")
         command_queue.task_done()
 
 async def monitor_bots():
@@ -356,8 +420,3 @@ def verify_token(token: str = Header(None)):
         raise HTTPException(403,"Unauthorized")
 
 VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","PLAY","RESTART"}
-
-@app.on_event("startup")
-async def startup_tasks():
-    asyncio.create_task(command_worker())
-    asyncio.create_task(monitor_bots())

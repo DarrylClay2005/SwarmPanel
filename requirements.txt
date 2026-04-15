@@ -6,3 +6,4 @@ aiohttp
 aiomysql
 itsdangerous
 python-dotenv
+websockets

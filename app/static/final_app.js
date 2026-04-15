@@ -6,6 +6,11 @@ let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
 let controlInventoryState = null;
+let eventFeedEntries = [];
+let eventFeedSocket = null;
+let eventFeedReconnectTimer = null;
+let eventFeedConnectionState = 'offline';
+const MAX_EVENT_FEED_ENTRIES = 80;
 
 // ================================
 // 🔒 AUTH HELPER
@@ -330,6 +335,9 @@ async function loadBotSelect() {
             .join('');
         sel.innerHTML = inventoryOptionsHtml;
         if (controlSel) controlSel.innerHTML = controlOptionsHtml;
+        if (sel.value) {
+            loadInventory();
+        }
         if (controlSel?.value) {
             loadControlInventory(controlSel.value);
         }
@@ -347,10 +355,235 @@ async function loadInventory() {
         const res = await fetch(`${API_BASE}/bots/${sel.value}/inventory`);
         if (handle401(res)) return;
         const data = await res.json();
-        out.textContent = JSON.stringify(data, null, 2);
+        if (!res.ok) {
+            out.textContent = `Inventory load failed: ${data.detail || 'Unknown error'}`;
+            return;
+        }
+        out.textContent = formatInventoryOutput(data);
     } catch (err) {
         out.textContent = `Error: ${err}`;
     }
+}
+
+function formatInventoryOutput(data) {
+    const lines = [];
+    const botName = data.bot?.display_name || data.bot?.key || 'Unknown Bot';
+    const identity = data.identity || {};
+    const guilds = Array.isArray(data.guilds) ? [...data.guilds] : [];
+    const errors = Array.isArray(data.errors) ? data.errors : [];
+
+    lines.push(`Bot: ${botName}`);
+    if (identity.username) {
+        lines.push(`Identity: ${identity.username}${identity.global_name ? ` (${identity.global_name})` : ''} [${identity.id || 'unknown id'}]`);
+    } else {
+        lines.push('Identity: unavailable');
+    }
+    lines.push(`Guilds visible: ${guilds.length}`);
+
+    if (errors.length) {
+        lines.push('');
+        lines.push('API warnings:');
+        errors.forEach(error => lines.push(`- ${error}`));
+    }
+
+    if (!guilds.length) {
+        lines.push('');
+        lines.push('No guilds were returned for this bot.');
+        return lines.join('\n');
+    }
+
+    guilds
+        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
+        .forEach(guild => {
+            const channels = Array.isArray(guild.channels) ? [...guild.channels] : [];
+            const sortedChannels = channels.sort((a, b) => {
+                const typeCompare = String(a.type_name || '').localeCompare(String(b.type_name || ''));
+                return typeCompare || String(a.name || '').localeCompare(String(b.name || ''));
+            });
+
+            const textCount = sortedChannels.filter(channel => channel.type === 0 || channel.type === 5).length;
+            const voiceCount = sortedChannels.filter(channel => channel.type === 2 || channel.type === 13).length;
+
+            lines.push('');
+            lines.push(`${guild.name} (${guild.id})`);
+            lines.push(`  Text: ${textCount} | Voice/Stage: ${voiceCount} | Total Channels: ${sortedChannels.length}`);
+
+            if (guild.channels_error) {
+                lines.push(`  Channel lookup warning: ${guild.channels_error}`);
+            }
+
+            if (!sortedChannels.length) {
+                lines.push('  No channels returned.');
+                return;
+            }
+
+            sortedChannels.forEach(channel => {
+                const parentSuffix = channel.parent_id ? ` | parent ${channel.parent_id}` : '';
+                lines.push(`  - [${channel.type_name || channel.type}] ${channel.name} (${channel.id})${parentSuffix}`);
+            });
+        });
+
+    return lines.join('\n');
+}
+
+function normalizeEventFeedEntry(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+
+    if (payload.type === 'error' && payload.data) {
+        return {
+            type: 'feed_event',
+            level: 'error',
+            title: payload.data.title || 'Error',
+            description: payload.data.description || 'Unknown error',
+            timestamp: payload.data.timestamp || new Date().toISOString(),
+            source: 'worker',
+        };
+    }
+
+    if (payload.type === 'command_ack' && payload.data) {
+        return {
+            type: 'command_ack',
+            level: 'info',
+            title: 'Command Acknowledged',
+            description: `${payload.data.action || 'Command'} accepted for ${payload.data.bot_key || 'bot'} in guild ${payload.data.guild_id || 'unknown'}.`,
+            timestamp: payload.data.timestamp || new Date().toISOString(),
+            source: 'worker',
+        };
+    }
+
+    const title = payload.title || (payload.type === 'command_ack' ? 'Command Acknowledged' : 'Event');
+    const description = payload.description || '';
+    if (!title && !description) return null;
+
+    return {
+        type: payload.type || 'feed_event',
+        level: payload.level || 'info',
+        title,
+        description,
+        timestamp: payload.timestamp || new Date().toISOString(),
+        source: payload.source || 'panel',
+    };
+}
+
+function addEventFeedEntry(entry) {
+    const normalized = normalizeEventFeedEntry(entry);
+    if (!normalized) return;
+    eventFeedEntries.push(normalized);
+    if (eventFeedEntries.length > MAX_EVENT_FEED_ENTRIES) {
+        eventFeedEntries = eventFeedEntries.slice(-MAX_EVENT_FEED_ENTRIES);
+    }
+    renderEventFeed();
+}
+
+function renderEventFeed() {
+    const out = document.getElementById('error-feed');
+    if (!out) return;
+
+    const connectionLabel = {
+        connecting: 'connecting',
+        online: 'live',
+        offline: 'offline',
+    }[eventFeedConnectionState] || eventFeedConnectionState;
+
+    const header = `Feed: ${connectionLabel}`;
+    if (!eventFeedEntries.length) {
+        out.textContent = `${header}\n\nNo live events yet.`;
+        return;
+    }
+
+    const lines = eventFeedEntries
+        .slice()
+        .reverse()
+        .map(entry => {
+            const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '--:--:--';
+            const level = String(entry.level || 'info').toUpperCase();
+            const source = entry.source ? ` | ${entry.source}` : '';
+            const description = entry.description ? `\n${entry.description}` : '';
+            return `[${ts}] ${level}${source} :: ${entry.title}${description}`;
+        });
+
+    out.textContent = `${header}\n\n${lines.join('\n\n')}`;
+}
+
+async function loadEventFeedHistory() {
+    try {
+        const res = await fetch(`${API_BASE}/events?limit=${MAX_EVENT_FEED_ENTRIES}`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) {
+            eventFeedEntries = [{
+                level: 'error',
+                title: 'Event Feed Failed',
+                description: data.detail || 'Unable to load recent events.',
+                timestamp: new Date().toISOString(),
+                source: 'api',
+            }];
+            renderEventFeed();
+            return;
+        }
+
+        eventFeedEntries = (data.events || [])
+            .map(normalizeEventFeedEntry)
+            .filter(Boolean)
+            .slice(-MAX_EVENT_FEED_ENTRIES);
+        renderEventFeed();
+    } catch (err) {
+        eventFeedEntries = [{
+            level: 'error',
+            title: 'Event Feed Failed',
+            description: String(err),
+            timestamp: new Date().toISOString(),
+            source: 'client',
+        }];
+        renderEventFeed();
+    }
+}
+
+function connectEventFeed() {
+    if (eventFeedSocket && (eventFeedSocket.readyState === WebSocket.OPEN || eventFeedSocket.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+    if (eventFeedReconnectTimer) {
+        clearTimeout(eventFeedReconnectTimer);
+        eventFeedReconnectTimer = null;
+    }
+
+    eventFeedConnectionState = 'connecting';
+    renderEventFeed();
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    eventFeedSocket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+
+    eventFeedSocket.onopen = () => {
+        eventFeedConnectionState = 'online';
+        renderEventFeed();
+    };
+
+    eventFeedSocket.onmessage = (event) => {
+        try {
+            const payload = JSON.parse(event.data);
+            addEventFeedEntry(payload);
+        } catch (err) {
+            addEventFeedEntry({
+                level: 'warning',
+                title: 'Unreadable Feed Event',
+                description: String(err),
+                timestamp: new Date().toISOString(),
+                source: 'client',
+            });
+        }
+    };
+
+    eventFeedSocket.onerror = () => {
+        eventFeedConnectionState = 'offline';
+        renderEventFeed();
+    };
+
+    eventFeedSocket.onclose = () => {
+        eventFeedConnectionState = 'offline';
+        renderEventFeed();
+        eventFeedReconnectTimer = setTimeout(connectEventFeed, 3000);
+    };
 }
 
 function setControlStatus(message, isError = false) {
@@ -708,6 +941,8 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchDashboard();
     loadBotSelect();
     loadDbSchemas();
+    loadEventFeedHistory();
+    connectEventFeed();
 });
 
 // ================================
