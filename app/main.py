@@ -1,11 +1,15 @@
+import asyncio
+import json
 import logging
+import os
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -330,10 +334,6 @@ async def api_bot_control(request: Request, req: BotControlRequest):
     except Exception as e:
         await push_feed_event("error", "Bot Control Failed", str(e), source="api")
         raise HTTPException(status_code=500, detail=str(e))
-
-# --- WEBSOCKET + QUEUE + HEALTH ---
-from fastapi import WebSocket, WebSocketDisconnect, Header, HTTPException
-import asyncio, time, json, os
 
 active_connections=[]
 command_queue=asyncio.Queue()

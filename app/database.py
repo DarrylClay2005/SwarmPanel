@@ -467,8 +467,30 @@ class PanelDatabase:
                     result["message"] = f"Restart requested for {bot.display_name}."
 
                 elif action == "CLEAR":
+                    await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
+                    await cur.execute(
+                        f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                        (gid, bot_key, "STOP"),
+                    )
                     await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s", (gid,))
-                    result["message"] = f"Cleared the queue for guild {gid} on {bot.display_name}."
+                    try:
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` "
+                            "SET title = NULL, video_url = NULL, position_seconds = 0, is_playing = FALSE "
+                            "WHERE guild_id = %s",
+                            (gid,),
+                        )
+                    except Exception:
+                        try:
+                            await cur.execute(
+                                f"UPDATE `{schema}`.`{prefix}_playback_state` "
+                                "SET title = NULL, position_seconds = 0, is_playing = FALSE "
+                                "WHERE guild_id = %s",
+                                (gid,),
+                            )
+                        except Exception:
+                            pass
+                    result["message"] = f"Cleared the queue and current playback for guild {gid} on {bot.display_name}."
 
                 elif action == "LOOP":
                     mode = _normalize_loop_mode(payload)

@@ -151,6 +151,12 @@ function renderNowPlaying(sessions) {
                     <button class="np-btn np-btn-stop" data-action="STOP" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Stop">
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
                     </button>
+                    <button class="np-btn" data-action="SHUFFLE" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Shuffle queue">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+                    </button>
+                    <button class="np-btn np-btn-clear" data-action="CLEAR" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Clear queue and current track">
+                        <span class="np-btn-label">Clear</span>
+                    </button>
                 </div>
             </div>
         </div>`;
@@ -258,6 +264,8 @@ function renderSessions(sessions) {
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
                 <button class="tbl-btn" data-action="SKIP"   data-bot="${session.bot_key}" data-guild="${session.guild_id}">Skip</button>
                 <button class="tbl-btn tbl-btn-stop" data-action="STOP" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Stop</button>
+                <button class="tbl-btn" data-action="SHUFFLE" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Shuffle</button>
+                <button class="tbl-btn" data-action="CLEAR" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Clear Queue + Track</button>
                 <button class="tbl-btn" data-action="LOOP" data-payload="off" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Off</button>
                 <button class="tbl-btn" data-action="LOOP" data-payload="song" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Song</button>
                 <button class="tbl-btn" data-action="LOOP" data-payload="queue" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Queue</button>
@@ -311,6 +319,8 @@ document.addEventListener('click', (e) => {
     const bot = btn.dataset.bot;
     const guild = btn.dataset.guild || '0';
     const payload = btn.dataset.payload || null;
+    if (action === 'CLEAR' && !confirm('Clear the queue and stop the current track for this guild?')) return;
+    if (action === 'RESTART' && !confirm('Restart this bot node? Active playback may pause briefly.')) return;
     if (action && bot) sendCommand(bot, guild, action, payload);
 });
 
@@ -759,6 +769,55 @@ async function applyLoopModeFromPanel() {
     setControlStatus(result.data?.message || `Loop mode set to ${loopMode}.`);
 }
 
+function getDirectControlSelection(action) {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const needsGuild = action !== 'RESTART';
+
+    if (!botKey) {
+        setControlStatus('Select a bot first.', true);
+        return null;
+    }
+    if (needsGuild && !guildId) {
+        setControlStatus('Select a guild first.', true);
+        return null;
+    }
+
+    return { botKey, guildId: guildId || '0' };
+}
+
+async function sendPanelAction(action) {
+    const selection = getDirectControlSelection(action);
+    if (!selection) return;
+
+    if (action === 'CLEAR' && !confirm('Clear the queue and stop the current track for the selected guild?')) {
+        return;
+    }
+
+    if (action === 'RESTART' && !confirm('Restart the selected bot? Active playback may pause briefly.')) {
+        return;
+    }
+
+    const statusLabels = {
+        PAUSE: 'Sending pause command...',
+        RESUME: 'Sending resume command...',
+        SKIP: 'Sending skip command...',
+        STOP: 'Sending stop command...',
+        SHUFFLE: 'Shuffling the queue...',
+        CLEAR: 'Clearing the queue and current playback...',
+        RESTART: 'Requesting bot restart...',
+    };
+
+    setControlStatus(statusLabels[action] || 'Sending command...');
+    const result = await sendCommand(selection.botKey, selection.guildId, action);
+    if (!result?.ok) {
+        setControlStatus(result?.error || `Failed to run ${action}.`, true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || `${action} sent.`);
+}
+
 // ================================
 // 🗄️ DATABASE CONTROLS
 // ================================
@@ -918,6 +977,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('apply-loop-mode')
         ?.addEventListener('click', applyLoopModeFromPanel);
+
+    document.querySelectorAll('[data-panel-action]')
+        .forEach(button => button.addEventListener('click', () => sendPanelAction(button.dataset.panelAction)));
 
     document.getElementById('refresh-db')
         ?.addEventListener('click', loadDbSchemas);
