@@ -95,6 +95,9 @@ function renderNowPlaying(sessions) {
     container.innerHTML = playing.map(s => {
         const pos = formatDuration(s.position_seconds);
         const thumb = s.thumbnail || null;
+        const sourceBadge = s.media_source_label
+            ? `<span class="np-stat np-source np-source-${s.media_source || 'unknown'}">${s.media_source_label}</span>`
+            : '';
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
             melodic: '#fab387', nexus: '#f38ba8', rhythm: '#94e2d5',
@@ -134,6 +137,7 @@ function renderNowPlaying(sessions) {
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                         ${pos}
                     </span>
+                    ${sourceBadge}
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
                     ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${s.loop_mode}</span>` : ''}
                     ${s.queue_count > 0 ? `<span class="np-stat">+${s.queue_count} queued</span>` : ''}
@@ -254,7 +258,7 @@ function renderSessions(sessions) {
             <td>${session.guild_name || session.guild_id}</td>
             <td>${session.channel_name || "Unknown"}</td>
             <td>${session.is_playing ? "▶️ Playing" : "⏸️ Paused"}</td>
-            <td>${session.title || "—"}</td>
+            <td>${session.title || "—"}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}</td>
             <td>${session.filter_mode || "none"}</td>
             <td>${session.loop_mode || "off"}</td>
             <td>${session.queue_count || 0}</td>

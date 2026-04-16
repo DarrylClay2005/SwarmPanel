@@ -1,9 +1,12 @@
+import asyncio
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import aiohttp
 import aiomysql
 
 from .bots import BOT_INDEX, MUSIC_BOTS, BotDefinition
@@ -21,6 +24,9 @@ YOUTUBE_HOSTS = {
     "youtu.be",
     "www.youtu.be",
 }
+SOUNDCLOUD_HOST_SUFFIXES = ("soundcloud.com",)
+SOUNDCLOUD_HOSTS = {"snd.sc"}
+THUMBNAIL_CACHE_TTL_SECONDS = 60 * 60
 
 
 def _validate_identifier(value: str, field_name: str) -> str:
@@ -74,6 +80,42 @@ def _extract_youtube_video_id(video_url: str | None) -> str | None:
     return None
 
 
+def _is_soundcloud_url(video_url: str | None) -> bool:
+    if not video_url:
+        return False
+
+    try:
+        parsed = urlparse(video_url.strip())
+    except Exception:
+        return False
+
+    host = (parsed.netloc or "").lower()
+    return host in SOUNDCLOUD_HOSTS or host.endswith(SOUNDCLOUD_HOST_SUFFIXES)
+
+
+def _is_generic_url(video_url: str | None) -> bool:
+    if not video_url:
+        return False
+
+    try:
+        parsed = urlparse(video_url.strip())
+    except Exception:
+        return False
+
+    return bool(parsed.scheme and parsed.netloc)
+
+
+def _detect_media_source(video_url: str | None) -> dict[str, str]:
+    if _extract_youtube_video_id(video_url):
+        return {"key": "youtube", "label": "YouTube"}
+    if _is_soundcloud_url(video_url):
+        return {"key": "soundcloud", "label": "SoundCloud"}
+    if _is_generic_url(video_url):
+        return {"key": "link", "label": "Direct Link"}
+    if str(video_url or "").strip():
+        return {"key": "search", "label": "Search"}
+    return {"key": "unknown", "label": "Unknown"}
+
 
 def _derive_thumbnail_url(video_url: str | None) -> str | None:
     video_id = _extract_youtube_video_id(video_url)
@@ -86,26 +128,33 @@ class PanelDatabase:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.pool: aiomysql.Pool | None = None
+        self.http_session: aiohttp.ClientSession | None = None
+        self.thumbnail_cache: dict[str, tuple[float, str | None]] = {}
 
     async def connect(self) -> None:
-        if self.pool:
-            return
-        self.pool = await aiomysql.create_pool(
-            host=self.settings.db_host,
-            port=self.settings.db_port,
-            user=self.settings.db_user,
-            password=self.settings.db_password,
-            db=self.settings.db_default_schema,
-            autocommit=True,
-            minsize=1,
-            maxsize=10,
-        )
+        if not self.pool:
+            self.pool = await aiomysql.create_pool(
+                host=self.settings.db_host,
+                port=self.settings.db_port,
+                user=self.settings.db_user,
+                password=self.settings.db_password,
+                db=self.settings.db_default_schema,
+                autocommit=True,
+                minsize=1,
+                maxsize=10,
+            )
+        if not self.http_session:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self.http_session = aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
         if self.pool:
             self.pool.close()
             await self.pool.wait_closed()
             self.pool = None
+        if self.http_session:
+            await self.http_session.close()
+            self.http_session = None
 
     async def _fetchall(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
         if not self.pool:
@@ -132,6 +181,43 @@ class PanelDatabase:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
                 return cur.rowcount
+
+    async def _resolve_soundcloud_thumbnail(self, video_url: str | None) -> str | None:
+        if not _is_soundcloud_url(video_url):
+            return None
+
+        normalized_url = str(video_url or "").strip()
+        if not normalized_url:
+            return None
+
+        now = time.time()
+        cached = self.thumbnail_cache.get(normalized_url)
+        if cached and cached[0] > now:
+            return cached[1]
+
+        thumbnail: str | None = None
+        if self.http_session:
+            try:
+                async with self.http_session.get(
+                    "https://soundcloud.com/oembed",
+                    params={"format": "json", "url": normalized_url},
+                ) as resp:
+                    if resp.ok:
+                        payload = await resp.json()
+                        raw_thumbnail = payload.get("thumbnail_url")
+                        if raw_thumbnail:
+                            thumbnail = str(raw_thumbnail).strip() or None
+            except Exception:
+                thumbnail = None
+
+        self.thumbnail_cache[normalized_url] = (now + THUMBNAIL_CACHE_TTL_SECONDS, thumbnail)
+        return thumbnail
+
+    async def _get_thumbnail_url(self, video_url: str | None) -> str | None:
+        youtube_thumbnail = _derive_thumbnail_url(video_url)
+        if youtube_thumbnail:
+            return youtube_thumbnail
+        return await self._resolve_soundcloud_thumbnail(video_url)
 
     async def _table_exists(self, schema: str, table: str) -> bool:
         row = await self._fetchone(
@@ -258,10 +344,12 @@ class PanelDatabase:
         playback_map = {int(row["guild_id"]): row for row in playback_rows if row.get("guild_id") is not None}
         sessions = []
         active_playing_count = 0
+        sorted_guild_ids = sorted(known_guilds)
 
-        for guild_id in sorted(known_guilds):
+        for guild_id in sorted_guild_ids:
             playback = playback_map.get(guild_id, {})
             settings = filter_map.get(guild_id, {})
+            source_info = _detect_media_source(playback.get("video_url"))
             is_playing = bool(playback.get("is_playing"))
             if is_playing:
                 active_playing_count += 1
@@ -271,7 +359,9 @@ class PanelDatabase:
                     "channel_id": playback.get("channel_id"),
                     "title": playback.get("title"),
                     "video_url": playback.get("video_url"),
-                    "thumbnail": _derive_thumbnail_url(playback.get("video_url")),
+                    "media_source": source_info["key"],
+                    "media_source_label": source_info["label"],
+                    "thumbnail": None,
                     "position_seconds": int(playback.get("position_seconds") or 0),
                     "is_playing": is_playing,
                     "filter_mode": settings.get("filter_mode", "none"),
@@ -282,6 +372,13 @@ class PanelDatabase:
                     "channel_name": None,
                 }
             )
+
+        if sessions:
+            thumbnails = await asyncio.gather(
+                *(self._get_thumbnail_url(session.get("video_url")) for session in sessions)
+            )
+            for session, thumbnail in zip(sessions, thumbnails):
+                session["thumbnail"] = thumbnail
 
         heartbeat_age = None
         heartbeat_status = "unknown"
