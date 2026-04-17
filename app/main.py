@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import SESSION_AUTH_KEY, is_authenticated, require_api_auth, verify_credentials
-from .bots import ALL_BOTS, BOT_INDEX
+from .bots import ALL_BOTS, BOT_INDEX, MUSIC_BOTS
 from .config import load_settings
 from .database import PanelDatabase
 from .diagnostics import RuntimeDiagnosticsService
@@ -33,6 +33,8 @@ diagnostics_service = RuntimeDiagnosticsService(settings, discord_service)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 action_logger = logging.getLogger("swarm_panel.actions")
 background_tasks: list[asyncio.Task[Any]] = []
+VOICE_CHANNEL_TYPES = {2, 13}
+TEXT_CHANNEL_TYPES = {0, 5}
 
 
 class TruncateTableRequest(BaseModel):
@@ -55,6 +57,87 @@ def _feed_event(level: str, title: str, description: str, *, source: str = "pane
         "source": source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _coerce_control_int(value: Any, field_name: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {field_name}: {value!r}") from None
+
+
+def _normalize_control_action(value: str) -> str:
+    action = str(value or "").strip().upper()
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"Unsupported action: {value}")
+    return action
+
+
+async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str, str, Any | None]:
+    action = _normalize_control_action(req.action)
+
+    if action == "RESTART":
+        return action, "0", req.payload
+
+    guild_id = _coerce_control_int(req.guild_id, "guild_id")
+    normalized_payload = req.payload
+
+    if action not in {"PLAY", "SET_HOME"}:
+        return action, str(guild_id), normalized_payload
+
+    bot = BOT_INDEX.get(req.bot_key)
+    if not bot:
+        raise ValueError("Unknown bot key")
+
+    token = settings.bot_tokens.get(req.bot_key, "").strip()
+    if not token:
+        raise ValueError(f"Missing Discord token for {bot.display_name}; cannot validate the selected guild/channel route.")
+
+    if not isinstance(req.payload, dict):
+        expected = "source_url and voice_channel_id" if action == "PLAY" else "voice_channel_id"
+        raise ValueError(f"{action} payload must be an object with {expected}")
+
+    try:
+        guild = await discord_service.fetch_guild(token, guild_id)
+        channels = await discord_service.fetch_guild_channels(token, guild_id)
+    except Exception as exc:
+        raise ValueError(f"{bot.display_name} cannot validate guild {guild_id} via Discord: {exc}") from exc
+
+    channel_map = {int(channel["id"]): channel for channel in channels}
+    voice_channel_id = _coerce_control_int(req.payload.get("voice_channel_id"), "voice_channel_id")
+    voice_channel = channel_map.get(voice_channel_id)
+    if not voice_channel or int(voice_channel.get("type", -1)) not in VOICE_CHANNEL_TYPES:
+        guild_name = guild.get("name") or f"Guild {guild_id}"
+        raise ValueError(
+            f"Voice channel {voice_channel_id} is not a voice/stage channel visible to {bot.display_name} in {guild_name}."
+        )
+
+    normalized_payload = dict(req.payload)
+    normalized_payload["voice_channel_id"] = voice_channel_id
+
+    if action == "PLAY":
+        source_url = str(req.payload.get("source_url") or req.payload.get("query") or "").strip()
+        if not source_url:
+            raise ValueError("Missing source_url for PLAY action")
+
+        text_channel_raw = req.payload.get("text_channel_id")
+        text_channel_id = 0
+        if text_channel_raw not in (None, "", 0, "0"):
+            text_channel_id = _coerce_control_int(text_channel_raw, "text_channel_id")
+            text_channel = channel_map.get(text_channel_id)
+            if not text_channel or int(text_channel.get("type", -1)) not in TEXT_CHANNEL_TYPES:
+                guild_name = guild.get("name") or f"Guild {guild_id}"
+                raise ValueError(
+                    f"Text channel {text_channel_id} is not a text/announcement channel visible to {bot.display_name} in {guild_name}."
+                )
+
+        normalized_payload = {
+            "source_url": source_url,
+            "voice_channel_id": voice_channel_id,
+            "text_channel_id": text_channel_id,
+        }
+
+    return action, str(guild_id), normalized_payload
 
 
 @asynccontextmanager
@@ -264,6 +347,146 @@ async def bot_inventory(request: Request, bot_key: str, include_channels: bool =
     }
 
 
+def _control_state_error_payload(bot_key: str, display_name: str, guild_id: int, message: str) -> dict[str, Any]:
+    return {
+        "key": bot_key,
+        "display_name": display_name,
+        "guild_id": str(guild_id),
+        "db": {
+            "status": "error",
+            "reachable": False,
+            "message": message,
+        },
+        "discord": {
+            "status": "unknown",
+            "reachable": False,
+            "message": "Discord state was not resolved because the live control query failed.",
+            "token_configured": bool(settings.bot_tokens.get(bot_key)),
+        },
+        "session": {
+            "guild_id": str(guild_id),
+            "guild_name": None,
+            "channel_id": None,
+            "channel_name": None,
+            "title": None,
+            "video_url": None,
+            "position_seconds": 0,
+            "is_playing": False,
+            "session_state": "idle",
+            "session_state_label": "Idle",
+            "volume": 100,
+            "loop_mode": "queue",
+            "filter_mode": "none",
+            "transition_mode": "off",
+            "custom_speed": 1.0,
+            "custom_pitch": 1.0,
+            "custom_modifiers_left": 0,
+            "dj_only_mode": False,
+            "stay_in_vc": False,
+            "queue_count": 0,
+            "backup_queue_count": 0,
+            "backup_restore_ready": False,
+            "pending_direct_orders": 0,
+            "latest_direct_order": None,
+            "home_channel_id": None,
+            "home_channel_name": None,
+            "feedback_channel_id": None,
+            "feedback_channel_name": None,
+        },
+    }
+
+
+async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> dict[str, Any]:
+    bot_key = control_state["key"]
+    guild_id = int(control_state["guild_id"])
+    token = settings.bot_tokens.get(bot_key, "").strip()
+    session = control_state.get("session", {})
+
+    if not token:
+        control_state["discord"] = {
+            "status": "missing",
+            "reachable": False,
+            "message": "Panel token is not configured for Discord inventory access.",
+            "token_configured": False,
+        }
+        return control_state
+
+    try:
+        guild = await discord_service.fetch_guild(token, guild_id)
+        placements = [(guild_id, None)]
+        for channel_id in (
+            session.get("channel_id"),
+            session.get("home_channel_id"),
+            session.get("feedback_channel_id"),
+        ):
+            if channel_id:
+                placements.append((guild_id, int(channel_id)))
+
+        name_map = await discord_service.resolve_guild_channel_names(token, placements)
+        guild_meta = name_map.get((guild_id, None), {})
+        session["guild_name"] = guild_meta.get("guild_name") or guild.get("name") or f"Guild {guild_id}"
+
+        if session.get("channel_id"):
+            session["channel_name"] = (name_map.get((guild_id, int(session["channel_id"]))) or {}).get("channel_name")
+        if session.get("home_channel_id"):
+            session["home_channel_name"] = (name_map.get((guild_id, int(session["home_channel_id"]))) or {}).get("channel_name")
+        if session.get("feedback_channel_id"):
+            session["feedback_channel_name"] = (name_map.get((guild_id, int(session["feedback_channel_id"]))) or {}).get("channel_name")
+
+        control_state["discord"] = {
+            "status": "online",
+            "reachable": True,
+            "message": f"Live Discord route is valid in {session['guild_name']}.",
+            "token_configured": True,
+        }
+    except Exception as exc:
+        control_state["discord"] = {
+            "status": "error",
+            "reachable": False,
+            "message": str(exc)[:240],
+            "token_configured": True,
+        }
+
+    return control_state
+
+
+@app.get("/api/bots/{bot_key}/control-state")
+async def bot_control_state(request: Request, bot_key: str, guild_id: int):
+    require_api_auth(request)
+    bot = BOT_INDEX.get(bot_key)
+    if not bot or bot.kind != "music":
+        raise HTTPException(status_code=404, detail="Unknown music bot key")
+
+    try:
+        state = await db.get_bot_control_state(bot_key, guild_id)
+        return await _enrich_control_state_with_discord(state)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        action_logger.exception("Failed building control state bot=%s guild=%s: %s", bot_key, guild_id, exc)
+        raise HTTPException(status_code=503, detail=f"Control state unavailable: {exc}")
+
+
+@app.get("/api/guilds/{guild_id}/control-matrix")
+async def guild_control_matrix(request: Request, guild_id: int):
+    require_api_auth(request)
+
+    async def collect(bot) -> dict[str, Any]:
+        try:
+            state = await db.get_bot_control_state(bot.key, guild_id)
+            return await _enrich_control_state_with_discord(state)
+        except Exception as exc:
+            action_logger.warning("Failed control matrix snapshot bot=%s guild=%s: %s", bot.key, guild_id, exc)
+            return _control_state_error_payload(bot.key, bot.display_name, guild_id, str(exc))
+
+    bots = await asyncio.gather(*(collect(bot) for bot in MUSIC_BOTS))
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "guild_id": str(guild_id),
+        "bots": bots,
+    }
+
+
 @app.get("/api/databases")
 async def databases(request: Request, include_tables: bool = False):
     require_api_auth(request)
@@ -354,11 +577,12 @@ class BotControlRequest(BaseModel):
 async def api_bot_control(request: Request, req: BotControlRequest):
     require_api_auth(request)
     try:
-        result = await db.control_bot(req.bot_key, req.guild_id, req.action, req.payload)
+        action, guild_id, payload = await _normalize_bot_control_request(req)
+        result = await db.control_bot(req.bot_key, guild_id, action, payload)
         await push_feed_event(
             "info",
             "Bot Control Accepted",
-            result.get("message") or f"{req.action} accepted for {req.bot_key} in guild {req.guild_id}.",
+            result.get("message") or f"{action} accepted for {req.bot_key} in guild {guild_id}.",
             source="api",
             event_type="command_ack",
         )
@@ -418,17 +642,16 @@ async def list_events(request: Request, limit: int = 50):
     return {"events": events}
 
 async def execute_bot_command(cmd: dict):
-    bot_key = cmd.get("bot_key")
-    guild_id = cmd.get("guild_id", "0")
-    action = cmd.get("action")
-    payload = cmd.get("payload")
-    if not bot_key or not action:
+    if not cmd.get("bot_key") or not cmd.get("action"):
         raise ValueError(f"Invalid command: {cmd}")
-    await db.control_bot(bot_key, guild_id, action, payload)
+
+    req = BotControlRequest(**{"guild_id": "0", **cmd})
+    action, guild_id, payload = await _normalize_bot_control_request(req)
+    await db.control_bot(req.bot_key, guild_id, action, payload)
     await push_feed_event(
         "info",
         "Command Acknowledged",
-        f"{action} accepted for bot {bot_key} in guild {guild_id}.",
+        f"{action} accepted for bot {req.bot_key} in guild {guild_id}.",
         source="worker",
         event_type="command_ack",
     )

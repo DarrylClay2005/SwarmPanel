@@ -6,12 +6,18 @@ let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
 let controlInventoryState = null;
+let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
+let controlInventoryLoading = false;
+let controlInventoryRequestId = 0;
+let controlMatrixRequestId = 0;
 let eventFeedEntries = [];
 let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
 let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
+let controlRefreshTimer = null;
 const MAX_EVENT_FEED_ENTRIES = 80;
+const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
 
 // ================================
 // 🔒 AUTH HELPER
@@ -93,6 +99,108 @@ function selectedOptionText(selectId) {
     return select.options[select.selectedIndex]?.text || '';
 }
 
+function clearControlMatrixState(guildId = null) {
+    controlMatrixState = { guildId: guildId ? String(guildId) : null, bots: [], loaded: false, generatedAt: null };
+}
+
+function getLiveControlBot(botKey, guildId = null) {
+    const selectedGuildId = guildId ?? document.getElementById('control-guild-select')?.value;
+    if (!botKey || !selectedGuildId) return null;
+    if (!controlMatrixState.loaded || String(controlMatrixState.guildId) !== String(selectedGuildId)) return null;
+    return controlMatrixState.bots.find(bot => bot.key === botKey) || null;
+}
+
+function getBestControlSession(botKey, guildId = null) {
+    const liveBot = getLiveControlBot(botKey, guildId);
+    if (liveBot?.session) return liveBot.session;
+    return getDashboardSession(botKey, guildId);
+}
+
+function getControlBotStatus(botKey, guildId = null) {
+    const dashboardBot = getDashboardBot(botKey);
+    if (dashboardBot) return describeBotStatus(dashboardBot.status);
+
+    const heartbeatStatus = String(getLiveControlBot(botKey, guildId)?.heartbeat?.status || '').toLowerCase();
+    if (heartbeatStatus === 'online') return describeBotStatus('online');
+    if (heartbeatStatus === 'stale') return describeBotStatus('stale');
+    if (heartbeatStatus === 'offline' || heartbeatStatus === 'error') return describeBotStatus('offline');
+    return describeBotStatus('unknown');
+}
+
+function getControlHeartbeatAge(botKey, guildId = null) {
+    const liveBot = getLiveControlBot(botKey, guildId);
+    if (liveBot?.heartbeat?.age_seconds !== undefined && liveBot?.heartbeat?.age_seconds !== null) {
+        return liveBot.heartbeat.age_seconds;
+    }
+    return getDashboardBot(botKey)?.heartbeat_age_seconds;
+}
+
+function normalizeLoopMode(value) {
+    const normalized = String(value || '').toLowerCase();
+    return ['off', 'song', 'queue'].includes(normalized) ? normalized : 'queue';
+}
+
+function describeSessionState(session) {
+    const normalized = String(session?.session_state || '').toLowerCase();
+    if (normalized === 'playing') return { key: 'playing', label: session?.session_state_label || 'Playing', icon: '▶️' };
+    if (normalized === 'paused') return { key: 'paused', label: session?.session_state_label || 'Paused', icon: '⏸️' };
+    if (normalized === 'queued') return { key: 'queued', label: session?.session_state_label || 'Queued', icon: '📥' };
+    if (normalized === 'configured') return { key: 'configured', label: session?.session_state_label || 'Configured', icon: '🛰️' };
+    return { key: 'idle', label: session?.session_state_label || 'Idle', icon: '•' };
+}
+
+function isRuntimeSession(session) {
+    return RUNTIME_SESSION_STATES.has(describeSessionState(session).key);
+}
+
+function getSessionChannelLabel(session) {
+    if (session?.channel_name) return session.channel_name;
+    const state = describeSessionState(session).key;
+    if (state === 'queued') return 'Pending voice join';
+    if (session?.home_channel_name) return session.home_channel_name;
+    if (session?.home_channel_id) return `Home ${session.home_channel_id}`;
+    return 'Unknown';
+}
+
+function setDirectControlsDisabled(disabled) {
+    [
+        'control-guild-select',
+        'control-voice-select',
+        'control-loop-select',
+        'control-filter-select',
+        'control-source-input',
+        'queue-from-panel',
+        'apply-loop-mode',
+        'apply-filter-mode',
+        'set-home-channel',
+    ].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = disabled;
+    });
+
+    document.querySelectorAll('[data-panel-action]').forEach(button => {
+        button.disabled = disabled;
+    });
+}
+
+function resetControlInventorySelectors(message = 'Loading guilds...') {
+    const guildSel = document.getElementById('control-guild-select');
+    const voiceSel = document.getElementById('control-voice-select');
+
+    if (guildSel) guildSel.innerHTML = `<option value="">${escapeHtml(message)}</option>`;
+    if (voiceSel) voiceSel.innerHTML = '<option value="">No voice channels loaded</option>';
+}
+
+function scheduleDashboardRefresh(delayMs = 1500) {
+    if (controlRefreshTimer) {
+        clearTimeout(controlRefreshTimer);
+    }
+    controlRefreshTimer = setTimeout(() => {
+        controlRefreshTimer = null;
+        fetchDashboard();
+    }, delayMs);
+}
+
 function renderOverview(bots, generatedAt = null) {
     const container = document.getElementById('overview-stats');
     const timestamp = document.getElementById('overview-generated');
@@ -107,6 +215,7 @@ function renderOverview(bots, generatedAt = null) {
 
     workerBots.forEach(bot => {
         (bot.sessions || []).forEach(session => {
+            if (!isRuntimeSession(session)) return;
             if (session.guild_id !== null && session.guild_id !== undefined) {
                 activeGuilds.add(String(session.guild_id));
             }
@@ -189,13 +298,16 @@ async function fetchDashboard() {
             }
         });
 
-        renderSessions(allSessions);
+        renderSessions(allSessions.filter(session => isRuntimeSession(session)));
         renderNowPlaying(allSessions);
         syncControlSelectionsFromDashboard();
         renderControlContext();
         renderAriaCommandGuide();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
+        if (document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+            fetchControlMatrix({ silent: true });
+        }
 
         const meta = document.getElementById('dashboard-meta');
         if (meta && data.generated_at) {
@@ -224,6 +336,10 @@ async function fetchDiagnostics(force = false) {
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
     } catch (err) {
+        systemDiagnosticsState = null;
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
         console.error('❌ Diagnostics fetch failed:', err);
     }
 }
@@ -577,16 +693,24 @@ function renderSessions(sessions) {
 
     table.innerHTML = "";
 
+    if (!sessions.length) {
+        table.innerHTML = '<tr><td colspan="10">No live or queued worker sessions right now.</td></tr>';
+        return;
+    }
+
     sessions.forEach(session => {
+        const stateMeta = describeSessionState(session);
+        const channelLabel = getSessionChannelLabel(session);
+        const trackLabel = session.title || (stateMeta.key === 'queued' ? 'Queued media awaiting worker pickup' : '—');
         const row = document.createElement("tr");
         row.innerHTML = `
             <td>${session.bot_display}</td>
             <td>${session.guild_name || session.guild_id}</td>
-            <td>${session.channel_name || "Unknown"}</td>
-            <td>${session.is_playing ? "▶️ Playing" : "⏸️ Paused"}</td>
-            <td>${session.title || "—"}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}</td>
+            <td>${channelLabel}</td>
+            <td>${stateMeta.icon} ${stateMeta.label}</td>
+            <td>${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}</td>
             <td>${session.filter_mode || "none"}</td>
-            <td>${session.loop_mode || "off"}</td>
+            <td>${normalizeLoopMode(session.loop_mode)}</td>
             <td>${session.queue_count || 0}</td>
             <td>${formatDuration(session.position_seconds)}</td>
             <td>
@@ -960,6 +1084,13 @@ function populateControlGuilds() {
 
     const guilds = controlInventoryState?.guilds || [];
     const previousValue = guildSel.value;
+
+    if (!guilds.length) {
+        resetControlInventorySelectors(controlInventoryLoading ? 'Loading guilds...' : 'No guilds found');
+        populateControlChannels();
+        return;
+    }
+
     guildSel.innerHTML = guilds
         .map(guild => `<option value="${guild.id}">${guild.name}</option>`)
         .join('');
@@ -973,26 +1104,18 @@ function populateControlGuilds() {
 
 function populateControlChannels() {
     const voiceSel = document.getElementById('control-voice-select');
-    const textSel = document.getElementById('control-text-select');
     const botKey = document.getElementById('control-bot-select')?.value;
     const guild = getSelectedControlGuild();
-    if (!voiceSel || !textSel) return;
+    if (!voiceSel) return;
 
     const previousVoice = voiceSel.value;
-    const previousText = textSel.value;
     const channels = guild?.channels || [];
     const voiceChannels = channels.filter(channel => channel.type === 2 || channel.type === 13);
-    const textChannels = channels.filter(channel => channel.type === 0 || channel.type === 5);
-    const session = botKey && guild ? getDashboardSession(botKey, guild.id) : null;
+    const session = botKey && guild ? getBestControlSession(botKey, guild.id) : null;
 
     voiceSel.innerHTML = voiceChannels.length
         ? voiceChannels.map(channel => `<option value="${channel.id}">${channel.name}</option>`).join('')
         : '<option value="">No voice channels found</option>';
-
-    textSel.innerHTML = [
-        '<option value="0">No text channel</option>',
-        ...textChannels.map(channel => `<option value="${channel.id}">${channel.name}</option>`),
-    ].join('');
 
     if (previousVoice && voiceChannels.some(channel => String(channel.id) === previousVoice)) {
         voiceSel.value = previousVoice;
@@ -1000,10 +1123,6 @@ function populateControlChannels() {
         voiceSel.value = String(session.channel_id);
     } else if (session?.home_channel_id && voiceChannels.some(channel => String(channel.id) === String(session.home_channel_id))) {
         voiceSel.value = String(session.home_channel_id);
-    }
-
-    if (previousText && (previousText === '0' || textChannels.some(channel => String(channel.id) === previousText))) {
-        textSel.value = previousText;
     }
 
     syncControlSelectionsFromDashboard();
@@ -1017,9 +1136,9 @@ function syncControlSelectionsFromDashboard() {
     const voiceSel = document.getElementById('control-voice-select');
     if (!botKey || !guildId) return;
 
-    const session = getDashboardSession(botKey, guildId);
-    if (loopSel && session?.loop_mode) {
-        loopSel.value = session.loop_mode;
+    const session = getBestControlSession(botKey, guildId);
+    if (loopSel) {
+        loopSel.value = normalizeLoopMode(session?.loop_mode);
     }
     if (filterSel && session?.filter_mode) {
         filterSel.value = session.filter_mode;
@@ -1040,20 +1159,162 @@ function getDiagnosticsBot(botKey) {
     return systemDiagnosticsState?.bots?.find(bot => bot.key === botKey) || null;
 }
 
+function getDashboardBot(botKey) {
+    return dashboardBotsState.find(bot => bot.key === botKey) || null;
+}
+
+function getCatalogBot(botKey) {
+    return botCatalogState.find(bot => bot.key === botKey) || null;
+}
+
+function deriveBotDbAccess(botKey) {
+    const liveBot = getLiveControlBot(botKey);
+    if (liveBot?.db) {
+        return { ...liveBot.db, source: 'control-matrix' };
+    }
+
+    const diagnostics = getDiagnosticsBot(botKey);
+    if (diagnostics?.db) {
+        return { ...diagnostics.db, source: 'diagnostics' };
+    }
+
+    const bot = getDashboardBot(botKey);
+    if (bot) {
+        if (bot.status === 'db-unavailable' || bot.status === 'error') {
+            return {
+                status: 'error',
+                reachable: false,
+                message: bot.error || 'Dashboard could not query this bot schema.',
+                source: 'dashboard',
+            };
+        }
+
+        return {
+            status: 'online',
+            reachable: true,
+            message: 'Dashboard is receiving live database state for this bot.',
+            source: 'dashboard',
+        };
+    }
+
+    return {
+        status: 'unknown',
+        reachable: false,
+        message: 'No database diagnostics or dashboard snapshot are available yet.',
+        source: 'unknown',
+    };
+}
+
+function deriveBotDiscordAccess(botKey) {
+    const liveBot = getLiveControlBot(botKey);
+    if (liveBot?.discord) {
+        return { ...liveBot.discord, source: 'control-matrix' };
+    }
+
+    const diagnostics = getDiagnosticsBot(botKey);
+    if (diagnostics?.discord) {
+        return { ...diagnostics.discord, source: 'diagnostics' };
+    }
+
+    if (controlInventoryState?.loaded && controlInventoryState?.bot?.key === botKey && Array.isArray(controlInventoryState.guilds)) {
+        const guildCount = controlInventoryState.guilds.length;
+        return {
+            status: 'online',
+            reachable: true,
+            message: `Live Discord inventory is loaded for ${guildCount} guild${guildCount === 1 ? '' : 's'}.`,
+            source: 'inventory',
+        };
+    }
+
+    const bot = getDashboardBot(botKey);
+    if (bot?.discord?.identity) {
+        const identity = bot.discord.identity;
+        const label = identity.username || identity.global_name || identity.id || bot.display_name || botKey;
+        return {
+            status: 'online',
+            reachable: true,
+            message: `Dashboard resolved Discord identity as ${label}.`,
+            source: 'dashboard',
+        };
+    }
+
+    if (bot?.discord?.error) {
+        return {
+            status: 'error',
+            reachable: false,
+            message: bot.discord.error,
+            source: 'dashboard',
+        };
+    }
+
+    const catalogBot = getCatalogBot(botKey);
+    const tokenConfigured = bot?.discord?.token_configured ?? catalogBot?.token_configured;
+    if (tokenConfigured === false) {
+        return {
+            status: 'missing',
+            reachable: false,
+            message: 'Panel token is not configured for Discord inventory access.',
+            source: 'catalog',
+        };
+    }
+    if (tokenConfigured === true) {
+        return {
+            status: 'online',
+            reachable: true,
+            message: 'Panel token is configured for Discord inventory access.',
+            source: 'catalog',
+        };
+    }
+
+    return {
+        status: 'unknown',
+        reachable: false,
+        message: 'No Discord diagnostics or inventory state are available yet.',
+        source: 'unknown',
+    };
+}
+
+function formatAccessLabel(access, okLabel = 'ready') {
+    if (access?.reachable) return okLabel;
+    const status = String(access?.status || 'unknown').toLowerCase();
+    if (status === 'missing') return 'missing';
+    if (status === 'error') return 'error';
+    return 'unknown';
+}
+
 function renderControlContext() {
     const container = document.getElementById('control-context-card');
     if (!container) return;
 
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
-    const bot = dashboardBotsState.find(item => item.key === botKey) || null;
-    const session = botKey && guildId ? getDashboardSession(botKey, guildId) : null;
-    const diagnostics = getDiagnosticsBot(botKey);
-    const statusMeta = describeBotStatus(bot?.status);
-    const guildName = selectedOptionText('control-guild-select') || 'No guild selected';
-    const voiceName = selectedOptionText('control-voice-select') || 'No voice channel selected';
-    const textName = selectedOptionText('control-text-select') || 'No text channel selected';
+    const bot = getDashboardBot(botKey) || getLiveControlBot(botKey, guildId) || null;
+    const session = botKey && guildId ? getBestControlSession(botKey, guildId) : null;
+    const dbAccess = deriveBotDbAccess(botKey);
+    const discordAccess = deriveBotDiscordAccess(botKey);
+    const selectedGuild = getSelectedControlGuild();
+    const statusMeta = getControlBotStatus(botKey, guildId);
+    const sessionState = describeSessionState(session);
+    const liveMatrixReady = Boolean(controlMatrixState.loaded && String(controlMatrixState.guildId) === String(guildId || ''));
+    const guildName = session?.guild_name || selectedOptionText('control-guild-select') || 'No guild selected';
+    const voiceName = session?.channel_name || selectedOptionText('control-voice-select') || 'No voice channel selected';
     const homeName = session?.home_channel_name || (session?.home_channel_id ? `Home channel ${session.home_channel_id}` : 'Not set');
+    const feedbackName = session?.feedback_channel_name || (session?.feedback_channel_id ? `Feedback ${session.feedback_channel_id}` : 'Not set');
+    const backupQueueCount = Number(session?.backup_queue_count || 0);
+    const pendingOrders = Number(session?.pending_direct_orders || 0);
+    const heartbeatAge = getControlHeartbeatAge(botKey, guildId);
+    const trackLabel = session?.title
+        || (sessionState.key === 'queued'
+            ? 'Queued media is waiting for the worker to pick it up.'
+            : session?.backup_restore_ready
+                ? 'Idle right now, but the backup queue is armed for auto-restore.'
+            : sessionState.key === 'configured'
+                ? 'This bot is configured for the guild but not actively playing.'
+                : selectedGuild && dbAccess.reachable
+                    ? 'No live playback record yet, but direct controls are ready for this bot and guild.'
+                : controlInventoryLoading
+                    ? 'Syncing guild/channel inventory for the selected bot.'
+                    : 'Idle. No live playback in the selected guild.');
 
     if (!botKey) {
         container.innerHTML = `
@@ -1072,17 +1333,21 @@ function renderControlContext() {
             </div>
             <span class="control-context-status control-context-status-${statusMeta.tone}">${escapeHtml(statusMeta.label)}</span>
         </div>
-        <div class="control-context-track">${escapeHtml(session?.title || 'Idle. No live playback in the selected guild.')}</div>
+        <div class="control-context-track">${escapeHtml(trackLabel)}</div>
         <div class="control-context-meta">
-            <span>Voice: ${escapeHtml(session?.channel_name || voiceName)}</span>
+            <span>State: ${escapeHtml(sessionState.label)}</span>
+            <span>Voice: ${escapeHtml(voiceName)}</span>
             <span>Home: ${escapeHtml(homeName)}</span>
-            <span>Text: ${escapeHtml(textName)}</span>
+            <span>Feedback: ${escapeHtml(feedbackName)}</span>
             <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
-            <span>Loop: ${escapeHtml(session?.loop_mode || 'off')}</span>
+            <span>Backup: ${escapeHtml(String(backupQueueCount))}</span>
+            <span>Pending orders: ${escapeHtml(String(pendingOrders))}</span>
+            <span>Loop: ${escapeHtml(normalizeLoopMode(session?.loop_mode))}</span>
             <span>Filter: ${escapeHtml(session?.filter_mode || 'none')}</span>
-            <span>Heartbeat: ${escapeHtml(formatHeartbeatAge(bot?.heartbeat_age_seconds))}</span>
-            <span>DB link: ${escapeHtml(diagnostics?.db?.reachable ? 'ready' : 'blocked')}</span>
-            <span>Discord inventory: ${escapeHtml(diagnostics?.discord?.reachable ? 'ready' : 'blocked')}</span>
+            <span>Heartbeat: ${escapeHtml(formatHeartbeatAge(heartbeatAge))}</span>
+            <span>DB link: ${escapeHtml(formatAccessLabel(dbAccess))}</span>
+            <span>Discord inventory: ${escapeHtml(formatAccessLabel(discordAccess))}</span>
+            <span>Live sync: ${escapeHtml(liveMatrixReady ? 'connected' : 'fallback')}</span>
         </div>
     `;
 }
@@ -1119,24 +1384,94 @@ function renderSelectedBotCapabilities() {
         return;
     }
 
-    const bot = dashboardBotsState.find(item => item.key === botKey) || null;
-    const diagnostics = getDiagnosticsBot(botKey);
-    const session = guildId ? getDashboardSession(botKey, guildId) : null;
-    const dbReady = Boolean(diagnostics?.db?.reachable);
-    const discordReady = Boolean(diagnostics?.discord?.reachable);
-    const hasGuild = Boolean(guildId);
-    const hasVoice = Boolean(voiceChannelId);
+    const bot = getDashboardBot(botKey) || getLiveControlBot(botKey, guildId) || null;
+    const dbAccess = deriveBotDbAccess(botKey);
+    const discordAccess = deriveBotDiscordAccess(botKey);
+    const session = guildId ? getBestControlSession(botKey, guildId) : null;
+    const selectedGuild = getSelectedControlGuild();
+    const dbReady = Boolean(dbAccess.reachable);
+    const discordReady = Boolean(discordAccess.reachable);
+    const inventoryReady = !controlInventoryLoading && Boolean(controlInventoryState?.loaded) && controlInventoryState?.bot?.key === botKey;
+    const hasGuild = Boolean(guildId && selectedGuild);
+    const hasVoice = Boolean(
+        voiceChannelId
+        && selectedGuild?.channels?.some(channel =>
+            String(channel.id) === String(voiceChannelId) && (channel.type === 2 || channel.type === 13)
+        )
+    );
     const hasHome = Boolean(session?.home_channel_id);
+    const inventoryReason = controlInventoryLoading
+        ? 'Guild/channel inventory is still syncing for this bot.'
+        : inventoryReady
+            ? 'Live guild/channel inventory is loaded for this bot.'
+            : 'Reload this bot inventory before sending routed commands.';
 
     const items = [
-        { label: 'Queue media', ready: dbReady && hasGuild && hasVoice, reason: hasVoice ? 'Voice channel selected for direct play.' : 'Select a guild and voice channel first.' },
-        { label: 'Set home channel', ready: dbReady && hasGuild && hasVoice, reason: hasHome ? 'A home channel already exists and can be overwritten.' : 'Choose a voice channel to anchor this bot.' },
-        { label: 'Pause / resume / skip / stop', ready: dbReady && hasGuild, reason: hasGuild ? 'Guild-scoped control path is available.' : 'Choose a guild before sending transport controls.' },
-        { label: 'Leave voice', ready: dbReady && hasGuild, reason: hasGuild ? 'Direct leave order can be injected now.' : 'Choose a guild before issuing leave.' },
-        { label: 'Shuffle / clear queue', ready: dbReady && hasGuild, reason: hasGuild ? 'Queue mutation path is ready.' : 'Choose a guild to mutate its queue.' },
-        { label: 'Loop / filter changes', ready: dbReady && hasGuild, reason: hasGuild ? 'Guild settings table can be updated.' : 'Choose a guild to update loop or filter state.' },
-        { label: 'Restart node', ready: dbReady, reason: dbReady ? 'Health table reachable for restart order.' : 'DB must be reachable before restart can be requested.' },
-        { label: 'Discord inventory / channel explorer', ready: discordReady, reason: discordReady ? 'Panel token can read Discord identity and guilds.' : 'Panel token is missing or failing for Discord API.' },
+        {
+            label: 'Queue media',
+            ready: dbReady && inventoryReady && hasGuild && hasVoice,
+            reason: !dbReady ? dbAccess.message
+                : !inventoryReady ? inventoryReason
+                : hasVoice ? 'Voice route is selected and ready for a direct play order.'
+                : 'Select a guild and voice channel first.',
+        },
+        {
+            label: 'Set home channel',
+            ready: dbReady && inventoryReady && hasGuild && hasVoice,
+            reason: !dbReady ? dbAccess.message
+                : !inventoryReady ? inventoryReason
+                : hasHome ? 'A home channel already exists and can be overwritten.'
+                : 'Choose a voice channel to anchor this bot.',
+        },
+        {
+            label: 'Pause / resume / skip / stop',
+            ready: dbReady && hasGuild,
+            reason: !dbReady ? dbAccess.message
+                : hasGuild ? `Guild-scoped control path is available${session?.title ? ` for ${session.title}.` : '.'}`
+                : 'Choose a guild before sending transport controls.',
+        },
+        {
+            label: 'Leave voice',
+            ready: dbReady && hasGuild,
+            reason: !dbReady ? dbAccess.message
+                : hasGuild ? 'Direct leave order can be injected now.'
+                : 'Choose a guild before issuing leave.',
+        },
+        {
+            label: 'Shuffle / clear queue',
+            ready: dbReady && hasGuild,
+            reason: !dbReady ? dbAccess.message
+                : hasGuild ? 'Queue mutation path is ready.'
+                : 'Choose a guild to mutate its queue.',
+        },
+        {
+            label: 'Loop / filter changes',
+            ready: dbReady && hasGuild,
+            reason: !dbReady ? dbAccess.message
+                : hasGuild ? 'Guild settings table can be updated.'
+                : 'Choose a guild to update loop or filter state.',
+        },
+        {
+            label: 'Backup queue auto-restore',
+            ready: dbReady && hasGuild && Boolean(session?.backup_restore_ready),
+            reason: !dbReady ? dbAccess.message
+                : !hasGuild ? 'Choose a guild before checking backup recovery state.'
+                : Number(session?.backup_queue_count || 0) === 0 ? 'No backup queue entries exist for this bot and guild right now.'
+                : session?.backup_restore_ready ? 'Backup queue is armed and should repopulate the live queue when playback goes idle.'
+                : 'Backup queue exists, but the live queue is not empty yet.',
+        },
+        {
+            label: 'Restart node',
+            ready: dbReady,
+            reason: dbReady ? 'Database control path is ready for restart orders.' : dbAccess.message,
+        },
+        {
+            label: 'Discord inventory / channel explorer',
+            ready: discordReady && inventoryReady,
+            reason: !discordReady ? discordAccess.message
+                : !inventoryReady ? inventoryReason
+                : discordAccess.message,
+        },
     ];
 
     container.innerHTML = `
@@ -1166,13 +1501,31 @@ function renderSelectedGuildMatrix() {
         return;
     }
 
-    const workerBots = dashboardBotsState.filter(bot => bot.kind === 'music');
+    const liveMatrixReady = Boolean(controlMatrixState.loaded && String(controlMatrixState.guildId) === String(guildId));
+    const workerBots = liveMatrixReady
+        ? controlMatrixState.bots
+        : dashboardBotsState
+            .filter(bot => bot.kind === 'music')
+            .map(bot => ({ key: bot.key, display_name: bot.display_name }));
+
     container.innerHTML = workerBots.map(bot => {
-        const session = getDashboardSession(bot.key, guildId);
-        const diag = getDiagnosticsBot(bot.key);
-        const status = describeBotStatus(bot.status);
+        const session = getBestControlSession(bot.key, guildId);
+        const dbAccess = bot.db || deriveBotDbAccess(bot.key);
+        const discordAccess = bot.discord || deriveBotDiscordAccess(bot.key);
+        const status = getControlBotStatus(bot.key, guildId);
         const homeLabel = session?.home_channel_name || (session?.home_channel_id ? `Home ${session.home_channel_id}` : 'No home channel');
-        const activityLabel = session?.is_playing ? `Playing ${session.title || 'track'}` : (session?.queue_count ? `${session.queue_count} queued` : 'Idle in this guild');
+        const sessionState = describeSessionState(session);
+        const activityLabel = session
+            ? sessionState.key === 'playing'
+                ? `Playing ${session.title || 'track'}`
+                : sessionState.key === 'paused'
+                    ? `Paused on ${session.title || 'track'}`
+                    : sessionState.key === 'queued'
+                        ? `${session.queue_count || 0} queued`
+                        : session?.backup_restore_ready
+                            ? 'Idle, backup queue armed'
+                        : 'Configured standby'
+            : 'No runtime state in this guild';
         return `
             <article class="swarm-guild-card">
                 <div class="swarm-guild-card-head">
@@ -1185,8 +1538,10 @@ function renderSelectedGuildMatrix() {
                 <div class="swarm-guild-card-meta">
                     <span>Home: ${escapeHtml(homeLabel)}</span>
                     <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
-                    <span>DB: ${escapeHtml(describeDiagnosticState(diag?.db?.status).label)}</span>
-                    <span>Discord: ${escapeHtml(describeDiagnosticState(diag?.discord?.status).label)}</span>
+                    <span>Backup: ${escapeHtml(String(session?.backup_queue_count ?? 0))}</span>
+                    <span>Pending: ${escapeHtml(String(session?.pending_direct_orders ?? 0))}</span>
+                    <span>DB: ${escapeHtml(describeDiagnosticState(dbAccess.status).label)}</span>
+                    <span>Discord: ${escapeHtml(describeDiagnosticState(discordAccess.status).label)}</span>
                 </div>
             </article>
         `;
@@ -1198,25 +1553,97 @@ async function loadControlInventory(botKey) {
     if (!botKey && controlSel) botKey = controlSel.value;
     if (!botKey) return;
 
+    const requestId = ++controlInventoryRequestId;
+    controlInventoryLoading = true;
+    controlInventoryState = { bot: { key: botKey }, guilds: [], loaded: false };
+    resetControlInventorySelectors('Loading guilds...');
+    setDirectControlsDisabled(true);
+    renderControlContext();
+    renderAriaCommandGuide();
+    renderSelectedBotCapabilities();
+    renderSelectedGuildMatrix();
     setControlStatus('Loading bot servers and channels...');
     try {
         const res = await fetch(`${API_BASE}/bots/${encodeURIComponent(botKey)}/inventory`);
         if (handle401(res)) return;
         const data = await res.json();
+        if (requestId !== controlInventoryRequestId) return;
         if (!res.ok) {
+            controlInventoryState = { bot: { key: botKey }, guilds: [], loaded: false };
+            resetControlInventorySelectors('No guilds available');
             setControlStatus(data.detail || 'Failed to load bot inventory.', true);
             return;
         }
-        controlInventoryState = data;
+        controlInventoryState = { ...data, loaded: true };
         populateControlGuilds();
+        await fetchControlMatrix({ silent: true });
         renderControlContext();
         renderAriaCommandGuide();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
         setControlStatus(`Loaded ${data.guilds?.length || 0} guilds for ${data.bot?.display_name || botKey}.`);
     } catch (err) {
+        if (requestId !== controlInventoryRequestId) return;
         console.error("❌ Failed to load control inventory:", err);
+        controlInventoryState = { bot: { key: botKey }, guilds: [], loaded: false };
+        resetControlInventorySelectors('Inventory load failed');
         setControlStatus(`Failed to load bot inventory: ${err}`, true);
+    } finally {
+        if (requestId === controlInventoryRequestId) {
+            controlInventoryLoading = false;
+            setDirectControlsDisabled(false);
+            renderControlContext();
+            renderSelectedBotCapabilities();
+            renderSelectedGuildMatrix();
+        }
+    }
+}
+
+async function fetchControlMatrix(options = {}) {
+    const { silent = false } = options;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const requestId = ++controlMatrixRequestId;
+
+    if (!guildId) {
+        clearControlMatrixState();
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/guilds/${encodeURIComponent(guildId)}/control-matrix`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (requestId !== controlMatrixRequestId) return;
+        if (!res.ok) {
+            throw new Error(data.detail || 'Live control matrix request failed');
+        }
+
+        controlMatrixState = {
+            guildId: String(guildId),
+            bots: Array.isArray(data.bots) ? data.bots : [],
+            loaded: true,
+            generatedAt: data.generated_at || null,
+        };
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
+
+        if (!silent) {
+            setControlStatus(`Live control state synced for ${selectedOptionText('control-guild-select') || guildId}.`);
+        }
+    } catch (err) {
+        if (requestId !== controlMatrixRequestId) return;
+        clearControlMatrixState(guildId);
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
+        if (!silent) {
+            setControlStatus(`Failed to load live control state: ${err}`, true);
+        }
+        console.error('❌ Control matrix fetch failed:', err);
     }
 }
 
@@ -1224,10 +1651,13 @@ async function queueFromPanel() {
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
     const voiceChannelId = document.getElementById('control-voice-select')?.value;
-    const textChannelId = document.getElementById('control-text-select')?.value || '0';
     const sourceInput = document.getElementById('control-source-input');
     const sourceUrl = sourceInput?.value?.trim();
 
+    if (controlInventoryLoading) {
+        setControlStatus('Wait for the selected bot inventory to finish loading before queueing media.', true);
+        return;
+    }
     if (!botKey || !guildId) {
         setControlStatus('Select a bot and guild first.', true);
         return;
@@ -1245,8 +1675,7 @@ async function queueFromPanel() {
     const result = await sendCommand(botKey, guildId, 'PLAY', {
         source_url: sourceUrl,
         voice_channel_id: voiceChannelId,
-        text_channel_id: textChannelId,
-    });
+    }, { refresh: false });
 
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to queue media on the selected bot.', true);
@@ -1255,14 +1684,22 @@ async function queueFromPanel() {
 
     setControlStatus(result.data?.message || 'Play request sent.');
     if (sourceInput) sourceInput.value = '';
+    scheduleDashboardRefresh(2200);
+    setTimeout(() => {
+        fetchControlMatrix({ silent: true });
+    }, 2200);
     renderAriaCommandGuide();
 }
 
 async function applyLoopModeFromPanel() {
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
-    const loopMode = document.getElementById('control-loop-select')?.value || 'off';
+    const loopMode = normalizeLoopMode(document.getElementById('control-loop-select')?.value);
 
+    if (controlInventoryLoading) {
+        setControlStatus('Wait for the selected bot inventory to finish loading before changing loop mode.', true);
+        return;
+    }
     if (!botKey || !guildId) {
         setControlStatus('Select a bot and guild before changing loop mode.', true);
         return;
@@ -1283,6 +1720,10 @@ async function applyFilterModeFromPanel() {
     const guildId = document.getElementById('control-guild-select')?.value;
     const filterMode = document.getElementById('control-filter-select')?.value || 'none';
 
+    if (controlInventoryLoading) {
+        setControlStatus('Wait for the selected bot inventory to finish loading before changing filter mode.', true);
+        return;
+    }
     if (!botKey || !guildId) {
         setControlStatus('Select a bot and guild before changing filter mode.', true);
         return;
@@ -1303,6 +1744,10 @@ async function setHomeChannelFromPanel() {
     const guildId = document.getElementById('control-guild-select')?.value;
     const voiceChannelId = document.getElementById('control-voice-select')?.value;
 
+    if (controlInventoryLoading) {
+        setControlStatus('Wait for the selected bot inventory to finish loading before setting a home channel.', true);
+        return;
+    }
     if (!botKey || !guildId) {
         setControlStatus('Select a bot and guild before setting a home channel.', true);
         return;
@@ -1329,6 +1774,10 @@ function getDirectControlSelection(action) {
     const guildId = document.getElementById('control-guild-select')?.value;
     const needsGuild = action !== 'RESTART';
 
+    if (controlInventoryLoading && action !== 'RESTART') {
+        setControlStatus('Wait for the selected bot inventory to finish loading before sending guild-scoped commands.', true);
+        return null;
+    }
     if (!botKey) {
         setControlStatus('Select a bot first.', true);
         return null;
@@ -1529,18 +1978,15 @@ document.addEventListener('DOMContentLoaded', () => {
         ?.addEventListener('change', (event) => loadControlInventory(event.target.value));
 
     document.getElementById('control-guild-select')
-        ?.addEventListener('change', populateControlChannels);
+        ?.addEventListener('change', () => {
+            populateControlChannels();
+            fetchControlMatrix({ silent: true });
+        });
 
     document.getElementById('control-voice-select')
         ?.addEventListener('change', () => {
             renderControlContext();
             renderAriaCommandGuide();
-            renderSelectedBotCapabilities();
-        });
-
-    document.getElementById('control-text-select')
-        ?.addEventListener('change', () => {
-            renderControlContext();
             renderSelectedBotCapabilities();
         });
 

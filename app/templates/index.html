@@ -133,17 +133,13 @@
               <span>Voice Channel</span>
               <select id="control-voice-select"></select>
             </label>
-
-            <label class="control-field">
-              <span>Text Channel</span>
-              <select id="control-text-select"></select>
-            </label>
           </div>
 
           <label class="control-field control-field-wide">
             <span>Track / Playlist URL</span>
             <input id="control-source-input" type="text" placeholder="Paste a YouTube or SoundCloud link, livestream, playlist URL, or search text" />
           </label>
+          <p class="muted">Direct play is routed by bot, guild, and voice channel. Text feedback stays on the bot's configured feedback channel, so there is no separate text-channel selector here.</p>
 
           <div class="row">
             <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
@@ -151,9 +147,9 @@
             <label class="control-inline">
               <span>Loop Mode</span>
               <select id="control-loop-select">
+                <option value="queue" selected>Queue</option>
                 <option value="off">Off</option>
                 <option value="song">Song</option>
-                <option value="queue">Queue</option>
               </select>
             </label>
 

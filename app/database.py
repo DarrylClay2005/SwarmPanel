@@ -30,7 +30,7 @@ THUMBNAIL_CACHE_TTL_SECONDS = 60 * 60
 GUILD_SETTINGS_COLUMNS = (
     ("home_vc_id", "BIGINT"),
     ("volume", "INT DEFAULT 100"),
-    ("loop_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("loop_mode", "VARCHAR(10) DEFAULT 'queue'"),
     ("filter_mode", "VARCHAR(20) DEFAULT 'none'"),
     ("dj_role_id", "BIGINT DEFAULT NULL"),
     ("feedback_channel_id", "BIGINT DEFAULT NULL"),
@@ -71,6 +71,28 @@ def _normalize_filter_mode(value: Any) -> str:
     if mode not in valid_modes:
         raise ValueError(f"Invalid filter mode: {value!r}. Expected one of: {', '.join(sorted(valid_modes))}")
     return mode
+
+
+def _derive_session_state(
+    playback: dict[str, Any],
+    *,
+    queue_count: int,
+    has_settings: bool,
+    home_channel_id: int | None,
+) -> tuple[str, str]:
+    is_playing = bool(playback.get("is_playing"))
+    has_track = bool(playback.get("title") or playback.get("video_url"))
+    has_channel = playback.get("channel_id") is not None
+
+    if is_playing:
+        return "playing", "Playing"
+    if has_track and has_channel:
+        return "paused", "Paused"
+    if queue_count > 0:
+        return "queued", "Queued"
+    if has_settings or home_channel_id:
+        return "configured", "Configured"
+    return "idle", "Idle"
 
 
 
@@ -322,6 +344,203 @@ class PanelDatabase:
 
         return sorted(guild_ids)
 
+    async def get_bot_control_state(self, bot_key: str, guild_id: str | int) -> dict[str, Any]:
+        bot = BOT_INDEX.get(bot_key)
+        if not bot or bot.kind != "music" or not bot.db_schema or not bot.table_prefix:
+            raise ValueError("This action is only supported for music bots")
+
+        gid = _coerce_int(guild_id, "guild_id")
+        schema = _validate_identifier(bot.db_schema, "schema")
+        prefix = _validate_identifier(bot.table_prefix, "table prefix")
+        playback_table = f"{prefix}_playback_state"
+        settings_table = f"{prefix}_guild_settings"
+        queue_table = f"{prefix}_queue"
+        backup_table = f"{prefix}_queue_backup"
+        home_table = f"{prefix}_bot_home_channels"
+        direct_orders_table = f"{prefix}_swarm_direct_orders"
+        heartbeat_table = "swarm_health"
+
+        table_exists = {
+            "playback": await self._table_exists(schema, playback_table),
+            "settings": await self._table_exists(schema, settings_table),
+            "queue": await self._table_exists(schema, queue_table),
+            "backup": await self._table_exists(schema, backup_table),
+            "home": await self._table_exists(schema, home_table),
+            "direct_orders": await self._table_exists(schema, direct_orders_table),
+            "heartbeat": await self._table_exists(schema, heartbeat_table),
+        }
+
+        playback: dict[str, Any] = {}
+        settings: dict[str, Any] = {}
+        queue_count = 0
+        backup_queue_count = 0
+        pending_direct_orders = 0
+        latest_direct_order: dict[str, Any] | None = None
+        home_channel_id: int | None = None
+        feedback_channel_id: int | None = None
+        heartbeat_age = None
+        heartbeat_status = "unknown"
+
+        if table_exists["playback"]:
+            try:
+                playback = await self._fetchone(
+                    f"SELECT channel_id, title, video_url, position_seconds, is_playing "
+                    f"FROM `{schema}`.`{playback_table}` WHERE guild_id = %s AND bot_name = %s LIMIT 1",
+                    (gid, bot.key),
+                ) or {}
+            except Exception:
+                playback = await self._fetchone(
+                    f"SELECT channel_id, title, position_seconds, is_playing "
+                    f"FROM `{schema}`.`{playback_table}` WHERE guild_id = %s LIMIT 1",
+                    (gid,),
+                ) or {}
+
+        if table_exists["settings"]:
+            settings = await self._fetchone(
+                f"SELECT volume, loop_mode, filter_mode, feedback_channel_id, transition_mode, "
+                f"custom_speed, custom_pitch, custom_modifiers_left, dj_only_mode, stay_in_vc "
+                f"FROM `{schema}`.`{settings_table}` WHERE guild_id = %s LIMIT 1",
+                (gid,),
+            ) or {}
+            feedback_channel_id = int(settings["feedback_channel_id"]) if settings.get("feedback_channel_id") else None
+
+        if table_exists["queue"]:
+            try:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS queue_count FROM `{schema}`.`{queue_table}` WHERE guild_id = %s AND bot_name = %s",
+                    (gid, bot.key),
+                ) or {}
+            except Exception:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS queue_count FROM `{schema}`.`{queue_table}` WHERE guild_id = %s",
+                    (gid,),
+                ) or {}
+            queue_count = int(row.get("queue_count") or 0)
+
+        if table_exists["backup"]:
+            try:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS backup_queue_count FROM `{schema}`.`{backup_table}` WHERE guild_id = %s AND bot_name = %s",
+                    (gid, bot.key),
+                ) or {}
+            except Exception:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS backup_queue_count FROM `{schema}`.`{backup_table}` WHERE guild_id = %s",
+                    (gid,),
+                ) or {}
+            backup_queue_count = int(row.get("backup_queue_count") or 0)
+
+        if table_exists["home"]:
+            try:
+                row = await self._fetchone(
+                    f"SELECT home_vc_id FROM `{schema}`.`{home_table}` WHERE guild_id = %s AND bot_name = %s LIMIT 1",
+                    (gid, bot.key),
+                ) or {}
+            except Exception:
+                row = await self._fetchone(
+                    f"SELECT home_vc_id FROM `{schema}`.`{home_table}` WHERE guild_id = %s LIMIT 1",
+                    (gid,),
+                ) or {}
+            home_channel_id = int(row["home_vc_id"]) if row.get("home_vc_id") else None
+
+        if table_exists["direct_orders"]:
+            try:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS pending_direct_orders FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s AND bot_name = %s",
+                    (gid, bot.key),
+                ) or {}
+            except Exception:
+                row = await self._fetchone(
+                    f"SELECT COUNT(*) AS pending_direct_orders FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s",
+                    (gid,),
+                ) or {}
+            pending_direct_orders = int(row.get("pending_direct_orders") or 0)
+            try:
+                latest_direct_order = await self._fetchone(
+                    f"SELECT command, data, vc_id, text_channel_id "
+                    f"FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s AND bot_name = %s "
+                    f"ORDER BY id DESC LIMIT 1",
+                    (gid, bot.key),
+                ) or None
+            except Exception:
+                try:
+                    latest_direct_order = await self._fetchone(
+                        f"SELECT command, data, vc_id, text_channel_id "
+                        f"FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s "
+                        f"ORDER BY id DESC LIMIT 1",
+                        (gid,),
+                    ) or None
+                except Exception:
+                    latest_direct_order = await self._fetchone(
+                        f"SELECT command, data, vc_id "
+                        f"FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s "
+                        f"ORDER BY id DESC LIMIT 1",
+                        (gid,),
+                    ) or None
+
+        if table_exists["heartbeat"]:
+            row = await self._fetchone(
+                f"SELECT status, TIMESTAMPDIFF(SECOND, last_pulse, NOW()) AS heartbeat_age "
+                f"FROM `{schema}`.`{heartbeat_table}` WHERE bot_name = %s LIMIT 1",
+                (bot.key,),
+            ) or {}
+            if row:
+                heartbeat_age = int(row.get("heartbeat_age") or 0)
+                heartbeat_status = row.get("status") or "unknown"
+
+        session_state, session_state_label = _derive_session_state(
+            playback,
+            queue_count=queue_count,
+            has_settings=bool(settings),
+            home_channel_id=home_channel_id,
+        )
+
+        return {
+            "key": bot.key,
+            "display_name": bot.display_name,
+            "guild_id": str(gid),
+            "db": {
+                "status": "online",
+                "reachable": True,
+                "message": "Live bot schema query succeeded.",
+                "schema": schema,
+            },
+            "heartbeat": {
+                "status": heartbeat_status,
+                "age_seconds": heartbeat_age,
+            },
+            "session": {
+                "guild_id": str(gid),
+                "guild_name": None,
+                "channel_id": playback.get("channel_id"),
+                "channel_name": None,
+                "title": playback.get("title"),
+                "video_url": playback.get("video_url"),
+                "position_seconds": int(playback.get("position_seconds") or 0),
+                "is_playing": bool(playback.get("is_playing")),
+                "session_state": session_state,
+                "session_state_label": session_state_label,
+                "volume": int(settings.get("volume") or 100),
+                "loop_mode": settings.get("loop_mode") or "queue",
+                "filter_mode": settings.get("filter_mode") or "none",
+                "transition_mode": settings.get("transition_mode") or "off",
+                "custom_speed": float(settings.get("custom_speed") or 1.0),
+                "custom_pitch": float(settings.get("custom_pitch") or 1.0),
+                "custom_modifiers_left": int(settings.get("custom_modifiers_left") or 0),
+                "dj_only_mode": bool(settings.get("dj_only_mode")),
+                "stay_in_vc": bool(settings.get("stay_in_vc")),
+                "queue_count": queue_count,
+                "backup_queue_count": backup_queue_count,
+                "backup_restore_ready": backup_queue_count > 0 and queue_count == 0,
+                "pending_direct_orders": pending_direct_orders,
+                "latest_direct_order": latest_direct_order,
+                "home_channel_id": home_channel_id,
+                "home_channel_name": None,
+                "feedback_channel_id": feedback_channel_id,
+                "feedback_channel_name": None,
+            },
+        }
+
     async def _music_bot_snapshot(self, bot: BotDefinition) -> dict[str, Any]:
         assert bot.db_schema and bot.table_prefix
         schema = _validate_identifier(bot.db_schema, "schema")
@@ -366,7 +585,7 @@ class PanelDatabase:
                 guild_id = int(row["guild_id"])
                 filter_map[guild_id] = {
                     "filter_mode": row.get("filter_mode") or "none",
-                    "loop_mode": row.get("loop_mode") or "off",
+                    "loop_mode": row.get("loop_mode") or "queue",
                     "shuffle_mode": row.get("shuffle_mode") or 0
                 }
                 known_guilds.add(guild_id)
@@ -398,8 +617,16 @@ class PanelDatabase:
         for guild_id in sorted_guild_ids:
             playback = playback_map.get(guild_id, {})
             settings = filter_map.get(guild_id, {})
+            queue_count = queue_map.get(guild_id, 0)
+            home_channel_id = home_map.get(guild_id)
             source_info = _detect_media_source(playback.get("video_url"))
             is_playing = bool(playback.get("is_playing"))
+            session_state, session_state_label = _derive_session_state(
+                playback,
+                queue_count=queue_count,
+                has_settings=guild_id in filter_map,
+                home_channel_id=home_channel_id,
+            )
             if is_playing:
                 active_playing_count += 1
             sessions.append(
@@ -413,11 +640,13 @@ class PanelDatabase:
                     "thumbnail": None,
                     "position_seconds": int(playback.get("position_seconds") or 0),
                     "is_playing": is_playing,
+                    "session_state": session_state,
+                    "session_state_label": session_state_label,
                     "filter_mode": settings.get("filter_mode", "none"),
-                    "loop_mode": settings.get("loop_mode", "off"),
+                    "loop_mode": settings.get("loop_mode", "queue"),
                     "shuffle_mode": settings.get("shuffle_mode", 0),
-                    "queue_count": queue_map.get(guild_id, 0),
-                    "home_channel_id": home_map.get(guild_id),
+                    "queue_count": queue_count,
+                    "home_channel_id": home_channel_id,
                     "home_channel_name": None,
                     "guild_name": None,
                     "channel_name": None,
@@ -718,6 +947,18 @@ class PanelDatabase:
                         "command VARCHAR(50), data TEXT)"
                     )
                     await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` "
+                        "(guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
+                    )
+                    await cur.execute(
+                        f"DELETE FROM `{schema}`.`{prefix}_swarm_overrides` WHERE guild_id = %s AND bot_name = %s",
+                        (gid, bot_key),
+                    )
+                    await cur.execute(
+                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s",
+                        (gid, bot_key),
+                    )
+                    await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
                         "(bot_name, guild_id, vc_id, text_channel_id, command, data) "
                         "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -734,6 +975,10 @@ class PanelDatabase:
                         "id INT AUTO_INCREMENT PRIMARY KEY, "
                         "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
                         "command VARCHAR(50), data TEXT)"
+                    )
+                    await cur.execute(
+                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s",
+                        (gid, bot_key),
                     )
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
