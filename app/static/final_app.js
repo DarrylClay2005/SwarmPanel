@@ -6,15 +6,19 @@ const REMOTE_MODE = Boolean(window.SWARM_PANEL_REMOTE_MODE) || window.location.h
 const REMOTE_ORIGIN_KEY = 'swarm_panel_remote_origin';
 const REMOTE_TOKEN_KEY = 'swarm_panel_remote_token';
 const REMOTE_USERNAME_KEY = 'swarm_panel_remote_username';
+const REMOTE_CONFIG_FILE = 'live-config.json';
 const rawFetch = window.fetch.bind(window);
+const storageFallback = new Map();
 let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
 let controlInventoryState = null;
 let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
+let selectedControlState = { botKey: null, guildId: null, loaded: false, data: null };
 let controlInventoryLoading = false;
 let controlInventoryRequestId = 0;
 let controlMatrixRequestId = 0;
+let selectedControlRequestId = 0;
 let eventFeedEntries = [];
 let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
@@ -32,13 +36,80 @@ const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
 // ================================
 // 🔒 AUTH HELPER
 // ================================
+function getStorageCandidates() {
+    const stores = [];
+    try {
+        if (window.localStorage) stores.push(window.localStorage);
+    } catch (_err) {}
+    try {
+        if (window.sessionStorage) stores.push(window.sessionStorage);
+    } catch (_err) {}
+    return stores;
+}
+
+function readStoredValue(key) {
+    for (const store of getStorageCandidates()) {
+        try {
+            const value = store.getItem(key);
+            if (value !== null && value !== undefined) {
+                return value;
+            }
+        } catch (_err) {}
+    }
+    return storageFallback.get(key) || '';
+}
+
+function writeStoredValue(key, value) {
+    const normalized = String(value || '');
+    if (normalized) {
+        storageFallback.set(key, normalized);
+    } else {
+        storageFallback.delete(key);
+    }
+
+    for (const store of getStorageCandidates()) {
+        try {
+            if (normalized) {
+                store.setItem(key, normalized);
+            } else {
+                store.removeItem(key);
+            }
+        } catch (_err) {}
+    }
+}
+
 function normalizeRemoteOrigin(value) {
     let normalized = String(value || '').trim();
     if (!normalized) return '';
-    normalized = normalized.replace(/\/+$/, '');
-    if (normalized.endsWith('/api')) {
-        normalized = normalized.slice(0, -4);
+
+    const nestedPanelMatch = normalized.match(/[?&]panel=([^&]+)/i);
+    if (nestedPanelMatch?.[1]) {
+        try {
+            normalized = decodeURIComponent(nestedPanelMatch[1]);
+        } catch (_err) {
+            normalized = nestedPanelMatch[1];
+        }
     }
+
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
+        normalized = `https://${normalized}`;
+    }
+
+    try {
+        const url = new URL(normalized);
+        const nestedPanel = url.searchParams.get('panel');
+        if (nestedPanel) {
+            return normalizeRemoteOrigin(nestedPanel);
+        }
+        return `${url.protocol}//${url.host}`;
+    } catch (_err) {
+        normalized = normalized.replace(/\/+$/, '');
+        normalized = normalized.replace(/\/(?:index\.html?|login)$/i, '');
+        if (normalized.endsWith('/api')) {
+            normalized = normalized.slice(0, -4);
+        }
+    }
+
     return normalized;
 }
 
@@ -46,11 +117,7 @@ function setRemoteOrigin(value, persist = true) {
     remotePanelOrigin = normalizeRemoteOrigin(value);
     if (!REMOTE_MODE) return remotePanelOrigin;
     if (persist) {
-        if (remotePanelOrigin) {
-            localStorage.setItem(REMOTE_ORIGIN_KEY, remotePanelOrigin);
-        } else {
-            localStorage.removeItem(REMOTE_ORIGIN_KEY);
-        }
+        writeStoredValue(REMOTE_ORIGIN_KEY, remotePanelOrigin);
     }
     return remotePanelOrigin;
 }
@@ -59,11 +126,7 @@ function setRemoteToken(value, persist = true) {
     remotePanelToken = String(value || '').trim();
     if (!REMOTE_MODE) return remotePanelToken;
     if (persist) {
-        if (remotePanelToken) {
-            localStorage.setItem(REMOTE_TOKEN_KEY, remotePanelToken);
-        } else {
-            localStorage.removeItem(REMOTE_TOKEN_KEY);
-        }
+        writeStoredValue(REMOTE_TOKEN_KEY, remotePanelToken);
     }
     return remotePanelToken;
 }
@@ -72,11 +135,7 @@ function setRemoteUsername(value, persist = true) {
     remotePanelUsername = String(value || '').trim();
     if (!REMOTE_MODE) return remotePanelUsername;
     if (persist) {
-        if (remotePanelUsername) {
-            localStorage.setItem(REMOTE_USERNAME_KEY, remotePanelUsername);
-        } else {
-            localStorage.removeItem(REMOTE_USERNAME_KEY);
-        }
+        writeStoredValue(REMOTE_USERNAME_KEY, remotePanelUsername);
     }
     return remotePanelUsername;
 }
@@ -86,7 +145,36 @@ function resolveApiUrl(input) {
     if (typeof input !== 'string') return input;
     if (!input.startsWith('/')) return input;
     if (!remotePanelOrigin) return input;
-    return `${remotePanelOrigin}${input}`;
+    return new URL(input, `${remotePanelOrigin}/`).toString();
+}
+
+function buildStaticUrl(path) {
+    try {
+        return new URL(path, window.location.href).toString();
+    } catch (_err) {
+        return path;
+    }
+}
+
+async function loadRemotePanelConfig() {
+    if (!REMOTE_MODE) return '';
+
+    try {
+        const response = await rawFetch(buildStaticUrl(REMOTE_CONFIG_FILE), {
+            cache: 'no-store',
+        });
+        if (!response.ok) return '';
+        const payload = await response.json().catch(() => ({}));
+        return normalizeRemoteOrigin(
+            payload.panel_url
+            || payload.panel
+            || payload.remote_panel_origin
+            || payload.remote_origin
+            || '',
+        );
+    } catch (_err) {
+        return '';
+    }
 }
 
 function buildWebSocketUrl(path = '/ws') {
@@ -304,7 +392,8 @@ async function loginRemotePanel() {
     if (submitButton) submitButton.disabled = true;
 
     try {
-        const res = await rawFetch(`${remotePanelOrigin}/api/session/login`, {
+        const loginUrl = new URL('/api/session/login', `${remotePanelOrigin}/`).toString();
+        const res = await rawFetch(loginUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
@@ -321,7 +410,10 @@ async function loginRemotePanel() {
         if (passwordInput) passwordInput.value = '';
         await startPanelApplication();
     } catch (err) {
-        showRemoteAuthShell(String(err));
+        const message = err instanceof Error
+            ? `${err.message}. Verify the live panel URL is public and reachable from this device.`
+            : 'Connection failed. Verify the live panel URL is public and reachable from this device.';
+        showRemoteAuthShell(message);
     } finally {
         if (submitButton) submitButton.disabled = false;
     }
@@ -372,13 +464,16 @@ async function startPanelApplication() {
 async function bootstrapPanelApplication() {
     if (REMOTE_MODE) {
         const queryOrigin = getPanelOriginFromQuery();
+        const configuredOrigin = await loadRemotePanelConfig();
         if (queryOrigin) {
             setRemoteOrigin(queryOrigin);
+        } else if (configuredOrigin) {
+            setRemoteOrigin(configuredOrigin);
         } else {
-            setRemoteOrigin(localStorage.getItem(REMOTE_ORIGIN_KEY) || '', false);
+            setRemoteOrigin(readStoredValue(REMOTE_ORIGIN_KEY) || '', false);
         }
-        setRemoteToken(localStorage.getItem(REMOTE_TOKEN_KEY) || '', false);
-        setRemoteUsername(localStorage.getItem(REMOTE_USERNAME_KEY) || '', false);
+        setRemoteToken(readStoredValue(REMOTE_TOKEN_KEY) || '', false);
+        setRemoteUsername(readStoredValue(REMOTE_USERNAME_KEY) || '', false);
 
         if (!remotePanelOrigin) {
             showRemoteAuthShell('Paste the live SwarmPanel URL to connect this GitHub Pages view.');
@@ -403,6 +498,28 @@ function clearControlMatrixState(guildId = null) {
     controlMatrixState = { guildId: guildId ? String(guildId) : null, bots: [], loaded: false, generatedAt: null };
 }
 
+function clearSelectedControlState(botKey = null, guildId = null) {
+    selectedControlState = {
+        botKey: botKey ? String(botKey) : null,
+        guildId: guildId ? String(guildId) : null,
+        loaded: false,
+        data: null,
+    };
+}
+
+function getSelectedControlBot(botKey, guildId = null) {
+    const selectedGuildId = guildId ?? document.getElementById('control-guild-select')?.value;
+    if (!botKey || !selectedGuildId) return null;
+    if (!selectedControlState.loaded) return null;
+    if (String(selectedControlState.botKey) !== String(botKey)) return null;
+    if (String(selectedControlState.guildId) !== String(selectedGuildId)) return null;
+    return selectedControlState.data;
+}
+
+function getBestLiveControlBot(botKey, guildId = null) {
+    return getSelectedControlBot(botKey, guildId) || getLiveControlBot(botKey, guildId);
+}
+
 function getLiveControlBot(botKey, guildId = null) {
     const selectedGuildId = guildId ?? document.getElementById('control-guild-select')?.value;
     if (!botKey || !selectedGuildId) return null;
@@ -411,24 +528,27 @@ function getLiveControlBot(botKey, guildId = null) {
 }
 
 function getBestControlSession(botKey, guildId = null) {
-    const liveBot = getLiveControlBot(botKey, guildId);
+    const liveBot = getBestLiveControlBot(botKey, guildId);
     if (liveBot?.session) return liveBot.session;
     return getDashboardSession(botKey, guildId);
 }
 
 function getControlBotStatus(botKey, guildId = null) {
-    const dashboardBot = getDashboardBot(botKey);
-    if (dashboardBot) return describeBotStatus(dashboardBot.status);
+    const liveBot = getBestLiveControlBot(botKey, guildId);
+    if (liveBot?.db?.reachable === false) return describeBotStatus('offline');
 
-    const heartbeatStatus = String(getLiveControlBot(botKey, guildId)?.heartbeat?.status || '').toLowerCase();
+    const heartbeatStatus = String(liveBot?.heartbeat?.status || '').toLowerCase();
     if (heartbeatStatus === 'online') return describeBotStatus('online');
     if (heartbeatStatus === 'stale') return describeBotStatus('stale');
     if (heartbeatStatus === 'offline' || heartbeatStatus === 'error') return describeBotStatus('offline');
+
+    const dashboardBot = getDashboardBot(botKey);
+    if (dashboardBot) return describeBotStatus(dashboardBot.status);
     return describeBotStatus('unknown');
 }
 
 function getControlHeartbeatAge(botKey, guildId = null) {
-    const liveBot = getLiveControlBot(botKey, guildId);
+    const liveBot = getBestLiveControlBot(botKey, guildId);
     if (liveBot?.heartbeat?.age_seconds !== undefined && liveBot?.heartbeat?.age_seconds !== null) {
         return liveBot.heartbeat.age_seconds;
     }
@@ -606,6 +726,7 @@ async function fetchDashboard() {
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
         if (document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+            fetchSelectedControlState({ silent: true });
             fetchControlMatrix({ silent: true });
         }
 
@@ -1406,12 +1527,66 @@ function getDashboardSession(botKey, guildId) {
     return null;
 }
 
+function rankSessionForGuildPreference(session) {
+    const state = describeSessionState(session).key;
+    if (state === 'playing') return 5;
+    if (state === 'paused') return 4;
+    if (state === 'queued') return 3;
+    if (session?.backup_restore_ready) return 2;
+    if (session?.home_channel_id) return 1;
+    return 0;
+}
+
+function getPreferredGuildIdForBot(botKey, guilds, previousValue = '', preservePrevious = true) {
+    const validGuildIds = new Set((guilds || []).map(guild => String(guild.id)));
+    if (!validGuildIds.size) return '';
+
+    if (preservePrevious && previousValue && validGuildIds.has(String(previousValue))) {
+        return String(previousValue);
+    }
+
+    const sessions = [];
+    const selectedBot = getSelectedControlBot(botKey);
+    if (selectedBot?.session) {
+        sessions.push(selectedBot.session);
+    }
+
+    const liveBot = getLiveControlBot(botKey);
+    if (liveBot?.session) {
+        sessions.push(liveBot.session);
+    }
+
+    const dashboardBot = getDashboardBot(botKey);
+    if (Array.isArray(dashboardBot?.sessions)) {
+        sessions.push(...dashboardBot.sessions);
+    }
+
+    const ranked = sessions
+        .filter(session => session?.guild_id && validGuildIds.has(String(session.guild_id)))
+        .sort((left, right) => {
+            const priorityDiff = rankSessionForGuildPreference(right) - rankSessionForGuildPreference(left);
+            if (priorityDiff) return priorityDiff;
+            return Number(right?.queue_count || 0) - Number(left?.queue_count || 0);
+        });
+
+    if (ranked.length) {
+        return String(ranked[0].guild_id);
+    }
+
+    if (previousValue && validGuildIds.has(String(previousValue))) {
+        return String(previousValue);
+    }
+
+    return String(guilds[0]?.id || '');
+}
+
 function getSelectedControlGuild() {
     const guildId = document.getElementById('control-guild-select')?.value;
     return controlInventoryState?.guilds?.find(guild => String(guild.id) === String(guildId)) || null;
 }
 
-function populateControlGuilds() {
+function populateControlGuilds(options = {}) {
+    const { preservePrevious = true } = options;
     const guildSel = document.getElementById('control-guild-select');
     if (!guildSel) return;
 
@@ -1428,9 +1603,12 @@ function populateControlGuilds() {
         .map(guild => `<option value="${guild.id}">${guild.name}</option>`)
         .join('');
 
-    if (previousValue && guilds.some(guild => String(guild.id) === previousValue)) {
-        guildSel.value = previousValue;
-    }
+    guildSel.value = getPreferredGuildIdForBot(
+        document.getElementById('control-bot-select')?.value,
+        guilds,
+        previousValue,
+        preservePrevious,
+    );
 
     populateControlChannels();
 }
@@ -1500,10 +1678,11 @@ function getCatalogBot(botKey) {
     return botCatalogState.find(bot => bot.key === botKey) || null;
 }
 
-function deriveBotDbAccess(botKey) {
-    const liveBot = getLiveControlBot(botKey);
+function deriveBotDbAccess(botKey, guildId = null) {
+    const selectedBot = getSelectedControlBot(botKey, guildId);
+    const liveBot = getBestLiveControlBot(botKey, guildId);
     if (liveBot?.db) {
-        return { ...liveBot.db, source: 'control-matrix' };
+        return { ...liveBot.db, source: selectedBot ? 'selected-control' : 'control-matrix' };
     }
 
     const diagnostics = getDiagnosticsBot(botKey);
@@ -1538,10 +1717,11 @@ function deriveBotDbAccess(botKey) {
     };
 }
 
-function deriveBotDiscordAccess(botKey) {
-    const liveBot = getLiveControlBot(botKey);
+function deriveBotDiscordAccess(botKey, guildId = null) {
+    const selectedBot = getSelectedControlBot(botKey, guildId);
+    const liveBot = getBestLiveControlBot(botKey, guildId);
     if (liveBot?.discord) {
-        return { ...liveBot.discord, source: 'control-matrix' };
+        return { ...liveBot.discord, source: selectedBot ? 'selected-control' : 'control-matrix' };
     }
 
     const diagnostics = getDiagnosticsBot(botKey);
@@ -1551,6 +1731,15 @@ function deriveBotDiscordAccess(botKey) {
 
     if (controlInventoryState?.loaded && controlInventoryState?.bot?.key === botKey && Array.isArray(controlInventoryState.guilds)) {
         const guildCount = controlInventoryState.guilds.length;
+        const selectedGuildLoaded = !guildId || controlInventoryState.guilds.some(guild => String(guild.id) === String(guildId));
+        if (!selectedGuildLoaded) {
+            return {
+                status: 'error',
+                reachable: false,
+                message: `The selected guild is not present in ${botKey}'s live Discord inventory.`,
+                source: 'inventory',
+            };
+        }
         return {
             status: 'online',
             reachable: true,
@@ -1621,10 +1810,10 @@ function renderControlContext() {
 
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
-    const bot = getDashboardBot(botKey) || getLiveControlBot(botKey, guildId) || null;
+    const bot = getBestLiveControlBot(botKey, guildId) || getDashboardBot(botKey) || null;
     const session = botKey && guildId ? getBestControlSession(botKey, guildId) : null;
-    const dbAccess = deriveBotDbAccess(botKey);
-    const discordAccess = deriveBotDiscordAccess(botKey);
+    const dbAccess = deriveBotDbAccess(botKey, guildId);
+    const discordAccess = deriveBotDiscordAccess(botKey, guildId);
     const selectedGuild = getSelectedControlGuild();
     const statusMeta = getControlBotStatus(botKey, guildId);
     const sessionState = describeSessionState(session);
@@ -1717,15 +1906,16 @@ function renderSelectedBotCapabilities() {
         return;
     }
 
-    const bot = getDashboardBot(botKey) || getLiveControlBot(botKey, guildId) || null;
-    const dbAccess = deriveBotDbAccess(botKey);
-    const discordAccess = deriveBotDiscordAccess(botKey);
+    const bot = getBestLiveControlBot(botKey, guildId) || getDashboardBot(botKey) || null;
+    const dbAccess = deriveBotDbAccess(botKey, guildId);
+    const discordAccess = deriveBotDiscordAccess(botKey, guildId);
     const session = guildId ? getBestControlSession(botKey, guildId) : null;
     const selectedGuild = getSelectedControlGuild();
     const dbReady = Boolean(dbAccess.reachable);
     const discordReady = Boolean(discordAccess.reachable);
     const inventoryReady = !controlInventoryLoading && Boolean(controlInventoryState?.loaded) && controlInventoryState?.bot?.key === botKey;
     const hasGuild = Boolean(guildId && selectedGuild);
+    const guildInventoryReady = inventoryReady && hasGuild;
     const hasVoice = Boolean(
         voiceChannelId
         && selectedGuild?.channels?.some(channel =>
@@ -1735,24 +1925,26 @@ function renderSelectedBotCapabilities() {
     const hasHome = Boolean(session?.home_channel_id);
     const inventoryReason = controlInventoryLoading
         ? 'Guild/channel inventory is still syncing for this bot.'
-        : inventoryReady
-            ? 'Live guild/channel inventory is loaded for this bot.'
-            : 'Reload this bot inventory before sending routed commands.';
+        : !inventoryReady
+            ? 'Reload this bot inventory before sending routed commands.'
+            : !hasGuild
+                ? 'Choose a guild that exists in this bot inventory first.'
+                : 'Live guild/channel inventory is loaded for this bot.'
 
     const items = [
         {
             label: 'Queue media',
-            ready: dbReady && inventoryReady && hasGuild && hasVoice,
+            ready: dbReady && guildInventoryReady && hasVoice,
             reason: !dbReady ? dbAccess.message
-                : !inventoryReady ? inventoryReason
+                : !guildInventoryReady ? inventoryReason
                 : hasVoice ? 'Voice route is selected and ready for a direct play order.'
                 : 'Select a guild and voice channel first.',
         },
         {
             label: 'Set home channel',
-            ready: dbReady && inventoryReady && hasGuild && hasVoice,
+            ready: dbReady && guildInventoryReady && hasVoice,
             reason: !dbReady ? dbAccess.message
-                : !inventoryReady ? inventoryReason
+                : !guildInventoryReady ? inventoryReason
                 : hasHome ? 'A home channel already exists and can be overwritten.'
                 : 'Choose a voice channel to anchor this bot.',
         },
@@ -1843,8 +2035,8 @@ function renderSelectedGuildMatrix() {
 
     container.innerHTML = workerBots.map(bot => {
         const session = getBestControlSession(bot.key, guildId);
-        const dbAccess = bot.db || deriveBotDbAccess(bot.key);
-        const discordAccess = bot.discord || deriveBotDiscordAccess(bot.key);
+        const dbAccess = bot.db || deriveBotDbAccess(bot.key, guildId);
+        const discordAccess = bot.discord || deriveBotDiscordAccess(bot.key, guildId);
         const status = getControlBotStatus(bot.key, guildId);
         const homeLabel = session?.home_channel_name || (session?.home_channel_id ? `Home ${session.home_channel_id}` : 'No home channel');
         const sessionState = describeSessionState(session);
@@ -1881,14 +2073,80 @@ function renderSelectedGuildMatrix() {
     }).join('');
 }
 
+async function fetchSelectedControlState(options = {}) {
+    const { silent = false } = options;
+    let botKey = document.getElementById('control-bot-select')?.value;
+    let guildId = document.getElementById('control-guild-select')?.value;
+    const requestId = ++selectedControlRequestId;
+
+    if (!botKey || !guildId) {
+        clearSelectedControlState(botKey, guildId);
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        return;
+    }
+
+    if (
+        controlInventoryState?.loaded
+        && controlInventoryState?.bot?.key === botKey
+        && Array.isArray(controlInventoryState.guilds)
+        && !controlInventoryState.guilds.some(guild => String(guild.id) === String(guildId))
+    ) {
+        populateControlGuilds({ preservePrevious: false });
+        guildId = document.getElementById('control-guild-select')?.value;
+    }
+
+    if (!botKey || !guildId) {
+        clearSelectedControlState(botKey, guildId);
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/bots/${encodeURIComponent(botKey)}/control-state?guild_id=${encodeURIComponent(guildId)}`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (requestId !== selectedControlRequestId) return;
+        if (!res.ok) {
+            throw new Error(data.detail || 'Selected control state request failed');
+        }
+
+        selectedControlState = {
+            botKey: String(botKey),
+            guildId: String(guildId),
+            loaded: true,
+            data,
+        };
+        renderControlContext();
+        renderSelectedBotCapabilities();
+
+        if (!silent) {
+            const guildLabel = data?.session?.guild_name || selectedOptionText('control-guild-select') || guildId;
+            setControlStatus(`Live control state synced for ${data?.display_name || botKey} in ${guildLabel}.`);
+        }
+    } catch (err) {
+        if (requestId !== selectedControlRequestId) return;
+        clearSelectedControlState(botKey, guildId);
+        renderControlContext();
+        renderSelectedBotCapabilities();
+        if (!silent) {
+            setControlStatus(`Failed to load selected control state: ${err}`, true);
+        }
+        console.error('❌ Selected control state fetch failed:', err);
+    }
+}
+
 async function loadControlInventory(botKey) {
     const controlSel = document.getElementById('control-bot-select');
     if (!botKey && controlSel) botKey = controlSel.value;
     if (!botKey) return;
 
+    const previousBotKey = controlInventoryState?.bot?.key || null;
     const requestId = ++controlInventoryRequestId;
     controlInventoryLoading = true;
     controlInventoryState = { bot: { key: botKey }, guilds: [], loaded: false };
+    clearSelectedControlState(botKey, null);
     resetControlInventorySelectors('Loading guilds...');
     setDirectControlsDisabled(true);
     renderControlContext();
@@ -1908,7 +2166,8 @@ async function loadControlInventory(botKey) {
             return;
         }
         controlInventoryState = { ...data, loaded: true };
-        populateControlGuilds();
+        populateControlGuilds({ preservePrevious: previousBotKey === botKey });
+        await fetchSelectedControlState({ silent: true });
         await fetchControlMatrix({ silent: true });
         renderControlContext();
         renderAriaCommandGuide();
@@ -1934,8 +2193,18 @@ async function loadControlInventory(botKey) {
 
 async function fetchControlMatrix(options = {}) {
     const { silent = false } = options;
-    const guildId = document.getElementById('control-guild-select')?.value;
     const requestId = ++controlMatrixRequestId;
+    let guildId = document.getElementById('control-guild-select')?.value;
+
+    if (
+        guildId
+        && controlInventoryState?.loaded
+        && Array.isArray(controlInventoryState.guilds)
+        && !controlInventoryState.guilds.some(guild => String(guild.id) === String(guildId))
+    ) {
+        populateControlGuilds({ preservePrevious: false });
+        guildId = document.getElementById('control-guild-select')?.value;
+    }
 
     if (!guildId) {
         clearControlMatrixState();
@@ -2019,6 +2288,7 @@ async function queueFromPanel() {
     if (sourceInput) sourceInput.value = '';
     scheduleDashboardRefresh(2200);
     setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
         fetchControlMatrix({ silent: true });
     }, 2200);
     renderAriaCommandGuide();
@@ -2046,6 +2316,10 @@ async function applyLoopModeFromPanel() {
     }
 
     setControlStatus(result.data?.message || `Loop mode set to ${loopMode}.`);
+    setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }, 900);
 }
 
 async function applyFilterModeFromPanel() {
@@ -2070,6 +2344,10 @@ async function applyFilterModeFromPanel() {
     }
 
     setControlStatus(result.data?.message || `Filter mode set to ${filterMode}.`);
+    setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }, 900);
 }
 
 async function setHomeChannelFromPanel() {
@@ -2100,6 +2378,10 @@ async function setHomeChannelFromPanel() {
     }
 
     setControlStatus(result.data?.message || 'Home channel updated.');
+    setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }, 900);
 }
 
 function getDirectControlSelection(action) {
@@ -2154,6 +2436,10 @@ async function sendPanelAction(action) {
     }
 
     setControlStatus(result.data?.message || `${action} sent.`);
+    setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }, 900);
 }
 
 // ================================
@@ -2318,6 +2604,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('control-guild-select')
         ?.addEventListener('change', () => {
             populateControlChannels();
+            fetchSelectedControlState({ silent: true });
             fetchControlMatrix({ silent: true });
         });
 

@@ -19,7 +19,10 @@ CHANNEL_TYPE_NAMES = {
 
 
 class DiscordAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None, path: str | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.path = path
 
 
 class DiscordInventoryService:
@@ -63,7 +66,11 @@ class DiscordInventoryService:
 
                 if resp.status >= 400:
                     body = await resp.text()
-                    raise DiscordAPIError(f"{method} {path} failed ({resp.status}): {body[:200]}")
+                    raise DiscordAPIError(
+                        f"{method} {path} failed ({resp.status}): {body[:200]}",
+                        status_code=resp.status,
+                        path=path,
+                    )
 
                 return await resp.json(content_type=None)
 
@@ -150,13 +157,31 @@ class DiscordInventoryService:
             for guild_id in guild_hints or []:
                 try:
                     guilds.append(await self.fetch_guild(token, int(guild_id)))
-                except Exception:
-                    guilds.append({"id": int(guild_id), "name": f"Guild {guild_id}", "channels_error": "Unable to fetch guild details"})
+                except DiscordAPIError as hint_exc:
+                    if hint_exc.status_code == 404:
+                        payload["errors"].append(f"guild_hint {guild_id}: stale guild reference skipped")
+                        continue
+                    guilds.append({"id": int(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+                except Exception as hint_exc:
+                    guilds.append({"id": int(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+
+        deduped_guilds: list[dict[str, Any]] = []
+        seen_guild_ids: set[int] = set()
+        for guild in guilds:
+            guild_id = int(guild.get("id"))
+            if guild_id in seen_guild_ids:
+                continue
+            seen_guild_ids.add(guild_id)
+            deduped_guilds.append(guild)
+        guilds = deduped_guilds
 
         for guild in guilds:
             if include_channels:
                 try:
                     guild["channels"] = await self.fetch_guild_channels(token, int(guild["id"]))
+                except DiscordAPIError as exc:
+                    guild["channels"] = []
+                    guild["channels_error"] = "Guild is no longer reachable by this bot." if exc.status_code == 404 else str(exc)
                 except Exception as exc:
                     guild["channels"] = []
                     guild["channels_error"] = str(exc)
