@@ -2,6 +2,11 @@
 // 🔧 CONFIG
 // ================================
 const API_BASE = "/api";
+const REMOTE_MODE = Boolean(window.SWARM_PANEL_REMOTE_MODE) || window.location.hostname.endsWith('github.io');
+const REMOTE_ORIGIN_KEY = 'swarm_panel_remote_origin';
+const REMOTE_TOKEN_KEY = 'swarm_panel_remote_token';
+const REMOTE_USERNAME_KEY = 'swarm_panel_remote_username';
+const rawFetch = window.fetch.bind(window);
 let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
@@ -16,14 +21,114 @@ let eventFeedReconnectTimer = null;
 let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
 let controlRefreshTimer = null;
+let remotePanelOrigin = '';
+let remotePanelToken = '';
+let remotePanelUsername = '';
+let panelAppStarted = false;
+let panelSessionChecked = false;
 const MAX_EVENT_FEED_ENTRIES = 80;
 const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
 
 // ================================
 // 🔒 AUTH HELPER
 // ================================
+function normalizeRemoteOrigin(value) {
+    let normalized = String(value || '').trim();
+    if (!normalized) return '';
+    normalized = normalized.replace(/\/+$/, '');
+    if (normalized.endsWith('/api')) {
+        normalized = normalized.slice(0, -4);
+    }
+    return normalized;
+}
+
+function setRemoteOrigin(value, persist = true) {
+    remotePanelOrigin = normalizeRemoteOrigin(value);
+    if (!REMOTE_MODE) return remotePanelOrigin;
+    if (persist) {
+        if (remotePanelOrigin) {
+            localStorage.setItem(REMOTE_ORIGIN_KEY, remotePanelOrigin);
+        } else {
+            localStorage.removeItem(REMOTE_ORIGIN_KEY);
+        }
+    }
+    return remotePanelOrigin;
+}
+
+function setRemoteToken(value, persist = true) {
+    remotePanelToken = String(value || '').trim();
+    if (!REMOTE_MODE) return remotePanelToken;
+    if (persist) {
+        if (remotePanelToken) {
+            localStorage.setItem(REMOTE_TOKEN_KEY, remotePanelToken);
+        } else {
+            localStorage.removeItem(REMOTE_TOKEN_KEY);
+        }
+    }
+    return remotePanelToken;
+}
+
+function setRemoteUsername(value, persist = true) {
+    remotePanelUsername = String(value || '').trim();
+    if (!REMOTE_MODE) return remotePanelUsername;
+    if (persist) {
+        if (remotePanelUsername) {
+            localStorage.setItem(REMOTE_USERNAME_KEY, remotePanelUsername);
+        } else {
+            localStorage.removeItem(REMOTE_USERNAME_KEY);
+        }
+    }
+    return remotePanelUsername;
+}
+
+function resolveApiUrl(input) {
+    if (!REMOTE_MODE) return input;
+    if (typeof input !== 'string') return input;
+    if (!input.startsWith('/')) return input;
+    if (!remotePanelOrigin) return input;
+    return `${remotePanelOrigin}${input}`;
+}
+
+function buildWebSocketUrl(path = '/ws') {
+    const token = encodeURIComponent(remotePanelToken || '');
+    if (REMOTE_MODE) {
+        if (!remotePanelOrigin || !remotePanelToken) return null;
+        const url = new URL(remotePanelOrigin);
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        url.pathname = path;
+        url.search = token ? `token=${token}` : '';
+        return url.toString();
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const suffix = token ? `?token=${token}` : '';
+    return `${protocol}//${window.location.host}${path}${suffix}`;
+}
+
+window.fetch = function patchedFetch(input, init = {}) {
+    const target = resolveApiUrl(input);
+    const headers = new Headers(init.headers || {});
+
+    if (remotePanelToken && typeof target === 'string' && target.includes('/api/')) {
+        headers.set('Authorization', `Bearer ${remotePanelToken}`);
+    }
+
+    return rawFetch(target, {
+        ...init,
+        headers,
+    });
+};
+
 function handle401(res) {
     if (res.status === 401) {
+        if (REMOTE_MODE) {
+            panelSessionChecked = false;
+            panelAppStarted = false;
+            setRemoteToken('');
+            disconnectEventFeed();
+            showRemoteAuthShell('Your live panel login expired. Sign in again to keep using the phone site.');
+            return true;
+        }
         window.location.href = '/login';
         return true;
     }
@@ -97,6 +202,201 @@ function selectedOptionText(selectId) {
     const select = document.getElementById(selectId);
     if (!select) return '';
     return select.options[select.selectedIndex]?.text || '';
+}
+
+function getPanelOriginFromQuery() {
+    const value = new URLSearchParams(window.location.search).get('panel');
+    return normalizeRemoteOrigin(value);
+}
+
+function updateRemoteConnectionStatus(message, tone = 'idle') {
+    const status = document.getElementById('remote-connection-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.dataset.tone = tone;
+}
+
+function setRemoteAuthError(message = '') {
+    const element = document.getElementById('remote-auth-error');
+    if (!element) return;
+    if (!message) {
+        element.style.display = 'none';
+        element.textContent = '';
+        return;
+    }
+    element.style.display = 'flex';
+    element.textContent = message;
+}
+
+function showRemoteAuthShell(message = '') {
+    const shell = document.getElementById('remote-auth-shell');
+    if (!shell) return;
+    const originInput = document.getElementById('remote-api-origin');
+    const usernameInput = document.getElementById('remote-username');
+    if (originInput && remotePanelOrigin) originInput.value = remotePanelOrigin;
+    if (usernameInput && remotePanelUsername) usernameInput.value = remotePanelUsername;
+    setRemoteAuthError(message);
+    shell.classList.add('visible');
+    updateRemoteConnectionStatus('Phone site waiting for a live panel URL', 'offline');
+}
+
+function hideRemoteAuthShell() {
+    const shell = document.getElementById('remote-auth-shell');
+    if (!shell) return;
+    shell.classList.remove('visible');
+    setRemoteAuthError('');
+}
+
+async function syncPanelSession() {
+    if (REMOTE_MODE && !remotePanelOrigin) {
+        return false;
+    }
+
+    try {
+        const res = await fetch(`${API_BASE}/session`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.authenticated) {
+            return false;
+        }
+
+        if (data.token) {
+            setRemoteToken(data.token);
+        }
+        if (data.username) {
+            setRemoteUsername(data.username);
+        }
+        panelSessionChecked = true;
+        updateRemoteConnectionStatus(
+            REMOTE_MODE
+                ? `Connected to ${remotePanelOrigin}`
+                : 'Connected to local SwarmPanel',
+            'online',
+        );
+        return true;
+    } catch (err) {
+        console.error('❌ Session sync failed:', err);
+        return false;
+    }
+}
+
+async function loginRemotePanel() {
+    const originInput = document.getElementById('remote-api-origin');
+    const usernameInput = document.getElementById('remote-username');
+    const passwordInput = document.getElementById('remote-password');
+    const submitButton = document.getElementById('remote-login-button');
+
+    const nextOrigin = normalizeRemoteOrigin(originInput?.value);
+    const username = String(usernameInput?.value || '').trim();
+    const password = String(passwordInput?.value || '');
+
+    if (!nextOrigin) {
+        showRemoteAuthShell('Enter the live SwarmPanel URL first.');
+        return;
+    }
+    if (!username || !password) {
+        showRemoteAuthShell('Enter the SwarmPanel username and password.');
+        return;
+    }
+
+    setRemoteOrigin(nextOrigin);
+    setRemoteUsername(username);
+    setRemoteAuthError('');
+    if (submitButton) submitButton.disabled = true;
+
+    try {
+        const res = await rawFetch(`${remotePanelOrigin}/api/session/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.token) {
+            showRemoteAuthShell(data.detail || 'Unable to sign in to the live panel.');
+            return;
+        }
+
+        setRemoteToken(data.token);
+        panelSessionChecked = true;
+        hideRemoteAuthShell();
+        if (passwordInput) passwordInput.value = '';
+        await startPanelApplication();
+    } catch (err) {
+        showRemoteAuthShell(String(err));
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+    }
+}
+
+async function logoutPanel() {
+    try {
+        if (REMOTE_MODE && remotePanelOrigin && remotePanelToken) {
+            await fetch(`${API_BASE}/session/logout`, { method: 'POST' }).catch(() => null);
+        } else if (!REMOTE_MODE) {
+            await fetch(`${API_BASE}/session/logout`, { method: 'POST' }).catch(() => null);
+        }
+    } finally {
+        disconnectEventFeed();
+        panelAppStarted = false;
+        panelSessionChecked = false;
+        setRemoteToken('');
+        if (REMOTE_MODE) {
+            showRemoteAuthShell('Signed out of the live panel.');
+            updateRemoteConnectionStatus('Signed out', 'offline');
+            return;
+        }
+        window.location.href = '/login';
+    }
+}
+
+async function startPanelApplication() {
+    if (panelAppStarted) {
+        fetchDashboard();
+        fetchDiagnostics();
+        loadBotSelect();
+        loadDbSchemas();
+        loadEventFeedHistory();
+        connectEventFeed();
+        return true;
+    }
+
+    panelAppStarted = true;
+    fetchDashboard();
+    fetchDiagnostics();
+    loadBotSelect();
+    loadDbSchemas();
+    loadEventFeedHistory();
+    connectEventFeed();
+    return true;
+}
+
+async function bootstrapPanelApplication() {
+    if (REMOTE_MODE) {
+        const queryOrigin = getPanelOriginFromQuery();
+        if (queryOrigin) {
+            setRemoteOrigin(queryOrigin);
+        } else {
+            setRemoteOrigin(localStorage.getItem(REMOTE_ORIGIN_KEY) || '', false);
+        }
+        setRemoteToken(localStorage.getItem(REMOTE_TOKEN_KEY) || '', false);
+        setRemoteUsername(localStorage.getItem(REMOTE_USERNAME_KEY) || '', false);
+
+        if (!remotePanelOrigin) {
+            showRemoteAuthShell('Paste the live SwarmPanel URL to connect this GitHub Pages view.');
+            return false;
+        }
+
+        const ok = await syncPanelSession();
+        if (!ok) {
+            showRemoteAuthShell('Sign in to the live panel to continue.');
+            return false;
+        }
+
+        hideRemoteAuthShell();
+        return startPanelApplication();
+    }
+
+    await syncPanelSession();
+    return startPanelApplication();
 }
 
 function clearControlMatrixState(guildId = null) {
@@ -1009,7 +1309,30 @@ async function loadEventFeedHistory() {
     }
 }
 
+function disconnectEventFeed() {
+    if (eventFeedReconnectTimer) {
+        clearTimeout(eventFeedReconnectTimer);
+        eventFeedReconnectTimer = null;
+    }
+    if (eventFeedSocket) {
+        try {
+            eventFeedSocket.onclose = null;
+            eventFeedSocket.close();
+        } catch (err) {
+            console.warn('⚠️ Failed to close event feed socket:', err);
+        }
+        eventFeedSocket = null;
+    }
+    eventFeedConnectionState = 'offline';
+}
+
 function connectEventFeed() {
+    const wsUrl = buildWebSocketUrl('/ws');
+    if (!wsUrl) {
+        eventFeedConnectionState = 'offline';
+        renderEventFeed();
+        return;
+    }
     if (eventFeedSocket && (eventFeedSocket.readyState === WebSocket.OPEN || eventFeedSocket.readyState === WebSocket.CONNECTING)) {
         return;
     }
@@ -1021,8 +1344,7 @@ function connectEventFeed() {
     eventFeedConnectionState = 'connecting';
     renderEventFeed();
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    eventFeedSocket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    eventFeedSocket = new WebSocket(wsUrl);
 
     eventFeedSocket.onopen = () => {
         eventFeedConnectionState = 'online';
@@ -1049,9 +1371,20 @@ function connectEventFeed() {
         renderEventFeed();
     };
 
-    eventFeedSocket.onclose = () => {
+    eventFeedSocket.onclose = (event) => {
+        eventFeedSocket = null;
         eventFeedConnectionState = 'offline';
         renderEventFeed();
+        if (event?.code === 4401) {
+            panelSessionChecked = false;
+            panelAppStarted = false;
+            setRemoteToken('');
+            showRemoteAuthShell('The live event feed needs a fresh login token.');
+            return;
+        }
+        if (!panelAppStarted || (REMOTE_MODE && !remotePanelToken)) {
+            return;
+        }
         eventFeedReconnectTimer = setTimeout(connectEventFeed, 3000);
     };
 }
@@ -1965,6 +2298,11 @@ async function truncateSchema() {
 // 🔌 WIRE UP ALL BUTTONS
 // ================================
 document.addEventListener('DOMContentLoaded', () => {
+    if (REMOTE_MODE) {
+        document.body.classList.add('remote-pages-body');
+        updateRemoteConnectionStatus('GitHub Pages remote mode', 'idle');
+    }
+
     document.getElementById('refresh-dashboard')
         ?.addEventListener('click', fetchDashboard);
 
@@ -2026,17 +2364,25 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('table-select')
         ?.addEventListener('change', updateConfirmText);
 
-    // Initial page load
-    fetchDashboard();
-    fetchDiagnostics();
-    loadBotSelect();
-    loadDbSchemas();
-    loadEventFeedHistory();
-    connectEventFeed();
+    document.getElementById('remote-settings-button')
+        ?.addEventListener('click', () => showRemoteAuthShell());
+
+    document.getElementById('remote-login-button')
+        ?.addEventListener('click', loginRemotePanel);
+
+    document.getElementById('logout-button')
+        ?.addEventListener('click', logoutPanel);
+
+    bootstrapPanelApplication();
 });
 
 // ================================
 // 🔄 AUTO REFRESH (5s)
 // ================================
-setInterval(fetchDashboard, 5000);
-setInterval(fetchDiagnostics, 60000);
+setInterval(() => {
+    if (panelAppStarted) fetchDashboard();
+}, 5000);
+
+setInterval(() => {
+    if (panelAppStarted) fetchDiagnostics();
+}, 60000);

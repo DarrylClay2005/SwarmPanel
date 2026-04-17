@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111622" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>SwarmPanel Live</title>
+  <link rel="stylesheet" href="./app/static/styles.css?v=5" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>SwarmPanel Live</h1>
+    <div class="topbar-actions">
+      <span id="remote-connection-status" class="muted deck-timestamp topbar-status" data-tone="idle">GitHub Pages remote mode</span>
+      <button id="remote-settings-button" type="button">Connection</button>
+      <button id="logout-button" type="button">Logout</button>
+    </div>
+  </header>
+
+  <div id="remote-auth-shell" class="remote-auth-shell visible" aria-live="polite">
+    <div class="login-bg">
+      <div class="login-bg-orb login-bg-orb-1"></div>
+      <div class="login-bg-orb login-bg-orb-2"></div>
+      <div class="login-bg-orb login-bg-orb-3"></div>
+    </div>
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="login-logo-icon">S</div>
+        <h1>SwarmPanel Remote</h1>
+      </div>
+      <p class="login-subtitle">Connect this GitHub Pages front-end to your live SwarmPanel backend so you can monitor and control the swarm from your phone.</p>
+      <div id="remote-auth-error" class="login-error" style="display:none"></div>
+      <div class="stack">
+        <div class="login-field">
+          <label for="remote-api-origin">Live Panel URL</label>
+          <input id="remote-api-origin" type="url" inputmode="url" placeholder="https://your-public-panel-url.example.com" />
+        </div>
+        <div class="login-field">
+          <label for="remote-username">Username</label>
+          <input id="remote-username" type="text" autocomplete="username" placeholder="SwarmPanel admin username" />
+        </div>
+        <div class="login-field">
+          <label for="remote-password">Password</label>
+          <input id="remote-password" type="password" autocomplete="current-password" placeholder="SwarmPanel admin password" />
+        </div>
+        <button id="remote-login-button" class="login-submit" type="button">Connect To Live Panel</button>
+      </div>
+      <p class="muted" style="margin-top:16px;">Tip: this front-end needs a public SwarmPanel backend URL. A tunnel or reverse proxy works great when you want phone access without using your local IP directly.</p>
+    </div>
+  </div>
+
+  <main class="container">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Swarm Command Deck</h2>
+          <p class="muted">Live command posture for Aria and the worker swarm.</p>
+        </div>
+        <span id="overview-generated" class="muted deck-timestamp">Waiting for dashboard sync...</span>
+      </div>
+      <div id="overview-stats" class="overview-grid"></div>
+    </section>
+
+    <section class="panel" style="border-color: #cba6f7; background: linear-gradient(180deg, #181825 0%, #11111b 100%);">
+      <div class="section-title-row">
+        <h2 style="color: #cba6f7; display: flex; align-items: center; gap: 10px;">
+            <span style="display: inline-block; width: 12px; height: 12px; background: #a6e3a1; border-radius: 50%; box-shadow: 0 0 10px #a6e3a1; animation: pulseGlow 1.5s infinite;"></span>
+            🎵 Live Swarm Streams
+        </h2>
+        <span class="muted" id="live-sync-status" style="font-size: 0.9rem; border: 1px solid #313244; padding: 4px 10px; border-radius: 12px; background: #1e1e2e;">Live Sync: 2s</span>
+      </div>
+      <p class="muted">Real-time media feeds across all active worker nodes.</p>
+      <div id="now-playing-cards" class="cards" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; margin-top: 15px;"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <h2>Live Bot Dashboard</h2>
+        <button id="refresh-dashboard" type="button">Refresh</button>
+      </div>
+      <p class="muted">What each bot is doing right now (status, track, channel, filter, queue).</p>
+      <div id="dashboard-meta" class="muted"></div>
+      <h3 style="color: #cba6f7; margin-bottom: 8px; border-bottom: 1px solid #283042; padding-bottom: 5px;">👑 Swarm Orchestrator</h3>
+      <div id="aria-card-container" class="cards" style="margin-bottom: 25px;"></div>
+      <h3 style="color: #89b4fa; margin-bottom: 8px; border-bottom: 1px solid #283042; padding-bottom: 5px;">🎶 Swarm Worker Nodes</h3>
+      <div id="bot-cards" class="cards"></div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Guild</th>
+              <th>Channel</th>
+              <th>Status</th>
+              <th>Track</th>
+              <th>Filter</th>
+              <th>Loop</th>
+              <th>Queue</th>
+              <th>Position</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="sessions-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>System Diagnostics</h2>
+          <p class="muted">Runtime status for shared env wiring, bot database reachability, Discord inventory access, and Aria's Gemini health.</p>
+        </div>
+        <button id="refresh-diagnostics" type="button">Refresh Diagnostics</button>
+      </div>
+      <div id="diagnostics-summary" class="overview-grid"></div>
+      <div class="diagnostics-layout">
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Shared Runtime</h3>
+              <span class="muted">Music/.env</span>
+            </div>
+            <div id="shared-runtime-card" class="diagnostic-stack"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Health</h3>
+              <span class="muted">DB + Gemini</span>
+            </div>
+            <div id="aria-diagnostic-card" class="diagnostic-stack"></div>
+          </div>
+        </div>
+
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Worker Nodes</h3>
+              <span class="muted">DB + Discord</span>
+            </div>
+            <div id="worker-diagnostic-grid" class="worker-diagnostic-grid"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <h2>Direct Bot Controls</h2>
+      </div>
+      <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
+
+      <div class="control-shell">
+        <div class="control-main">
+          <div class="direct-control-grid">
+            <label class="control-field">
+              <span>Bot</span>
+              <select id="control-bot-select"></select>
+            </label>
+
+            <label class="control-field">
+              <span>Guild</span>
+              <select id="control-guild-select"></select>
+            </label>
+
+            <label class="control-field">
+              <span>Voice Channel</span>
+              <select id="control-voice-select"></select>
+            </label>
+          </div>
+
+          <label class="control-field control-field-wide">
+            <span>Track / Playlist URL</span>
+            <input id="control-source-input" type="text" placeholder="Paste a YouTube or SoundCloud link, livestream, playlist URL, or search text" />
+          </label>
+          <p class="muted">Direct play is routed by bot, guild, and voice channel. Text feedback stays on the bot's configured feedback channel, so there is no separate text-channel selector here.</p>
+
+          <div class="row">
+            <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
+
+            <label class="control-inline">
+              <span>Loop Mode</span>
+              <select id="control-loop-select">
+                <option value="queue" selected>Queue</option>
+                <option value="off">Off</option>
+                <option value="song">Song</option>
+              </select>
+            </label>
+
+            <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
+
+            <label class="control-inline">
+              <span>Filter</span>
+              <select id="control-filter-select">
+                <option value="none">None</option>
+                <option value="nightcore">Nightcore</option>
+                <option value="vaporwave">Vaporwave</option>
+                <option value="bassboost">Bassboost</option>
+                <option value="8d">8D</option>
+              </select>
+            </label>
+
+            <button id="apply-filter-mode" type="button">Apply Filter</button>
+            <button id="set-home-channel" type="button">Set Home Channel</button>
+          </div>
+
+          <div class="control-actions" aria-label="Direct playback controls">
+            <button class="control-action-btn" data-panel-action="PAUSE" type="button">Pause</button>
+            <button class="control-action-btn" data-panel-action="RESUME" type="button">Resume</button>
+            <button class="control-action-btn" data-panel-action="SKIP" type="button">Skip</button>
+            <button class="control-action-btn control-action-btn-stop" data-panel-action="STOP" type="button">Stop</button>
+            <button class="control-action-btn" data-panel-action="LEAVE" type="button">Leave Voice</button>
+            <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
+            <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
+            <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
+          </div>
+
+          <div id="control-status" class="status"></div>
+        </div>
+
+        <aside class="control-sidebar">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Selected Session</h3>
+              <span class="muted">Auto-synced</span>
+            </div>
+            <div id="control-context-card" class="control-context-card"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Syntax</h3>
+              <span class="muted">Discord-ready</span>
+            </div>
+            <div id="aria-command-guide" class="aria-command-guide"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Capability Matrix</h2>
+          <p class="muted">What the selected bot and guild are ready to do right now, plus how the whole swarm is positioned inside that guild.</p>
+        </div>
+      </div>
+      <div class="capability-layout">
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Bot Actions</h3>
+            <span class="muted">Live readiness</span>
+          </div>
+          <div id="selected-bot-capabilities" class="capability-list"></div>
+        </div>
+
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Guild Across The Swarm</h3>
+            <span class="muted">Real data</span>
+          </div>
+          <div id="selected-guild-matrix" class="swarm-guild-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Bot Server + Channel Explorer</h2>
+      <p class="muted">View all guilds/channels visible to each bot token.</p>
+      <div class="row">
+        <select id="bot-select"></select>
+        <button id="load-inventory" type="button">Load inventory</button>
+      </div>
+      <pre id="inventory-output" class="pre"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Database Controls</h2>
+      <p class="muted">Danger zone: clear one table or clear an entire schema.</p>
+      <div class="row">
+        <select id="schema-select"></select>
+        <select id="table-select"></select>
+        <button id="refresh-db" type="button">Refresh DB metadata</button>
+      </div>
+
+      <div class="row">
+        <button id="view-table-data" type="button" style="background-color: #3b4252;">👀 View table data</button>
+        <button id="truncate-table" class="danger" type="button">Truncate selected table</button>
+        <button id="truncate-schema" class="danger" type="button">Truncate selected schema</button>
+      </div>
+      <p class="muted">Table confirm text: <code id="confirm-table-text"></code></p>
+      <p class="muted">Schema confirm text: <code id="confirm-schema-text"></code></p>
+      <div id="db-status" class="status"></div>
+      <div id="data-viewer-container" style="display: none; margin-top: 20px; overflow-x: auto; max-height: 400px; border: 1px solid #283042; border-radius: 8px; background: #101727;">
+        <h3 id="data-viewer-title" style="margin: 0; padding: 12px; border-bottom: 1px solid #283042; position: sticky; top: 0; background: #141a28;">Table Data</h3>
+        <table>
+          <thead id="data-table-head"></thead>
+          <tbody id="data-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🚨 Live Error Feed</h2>
+      <pre id="error-feed" class="pre"></pre>
+    </section>
+  </main>
+
+  <script>
+    window.SWARM_PANEL_REMOTE_MODE = true;
+  </script>
+  <script src="./app/static/final_app.js?v=5"></script>
+</body>
+</html>

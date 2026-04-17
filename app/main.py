@@ -10,13 +10,23 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from starlette.middleware.sessions import SessionMiddleware
 
-from .auth import SESSION_AUTH_KEY, is_authenticated, require_api_auth, verify_credentials
+from .auth import (
+    SESSION_AUTH_KEY,
+    extract_bearer_token,
+    get_api_auth,
+    is_authenticated,
+    issue_api_token,
+    require_api_auth,
+    verify_api_token,
+    verify_credentials,
+)
 from .bots import ALL_BOTS, BOT_INDEX, MUSIC_BOTS
 from .config import load_settings
 from .database import PanelDatabase
@@ -48,6 +58,11 @@ class TruncateSchemaRequest(BaseModel):
     confirm_text: str
 
 
+class SessionLoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
     return {
         "type": event_type,
@@ -57,6 +72,22 @@ def _feed_event(level: str, title: str, description: str, *, source: str = "pane
         "source": source,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _get_api_auth(request: Request) -> dict[str, Any] | None:
+    return get_api_auth(
+        request,
+        secret_key=settings.session_secret,
+        max_age_seconds=settings.api_token_ttl_seconds,
+    )
+
+
+def _require_api_auth(request: Request) -> dict[str, Any]:
+    return require_api_auth(
+        request,
+        secret_key=settings.session_secret,
+        max_age_seconds=settings.api_token_ttl_seconds,
+    )
 
 
 def _coerce_control_int(value: Any, field_name: str) -> int:
@@ -175,6 +206,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="SwarmPanel", version="1.0.0", lifespan=lifespan)
+if settings.cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, max_age=60 * 60 * 12)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -217,15 +256,54 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {})
 
 
+@app.get("/api/session")
+async def api_session_status(request: Request):
+    auth = _get_api_auth(request)
+    if not auth:
+        return {"authenticated": False, "pages_public_url": settings.pages_public_url}
+
+    username = auth.get("username") or settings.admin_username
+    return {
+        "authenticated": True,
+        "mode": auth.get("mode") or "token",
+        "username": username,
+        "token": issue_api_token(settings.session_secret, username),
+        "pages_public_url": settings.pages_public_url,
+        "expires_in": settings.api_token_ttl_seconds,
+    }
+
+
+@app.post("/api/session/login")
+async def api_session_login(request: Request, payload: SessionLoginRequest):
+    if not verify_credentials(payload.username, payload.password, settings.admin_username, settings.admin_password):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    request.session[SESSION_AUTH_KEY] = True
+    token = issue_api_token(settings.session_secret, payload.username)
+    return {
+        "ok": True,
+        "token": token,
+        "username": payload.username,
+        "pages_public_url": settings.pages_public_url,
+        "expires_in": settings.api_token_ttl_seconds,
+    }
+
+
+@app.post("/api/session/logout")
+async def api_session_logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
 @app.get("/api/health")
 async def api_health(request: Request):
-    require_api_auth(request)
+    _require_api_auth(request)
     return {"ok": True}
 
 
 @app.get("/api/bots")
 async def list_bots(request: Request):
-    require_api_auth(request)
+    _require_api_auth(request)
     return {
         "bots": [
             {
@@ -242,7 +320,7 @@ async def list_bots(request: Request):
 
 @app.get("/api/dashboard")
 async def dashboard_data(request: Request):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         data = await db.get_dashboard_data()
     except Exception as exc:
@@ -311,7 +389,7 @@ async def dashboard_data(request: Request):
 
 @app.get("/api/system-diagnostics")
 async def system_diagnostics(request: Request, force: bool = False):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         return await diagnostics_service.get_snapshot(force=force)
     except Exception as exc:
@@ -321,7 +399,7 @@ async def system_diagnostics(request: Request, force: bool = False):
 
 @app.get("/api/bots/{bot_key}/inventory")
 async def bot_inventory(request: Request, bot_key: str, include_channels: bool = True):
-    require_api_auth(request)
+    _require_api_auth(request)
     bot = BOT_INDEX.get(bot_key)
     if not bot:
         raise HTTPException(status_code=404, detail="Unknown bot key")
@@ -452,7 +530,7 @@ async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> d
 
 @app.get("/api/bots/{bot_key}/control-state")
 async def bot_control_state(request: Request, bot_key: str, guild_id: int):
-    require_api_auth(request)
+    _require_api_auth(request)
     bot = BOT_INDEX.get(bot_key)
     if not bot or bot.kind != "music":
         raise HTTPException(status_code=404, detail="Unknown music bot key")
@@ -469,7 +547,7 @@ async def bot_control_state(request: Request, bot_key: str, guild_id: int):
 
 @app.get("/api/guilds/{guild_id}/control-matrix")
 async def guild_control_matrix(request: Request, guild_id: int):
-    require_api_auth(request)
+    _require_api_auth(request)
 
     async def collect(bot) -> dict[str, Any]:
         try:
@@ -489,7 +567,7 @@ async def guild_control_matrix(request: Request, guild_id: int):
 
 @app.get("/api/databases")
 async def databases(request: Request, include_tables: bool = False):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         schemas = await db.list_schemas()
     except Exception as exc:
@@ -505,7 +583,7 @@ async def databases(request: Request, include_tables: bool = False):
 
 @app.get("/api/databases/{schema}/tables")
 async def tables(request: Request, schema: str):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         return {"schema": schema, "tables": await db.list_tables(schema)}
     except Exception as exc:
@@ -514,7 +592,7 @@ async def tables(request: Request, schema: str):
 
 @app.post("/api/database/truncate-table")
 async def truncate_table(request: Request, payload: TruncateTableRequest):
-    require_api_auth(request)
+    _require_api_auth(request)
     expected_confirmation = f"TRUNCATE {payload.schema_name}.{payload.table_name}"
     if payload.confirm_text.strip() != expected_confirmation:
         raise HTTPException(
@@ -531,7 +609,7 @@ async def truncate_table(request: Request, payload: TruncateTableRequest):
 
 @app.post("/api/database/truncate-schema")
 async def truncate_schema(request: Request, payload: TruncateSchemaRequest):
-    require_api_auth(request)
+    _require_api_auth(request)
     expected_confirmation = f"TRUNCATE ALL {payload.schema_name}"
     if payload.confirm_text.strip() != expected_confirmation:
         raise HTTPException(
@@ -557,7 +635,7 @@ async def get_table_data(
     table_name: str, 
     limit: int = 100
 ):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         data = await db.get_table_data(schema_name, table_name, limit)
         return {"ok": True, "data": data}
@@ -575,7 +653,7 @@ class BotControlRequest(BaseModel):
 
 @app.post("/api/bots/control")
 async def api_bot_control(request: Request, req: BotControlRequest):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         action, guild_id, payload = await _normalize_bot_control_request(req)
         result = await db.control_bot(req.bot_key, guild_id, action, payload)
@@ -601,6 +679,10 @@ recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    if not verify_api_token(token, settings.session_secret, settings.api_token_ttl_seconds):
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     active_connections.append(websocket)
     try:
@@ -636,7 +718,7 @@ async def push_feed_event(
 
 @app.get("/api/events")
 async def list_events(request: Request, limit: int = 50):
-    require_api_auth(request)
+    _require_api_auth(request)
     bounded_limit = max(1, min(int(limit), 100))
     events = list(recent_feed_events)[-bounded_limit:]
     return {"events": events}

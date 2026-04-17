@@ -8,6 +8,7 @@ Web control panel for all 8 music bots plus Aria.
 - Bot explorer to view each bot's guilds and channels.
 - Database control section to truncate a specific table or all tables in a schema.
 - Session login protection for panel access.
+- GitHub Pages remote front-end at `https://darrylclay2005.github.io/SwarmPanel/` for phone-friendly access.
 
 ## Setup
 1. Create and activate a virtual environment.
@@ -27,6 +28,9 @@ Web control panel for all 8 music bots plus Aria.
   - `PANEL_ADMIN_USERNAME`
   - `PANEL_ADMIN_PASSWORD` (required)
   - `PANEL_SESSION_SECRET`
+  - `PANEL_CORS_ALLOWED_ORIGINS`
+  - `PANEL_API_TOKEN_TTL_SECONDS`
+  - `PANEL_PAGES_PUBLIC_URL`
 - Discord tokens:
   - `GWS_DISCORD_TOKEN`
   - `HARMONIC_DISCORD_TOKEN`
@@ -46,3 +50,5 @@ Web control panel for all 8 music bots plus Aria.
 - Keep this panel behind trusted network access and strong credentials.
 - Bot inventory/channels are fetched via Discord REST with each bot token.
 - If a token is missing, that bot still appears in the dashboard but Discord inventory calls are disabled.
+- The GitHub Pages site is a static front-end. It still needs a public SwarmPanel backend URL to talk to.
+- `scripts/start_quick_tunnel.sh` opens a Cloudflare quick tunnel so the GitHub Pages site can reach your local panel without using your local IP on the phone.

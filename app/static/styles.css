@@ -54,6 +54,14 @@ body {
   color: var(--purple);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .topbar button {
   padding: 6px 14px;
   font-size: 0.82rem;
@@ -69,6 +77,20 @@ body {
 .topbar button:hover {
   border-color: var(--red);
   color: var(--red);
+}
+
+.topbar-status[data-tone="online"] {
+  color: var(--green);
+  border-color: rgba(166,227,161,0.3);
+}
+
+.topbar-status[data-tone="offline"] {
+  color: var(--red);
+  border-color: rgba(243,139,168,0.3);
+}
+
+.topbar-status[data-tone="idle"] {
+  color: var(--text-muted);
 }
 
 /* ── LAYOUT ── */
@@ -1109,6 +1131,26 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
   background: var(--bg-base);
   overflow: hidden;
   position: relative;
+}
+
+.remote-auth-shell {
+  position: fixed;
+  inset: 0;
+  display: none;
+  place-items: center;
+  background: rgba(4, 8, 14, 0.72);
+  z-index: 250;
+  padding: 16px;
+}
+
+.remote-auth-shell.visible {
+  display: grid;
+}
+
+.remote-auth-shell .login-card {
+  width: min(480px, 96vw);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
 }
 
 .login-bg {
