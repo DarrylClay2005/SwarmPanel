@@ -15,6 +15,17 @@
   </header>
 
   <main class="container">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Swarm Command Deck</h2>
+          <p class="muted">Live command posture for Aria and the worker swarm.</p>
+        </div>
+        <span id="overview-generated" class="muted deck-timestamp">Waiting for dashboard sync...</span>
+      </div>
+      <div id="overview-stats" class="overview-grid"></div>
+    </section>
+
     <section class="panel" style="border-color: #cba6f7; background: linear-gradient(180deg, #181825 0%, #11111b 100%);">
       <div class="section-title-row">
         <h2 style="color: #cba6f7; display: flex; align-items: center; gap: 10px;">
@@ -65,59 +76,81 @@
       </div>
       <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
 
-      <div class="direct-control-grid">
-        <label class="control-field">
-          <span>Bot</span>
-          <select id="control-bot-select"></select>
-        </label>
+      <div class="control-shell">
+        <div class="control-main">
+          <div class="direct-control-grid">
+            <label class="control-field">
+              <span>Bot</span>
+              <select id="control-bot-select"></select>
+            </label>
 
-        <label class="control-field">
-          <span>Guild</span>
-          <select id="control-guild-select"></select>
-        </label>
+            <label class="control-field">
+              <span>Guild</span>
+              <select id="control-guild-select"></select>
+            </label>
 
-        <label class="control-field">
-          <span>Voice Channel</span>
-          <select id="control-voice-select"></select>
-        </label>
+            <label class="control-field">
+              <span>Voice Channel</span>
+              <select id="control-voice-select"></select>
+            </label>
 
-        <label class="control-field">
-          <span>Text Channel</span>
-          <select id="control-text-select"></select>
-        </label>
+            <label class="control-field">
+              <span>Text Channel</span>
+              <select id="control-text-select"></select>
+            </label>
+          </div>
+
+          <label class="control-field control-field-wide">
+            <span>Track / Playlist URL</span>
+            <input id="control-source-input" type="text" placeholder="Paste a YouTube or SoundCloud link, livestream, playlist URL, or search text" />
+          </label>
+
+          <div class="row">
+            <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
+
+            <label class="control-inline">
+              <span>Loop Mode</span>
+              <select id="control-loop-select">
+                <option value="off">Off</option>
+                <option value="song">Song</option>
+                <option value="queue">Queue</option>
+              </select>
+            </label>
+
+            <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
+          </div>
+
+          <div class="control-actions" aria-label="Direct playback controls">
+            <button class="control-action-btn" data-panel-action="PAUSE" type="button">Pause</button>
+            <button class="control-action-btn" data-panel-action="RESUME" type="button">Resume</button>
+            <button class="control-action-btn" data-panel-action="SKIP" type="button">Skip</button>
+            <button class="control-action-btn control-action-btn-stop" data-panel-action="STOP" type="button">Stop</button>
+            <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
+            <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
+            <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
+          </div>
+
+          <div id="control-status" class="status"></div>
+        </div>
+
+        <aside class="control-sidebar">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Selected Session</h3>
+              <span class="muted">Auto-synced</span>
+            </div>
+            <div id="control-context-card" class="control-context-card"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Syntax</h3>
+              <span class="muted">Discord-ready</span>
+            </div>
+            <div id="aria-command-guide" class="aria-command-guide"></div>
+          </div>
+        </aside>
       </div>
-
-      <label class="control-field control-field-wide">
-        <span>Track / Playlist URL</span>
-        <input id="control-source-input" type="text" placeholder="Paste a YouTube or SoundCloud link, livestream, playlist URL, or search text" />
-      </label>
-
-      <div class="row">
-        <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
-
-        <label class="control-inline">
-          <span>Loop Mode</span>
-          <select id="control-loop-select">
-            <option value="off">Off</option>
-            <option value="song">Song</option>
-            <option value="queue">Queue</option>
-          </select>
-        </label>
-
-        <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
-      </div>
-
-      <div class="control-actions" aria-label="Direct playback controls">
-        <button class="control-action-btn" data-panel-action="PAUSE" type="button">Pause</button>
-        <button class="control-action-btn" data-panel-action="RESUME" type="button">Resume</button>
-        <button class="control-action-btn" data-panel-action="SKIP" type="button">Skip</button>
-        <button class="control-action-btn control-action-btn-stop" data-panel-action="STOP" type="button">Stop</button>
-        <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
-        <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
-        <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
-      </div>
-
-      <div id="control-status" class="status"></div>
     </section>
 
     <section class="panel">

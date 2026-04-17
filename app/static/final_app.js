@@ -33,6 +33,105 @@ function formatDuration(seconds) {
     return `${m}:${rem}`;
 }
 
+function formatHeartbeatAge(seconds) {
+    if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) {
+        return 'No heartbeat';
+    }
+    const age = Math.max(0, Math.floor(Number(seconds)));
+    if (age < 60) return `${age}s ago`;
+    const minutes = Math.floor(age / 60);
+    const remainder = age % 60;
+    return remainder ? `${minutes}m ${remainder}s ago` : `${minutes}m ago`;
+}
+
+function describeBotStatus(status) {
+    const normalized = String(status || 'unknown').toLowerCase();
+    if (normalized === 'online') {
+        return { label: 'Online', color: '#a6e3a1', tone: 'online' };
+    }
+    if (normalized === 'stale') {
+        return { label: 'Stale', color: '#fab387', tone: 'stale' };
+    }
+    if (normalized === 'offline' || normalized === 'error' || normalized === 'db-unavailable') {
+        return { label: 'Offline', color: '#f38ba8', tone: 'offline' };
+    }
+    return { label: 'Idle', color: '#89b4fa', tone: 'idle' };
+}
+
+function selectedOptionText(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return '';
+    return select.options[select.selectedIndex]?.text || '';
+}
+
+function renderOverview(bots, generatedAt = null) {
+    const container = document.getElementById('overview-stats');
+    const timestamp = document.getElementById('overview-generated');
+    if (!container) return;
+
+    const workerBots = (bots || []).filter(bot => bot.kind === 'music');
+    const orchestrator = (bots || []).find(bot => bot.kind === 'orchestrator');
+    const onlineWorkers = workerBots.filter(bot => describeBotStatus(bot.status).tone === 'online').length;
+    const staleWorkers = workerBots.filter(bot => describeBotStatus(bot.status).tone === 'stale').length;
+    const liveSessions = workerBots.reduce((sum, bot) => sum + (Array.isArray(bot.sessions) ? bot.sessions.filter(session => session.is_playing).length : 0), 0);
+    const activeGuilds = new Set();
+
+    workerBots.forEach(bot => {
+        (bot.sessions || []).forEach(session => {
+            if (session.guild_id !== null && session.guild_id !== undefined) {
+                activeGuilds.add(String(session.guild_id));
+            }
+        });
+    });
+
+    const feedMeta = {
+        online: { label: 'Feed Live', detail: 'Realtime event bridge connected', tone: 'online' },
+        connecting: { label: 'Feed Syncing', detail: 'Negotiating websocket link', tone: 'stale' },
+        offline: { label: 'Feed Offline', detail: 'Retry loop armed', tone: 'offline' },
+    }[eventFeedConnectionState] || { label: 'Feed Unknown', detail: 'Waiting for status', tone: 'idle' };
+
+    const cards = [
+        {
+            label: 'Aria Link',
+            value: describeBotStatus(orchestrator?.status).label,
+            detail: orchestrator ? `Heartbeat ${formatHeartbeatAge(orchestrator.heartbeat_age_seconds)}` : 'No orchestrator snapshot yet',
+            tone: describeBotStatus(orchestrator?.status).tone,
+        },
+        {
+            label: 'Workers Online',
+            value: `${onlineWorkers}/${workerBots.length}`,
+            detail: staleWorkers ? `${staleWorkers} stale heartbeat${staleWorkers === 1 ? '' : 's'}` : 'Heartbeat grid looks clean',
+            tone: onlineWorkers ? 'online' : 'offline',
+        },
+        {
+            label: 'Live Sessions',
+            value: String(liveSessions),
+            detail: `${activeGuilds.size} guild${activeGuilds.size === 1 ? '' : 's'} carrying audio`,
+            tone: liveSessions ? 'online' : 'idle',
+        },
+        {
+            label: 'Event Feed',
+            value: feedMeta.label,
+            detail: feedMeta.detail,
+            tone: feedMeta.tone,
+        },
+    ];
+
+    container.innerHTML = cards.map(card => `
+        <article class="overview-card overview-card-${card.tone}">
+            <div class="overview-card-label">${card.label}</div>
+            <div class="overview-card-value">${card.value}</div>
+            <div class="overview-card-detail">${card.detail}</div>
+        </article>
+    `).join('');
+
+    if (timestamp) {
+        timestamp.textContent = generatedAt
+            ? `Updated ${new Date(generatedAt).toLocaleTimeString()}`
+            : 'Waiting for dashboard sync...';
+    }
+}
+
 // ================================
 // 📡 FETCH DASHBOARD DATA
 // ================================
@@ -45,6 +144,7 @@ async function fetchDashboard() {
         const bots = data.bots || [];
         dashboardBotsState = bots;
 
+        renderOverview(bots, data.generated_at);
         renderBots(bots);
 
         let allSessions = [];
@@ -63,6 +163,8 @@ async function fetchDashboard() {
         renderSessions(allSessions);
         renderNowPlaying(allSessions);
         syncControlSelectionsFromDashboard();
+        renderControlContext();
+        renderAriaCommandGuide();
 
         const meta = document.getElementById('dashboard-meta');
         if (meta && data.generated_at) {
@@ -179,10 +281,8 @@ function renderBots(bots) {
     if (ariaContainer) ariaContainer.innerHTML = "";
 
     bots.forEach(bot => {
-        const isOnline = bot.status === 'online' || bot.status === 'ONLINE';
-        const isError = bot.status === 'error' || bot.status === 'OFFLINE';
-        const statusColor = isOnline ? '#a6e3a1' : isError ? '#f38ba8' : '#fab387';
-        const statusLabel = isOnline ? 'Online' : isError ? 'Offline' : 'Idle';
+        const statusMeta = describeBotStatus(bot.status);
+        const heartbeatLabel = formatHeartbeatAge(bot.heartbeat_age_seconds);
 
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
@@ -205,8 +305,8 @@ function renderBots(bots) {
                 <div class="bot-info">
                     <div class="bot-name">${bot.display_name}</div>
                     <div class="bot-status-row">
-                        <span class="bot-status-dot" style="background:${statusColor}; box-shadow: 0 0 6px ${statusColor};"></span>
-                        <span class="bot-status-label" style="color:${statusColor};">${statusLabel}</span>
+                        <span class="bot-status-dot" style="background:${statusMeta.color}; box-shadow: 0 0 6px ${statusMeta.color};"></span>
+                        <span class="bot-status-label" style="color:${statusMeta.color};">${statusMeta.label}</span>
                     </div>
                 </div>
             </div>
@@ -220,6 +320,10 @@ function renderBots(bots) {
                     <span class="bot-stat-val" style="color: ${bot.active_playing_count > 0 ? '#a6e3a1' : 'inherit'}">${bot.active_playing_count || 0}</span>
                     <span class="bot-stat-lbl">Playing</span>
                 </div>
+            </div>
+            <div class="bot-meta-row">
+                <span class="bot-meta-pill">Heartbeat ${heartbeatLabel}</span>
+                <span class="bot-meta-pill">${bot.heartbeat_status || 'unknown'}</span>
             </div>
             ${bot.kind !== 'orchestrator' ? `
             <div class="bot-actions">
@@ -355,6 +459,8 @@ async function loadBotSelect() {
         if (controlSel?.value) {
             loadControlInventory(controlSel.value);
         }
+        renderControlContext();
+        renderAriaCommandGuide();
     } catch (err) {
         console.error("❌ Failed to load bot list:", err);
     }
@@ -502,6 +608,7 @@ function renderEventFeed() {
     const header = `Feed: ${connectionLabel}`;
     if (!eventFeedEntries.length) {
         out.textContent = `${header}\n\nNo live events yet.`;
+        renderOverview(dashboardBotsState);
         return;
     }
 
@@ -517,6 +624,7 @@ function renderEventFeed() {
         });
 
     out.textContent = `${header}\n\n${lines.join('\n\n')}`;
+    renderOverview(dashboardBotsState);
 }
 
 async function loadEventFeedHistory() {
@@ -691,6 +799,70 @@ function syncControlSelectionsFromDashboard() {
         const voiceOption = Array.from(voiceSel.options).find(option => option.value === String(session.channel_id));
         if (voiceOption) voiceSel.value = String(session.channel_id);
     }
+
+    renderControlContext();
+    renderAriaCommandGuide();
+}
+
+function renderControlContext() {
+    const container = document.getElementById('control-context-card');
+    if (!container) return;
+
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const bot = dashboardBotsState.find(item => item.key === botKey) || null;
+    const session = botKey && guildId ? getDashboardSession(botKey, guildId) : null;
+    const statusMeta = describeBotStatus(bot?.status);
+    const guildName = selectedOptionText('control-guild-select') || 'No guild selected';
+    const voiceName = selectedOptionText('control-voice-select') || 'No voice channel selected';
+    const textName = selectedOptionText('control-text-select') || 'No text channel selected';
+
+    if (!botKey) {
+        container.innerHTML = `
+            <div class="control-context-empty">
+                Pick a bot and guild to inspect the live control target.
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = `
+        <div class="control-context-top">
+            <div>
+                <div class="control-context-bot">${bot?.display_name || botKey}</div>
+                <div class="control-context-guild">${guildName}</div>
+            </div>
+            <span class="control-context-status control-context-status-${statusMeta.tone}">${statusMeta.label}</span>
+        </div>
+        <div class="control-context-track">${session?.title || 'Idle. No live playback in the selected guild.'}</div>
+        <div class="control-context-meta">
+            <span>Voice: ${session?.channel_name || voiceName}</span>
+            <span>Text: ${textName}</span>
+            <span>Queue: ${session?.queue_count ?? 0}</span>
+            <span>Loop: ${session?.loop_mode || 'off'}</span>
+            <span>Filter: ${session?.filter_mode || 'none'}</span>
+            <span>Heartbeat: ${formatHeartbeatAge(bot?.heartbeat_age_seconds)}</span>
+        </div>
+    `;
+}
+
+function renderAriaCommandGuide() {
+    const container = document.getElementById('aria-command-guide');
+    if (!container) return;
+
+    const botKey = document.getElementById('control-bot-select')?.value || 'melodic';
+    const voiceChannelId = document.getElementById('control-voice-select')?.value || 'VOICE_CHANNEL_ID';
+    const sourceInput = document.getElementById('control-source-input')?.value?.trim();
+    const playTarget = sourceInput || 'daft punk around the world';
+
+    const examples = [
+        `aria play ${playTarget} via ${botKey}`,
+        `aria pause ${botKey}`,
+        `aria filter nightcore on ${botKey}`,
+        `aria home ${botKey} <#${voiceChannelId}>`,
+    ];
+
+    container.innerHTML = examples.map(example => `<code class="aria-command-line">${example}</code>`).join('');
 }
 
 async function loadControlInventory(botKey) {
@@ -709,6 +881,8 @@ async function loadControlInventory(botKey) {
         }
         controlInventoryState = data;
         populateControlGuilds();
+        renderControlContext();
+        renderAriaCommandGuide();
         setControlStatus(`Loaded ${data.guilds?.length || 0} guilds for ${data.bot?.display_name || botKey}.`);
     } catch (err) {
         console.error("❌ Failed to load control inventory:", err);
@@ -751,6 +925,7 @@ async function queueFromPanel() {
 
     setControlStatus(result.data?.message || 'Play request sent.');
     if (sourceInput) sourceInput.value = '';
+    renderAriaCommandGuide();
 }
 
 async function applyLoopModeFromPanel() {
@@ -975,6 +1150,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('control-guild-select')
         ?.addEventListener('change', populateControlChannels);
+
+    document.getElementById('control-voice-select')
+        ?.addEventListener('change', () => {
+            renderControlContext();
+            renderAriaCommandGuide();
+        });
+
+    document.getElementById('control-text-select')
+        ?.addEventListener('change', renderControlContext);
+
+    document.getElementById('control-source-input')
+        ?.addEventListener('input', renderAriaCommandGuide);
 
     document.getElementById('queue-from-panel')
         ?.addEventListener('click', queueFromPanel);

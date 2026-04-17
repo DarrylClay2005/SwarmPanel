@@ -327,6 +327,13 @@ async def api_bot_control(request: Request, req: BotControlRequest):
     require_api_auth(request)
     try:
         result = await db.control_bot(req.bot_key, req.guild_id, req.action, req.payload)
+        await push_feed_event(
+            "info",
+            "Bot Control Accepted",
+            result.get("message") or f"{req.action} accepted for {req.bot_key} in guild {req.guild_id}.",
+            source="api",
+            event_type="command_ack",
+        )
         return {"ok": True, **result}
     except ValueError as e:
         await push_feed_event("warning", "Invalid Bot Control", str(e), source="api")

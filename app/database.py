@@ -27,6 +27,20 @@ YOUTUBE_HOSTS = {
 SOUNDCLOUD_HOST_SUFFIXES = ("soundcloud.com",)
 SOUNDCLOUD_HOSTS = {"snd.sc"}
 THUMBNAIL_CACHE_TTL_SECONDS = 60 * 60
+GUILD_SETTINGS_COLUMNS = (
+    ("home_vc_id", "BIGINT"),
+    ("volume", "INT DEFAULT 100"),
+    ("loop_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("filter_mode", "VARCHAR(20) DEFAULT 'none'"),
+    ("dj_role_id", "BIGINT DEFAULT NULL"),
+    ("feedback_channel_id", "BIGINT DEFAULT NULL"),
+    ("transition_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("custom_speed", "FLOAT DEFAULT 1.0"),
+    ("custom_pitch", "FLOAT DEFAULT 1.0"),
+    ("custom_modifiers_left", "INT DEFAULT 0"),
+    ("dj_only_mode", "BOOLEAN DEFAULT FALSE"),
+    ("stay_in_vc", "BOOLEAN DEFAULT FALSE"),
+)
 
 
 def _validate_identifier(value: str, field_name: str) -> str:
@@ -181,6 +195,20 @@ class PanelDatabase:
             async with conn.cursor() as cur:
                 await cur.execute(query, params)
                 return cur.rowcount
+
+    async def _ensure_music_guild_settings_schema(self, cur, schema: str, prefix: str) -> None:
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_guild_settings` "
+            "(guild_id BIGINT PRIMARY KEY)"
+        )
+        for column_name, definition in GUILD_SETTINGS_COLUMNS:
+            try:
+                await cur.execute(
+                    f"ALTER TABLE `{schema}`.`{prefix}_guild_settings` "
+                    f"ADD COLUMN {column_name} {definition}"
+                )
+            except Exception:
+                pass
 
     async def _resolve_soundcloud_thumbnail(self, video_url: str | None) -> str | None:
         if not _is_soundcloud_url(video_url):
@@ -554,8 +582,16 @@ class PanelDatabase:
                 
                 elif action == "RESTART":
                     # Update global health table so the node's system manager actually restarts it
-                    await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.swarm_health (bot_name VARCHAR(50) PRIMARY KEY, status VARCHAR(20), last_pulse TIMESTAMP)")
-                    await cur.execute(f"UPDATE `{schema}`.swarm_health SET status = 'RESTART' WHERE bot_name = %s", (bot_key,))
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.swarm_health "
+                        "(bot_name VARCHAR(50) PRIMARY KEY, status VARCHAR(20), "
+                        "last_pulse TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"
+                    )
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.swarm_health (bot_name, status, last_pulse) VALUES (%s, 'RESTART', NOW()) "
+                        "ON DUPLICATE KEY UPDATE status = VALUES(status), last_pulse = NOW()",
+                        (bot_key,),
+                    )
                     # Simulate a global playback stall so the watchdog auto-resumes upon booting back up
                     try:
                         await cur.execute(f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE")
@@ -591,6 +627,7 @@ class PanelDatabase:
 
                 elif action == "LOOP":
                     mode = _normalize_loop_mode(payload)
+                    await self._ensure_music_guild_settings_schema(cur, schema, prefix)
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, loop_mode) VALUES (%s, %s) "
                         f"ON DUPLICATE KEY UPDATE loop_mode = VALUES(loop_mode)",
