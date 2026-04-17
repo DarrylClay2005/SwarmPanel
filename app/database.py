@@ -65,6 +65,14 @@ def _normalize_loop_mode(value: Any) -> str:
     return mode
 
 
+def _normalize_filter_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower().replace(" ", "")
+    valid_modes = {"none", "nightcore", "vaporwave", "bassboost", "8d"}
+    if mode not in valid_modes:
+        raise ValueError(f"Invalid filter mode: {value!r}. Expected one of: {', '.join(sorted(valid_modes))}")
+    return mode
+
+
 
 def _extract_youtube_video_id(video_url: str | None) -> str | None:
     if not video_url:
@@ -300,7 +308,7 @@ class PanelDatabase:
 
         schema = _validate_identifier(bot.db_schema, "schema")
         prefix = _validate_identifier(bot.table_prefix, "table prefix")
-        tables = [f"{prefix}_playback_state", f"{prefix}_guild_settings", f"{prefix}_queue"]
+        tables = [f"{prefix}_playback_state", f"{prefix}_guild_settings", f"{prefix}_queue", f"{prefix}_bot_home_channels"]
         guild_ids: set[int] = set()
 
         for table in tables:
@@ -321,18 +329,21 @@ class PanelDatabase:
         playback_table = f"{prefix}_playback_state"
         settings_table = f"{prefix}_guild_settings"
         queue_table = f"{prefix}_queue"
+        home_table = f"{prefix}_bot_home_channels"
         heartbeat_table = "swarm_health"
 
         table_exists = {
             "playback": await self._table_exists(schema, playback_table),
             "settings": await self._table_exists(schema, settings_table),
             "queue": await self._table_exists(schema, queue_table),
+            "home": await self._table_exists(schema, home_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
         }
 
         playback_rows: list[dict[str, Any]] = []
         filter_map: dict[int, dict[str, Any]] = {}
         queue_map: dict[int, int] = {}
+        home_map: dict[int, int | None] = {}
         known_guilds: set[int] = set()
 
         if table_exists["playback"]:
@@ -369,6 +380,16 @@ class PanelDatabase:
                 queue_map[guild_id] = int(row.get("queue_len") or 0)
                 known_guilds.add(guild_id)
 
+        if table_exists["home"]:
+            rows = await self._fetchall(
+                f"SELECT guild_id, home_vc_id FROM `{schema}`.`{home_table}` WHERE bot_name = %s",
+                (bot.key,),
+            )
+            for row in rows:
+                guild_id = int(row["guild_id"])
+                home_map[guild_id] = int(row["home_vc_id"]) if row.get("home_vc_id") else None
+                known_guilds.add(guild_id)
+
         playback_map = {int(row["guild_id"]): row for row in playback_rows if row.get("guild_id") is not None}
         sessions = []
         active_playing_count = 0
@@ -396,6 +417,8 @@ class PanelDatabase:
                     "loop_mode": settings.get("loop_mode", "off"),
                     "shuffle_mode": settings.get("shuffle_mode", 0),
                     "queue_count": queue_map.get(guild_id, 0),
+                    "home_channel_id": home_map.get(guild_id),
+                    "home_channel_name": None,
                     "guild_name": None,
                     "channel_name": None,
                 }
@@ -636,6 +659,25 @@ class PanelDatabase:
                     result["loop_mode"] = mode
                     result["message"] = f"Loop mode set to {mode} for guild {gid} on {bot.display_name}."
 
+                elif action == "FILTER":
+                    mode = _normalize_filter_mode(payload)
+                    await self._ensure_music_guild_settings_schema(cur, schema, prefix)
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, filter_mode) VALUES (%s, %s) "
+                        f"ON DUPLICATE KEY UPDATE filter_mode = VALUES(filter_mode)",
+                        (gid, mode),
+                    )
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` "
+                        "(guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"
+                    )
+                    await cur.execute(
+                        f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                        (gid, bot_key, "UPDATE_FILTER"),
+                    )
+                    result["filter_mode"] = mode
+                    result["message"] = f"Filter mode set to {mode} for guild {gid} on {bot.display_name}."
+
                 elif action == "SHUFFLE":
                     await cur.execute(f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s ORDER BY id ASC", (gid,))
                     q = await cur.fetchall()
@@ -682,6 +724,40 @@ class PanelDatabase:
                         (bot_key, gid, voice_channel_id, text_channel_id, "PLAY", source_url),
                     )
                     result["message"] = f"Queued a direct PLAY order for {bot.display_name} in guild {gid}."
+
+                elif action == "LEAVE":
+                    force_leave = False
+                    if isinstance(payload, dict):
+                        force_leave = bool(payload.get("force"))
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
+                        "id INT AUTO_INCREMENT PRIMARY KEY, "
+                        "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
+                        "command VARCHAR(50), data TEXT)"
+                    )
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
+                        "(bot_name, guild_id, vc_id, text_channel_id, command, data) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (bot_key, gid, 0, 0, "LEAVE", "force" if force_leave else ""),
+                    )
+                    result["message"] = f"Queued a direct LEAVE order for {bot.display_name} in guild {gid}."
+
+                elif action == "SET_HOME":
+                    if not isinstance(payload, dict):
+                        raise ValueError("SET_HOME payload must be an object with voice_channel_id")
+
+                    voice_channel_id = _coerce_int(payload.get("voice_channel_id"), "voice_channel_id")
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_bot_home_channels` "
+                        "(guild_id BIGINT, bot_name VARCHAR(50), home_vc_id BIGINT, PRIMARY KEY (guild_id, bot_name))"
+                    )
+                    await cur.execute(
+                        f"REPLACE INTO `{schema}`.`{prefix}_bot_home_channels` (guild_id, bot_name, home_vc_id) VALUES (%s, %s, %s)",
+                        (gid, bot_key, voice_channel_id),
+                    )
+                    result["voice_channel_id"] = voice_channel_id
+                    result["message"] = f"Set home channel for {bot.display_name} in guild {gid}."
 
                 else:
                     raise ValueError(f"Unsupported action: {action}")

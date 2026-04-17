@@ -20,6 +20,7 @@ from .auth import SESSION_AUTH_KEY, is_authenticated, require_api_auth, verify_c
 from .bots import ALL_BOTS, BOT_INDEX
 from .config import load_settings
 from .database import PanelDatabase
+from .diagnostics import RuntimeDiagnosticsService
 from .discord_api import DiscordInventoryService
 
 
@@ -27,6 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent
 settings = load_settings()
 db = PanelDatabase(settings)
 discord_service = DiscordInventoryService()
+diagnostics_service = RuntimeDiagnosticsService(settings, discord_service)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 action_logger = logging.getLogger("swarm_panel.actions")
@@ -62,6 +64,7 @@ async def lifespan(_: FastAPI):
     except Exception as exc:
         logging.getLogger("swarm_panel").warning("Initial DB connection failed at startup: %s", exc)
     await discord_service.connect()
+    await diagnostics_service.connect()
     background_tasks.clear()
     background_tasks.extend(
         [
@@ -83,6 +86,7 @@ async def lifespan(_: FastAPI):
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
     background_tasks.clear()
+    await diagnostics_service.close()
     await discord_service.close()
     await db.close()
 
@@ -193,19 +197,43 @@ async def dashboard_data(request: Request):
         sessions = bot.get("sessions", [])
         if not sessions:
             continue
-        placements = [(int(s["guild_id"]), int(s["channel_id"]) if s.get("channel_id") else None) for s in sessions]
+        placements = []
+        for session in sessions:
+            guild_id = int(session["guild_id"])
+            if session.get("channel_id"):
+                placements.append((guild_id, int(session["channel_id"])))
+            if session.get("home_channel_id"):
+                placements.append((guild_id, int(session["home_channel_id"])))
         try:
             name_map = await discord_service.resolve_guild_channel_names(token, placements)
             for session in sessions:
-                key = (int(session["guild_id"]), int(session["channel_id"]) if session.get("channel_id") else None)
-                names = name_map.get(key)
-                if names:
-                    session["guild_name"] = names.get("guild_name")
-                    session["channel_name"] = names.get("channel_name")
+                guild_id = int(session["guild_id"])
+                channel_key = (guild_id, int(session["channel_id"])) if session.get("channel_id") else None
+                home_key = (guild_id, int(session["home_channel_id"])) if session.get("home_channel_id") else None
+
+                channel_names = name_map.get(channel_key) if channel_key else None
+                if channel_names:
+                    session["guild_name"] = channel_names.get("guild_name")
+                    session["channel_name"] = channel_names.get("channel_name")
+
+                home_names = name_map.get(home_key) if home_key else None
+                if home_names:
+                    session["guild_name"] = session.get("guild_name") or home_names.get("guild_name")
+                    session["home_channel_name"] = home_names.get("channel_name")
         except Exception as exc:
             bot["discord"]["name_resolution_error"] = str(exc)
 
     return data
+
+
+@app.get("/api/system-diagnostics")
+async def system_diagnostics(request: Request, force: bool = False):
+    require_api_auth(request)
+    try:
+        return await diagnostics_service.get_snapshot(force=force)
+    except Exception as exc:
+        action_logger.exception("Failed collecting diagnostics: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Diagnostics unavailable: {exc}")
 
 
 @app.get("/api/bots/{bot_key}/inventory")
@@ -426,4 +454,4 @@ def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):
         raise HTTPException(403,"Unauthorized")
 
-VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","PLAY","RESTART"}
+VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","PLAY","RESTART","FILTER","LEAVE","SET_HOME"}

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SwarmPanel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=3" />
+  <link rel="stylesheet" href="/static/styles.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -72,6 +72,46 @@
 
     <section class="panel">
       <div class="section-title-row">
+        <div>
+          <h2>System Diagnostics</h2>
+          <p class="muted">Runtime status for shared env wiring, bot database reachability, Discord inventory access, and Aria's Gemini health.</p>
+        </div>
+        <button id="refresh-diagnostics" type="button">Refresh Diagnostics</button>
+      </div>
+      <div id="diagnostics-summary" class="overview-grid"></div>
+      <div class="diagnostics-layout">
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Shared Runtime</h3>
+              <span class="muted">Music/.env</span>
+            </div>
+            <div id="shared-runtime-card" class="diagnostic-stack"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Health</h3>
+              <span class="muted">DB + Gemini</span>
+            </div>
+            <div id="aria-diagnostic-card" class="diagnostic-stack"></div>
+          </div>
+        </div>
+
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Worker Nodes</h3>
+              <span class="muted">DB + Discord</span>
+            </div>
+            <div id="worker-diagnostic-grid" class="worker-diagnostic-grid"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
         <h2>Direct Bot Controls</h2>
       </div>
       <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
@@ -118,6 +158,20 @@
             </label>
 
             <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
+
+            <label class="control-inline">
+              <span>Filter</span>
+              <select id="control-filter-select">
+                <option value="none">None</option>
+                <option value="nightcore">Nightcore</option>
+                <option value="vaporwave">Vaporwave</option>
+                <option value="bassboost">Bassboost</option>
+                <option value="8d">8D</option>
+              </select>
+            </label>
+
+            <button id="apply-filter-mode" type="button">Apply Filter</button>
+            <button id="set-home-channel" type="button">Set Home Channel</button>
           </div>
 
           <div class="control-actions" aria-label="Direct playback controls">
@@ -125,6 +179,7 @@
             <button class="control-action-btn" data-panel-action="RESUME" type="button">Resume</button>
             <button class="control-action-btn" data-panel-action="SKIP" type="button">Skip</button>
             <button class="control-action-btn control-action-btn-stop" data-panel-action="STOP" type="button">Stop</button>
+            <button class="control-action-btn" data-panel-action="LEAVE" type="button">Leave Voice</button>
             <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
             <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
             <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
@@ -150,6 +205,32 @@
             <div id="aria-command-guide" class="aria-command-guide"></div>
           </div>
         </aside>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Capability Matrix</h2>
+          <p class="muted">What the selected bot and guild are ready to do right now, plus how the whole swarm is positioned inside that guild.</p>
+        </div>
+      </div>
+      <div class="capability-layout">
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Bot Actions</h3>
+            <span class="muted">Live readiness</span>
+          </div>
+          <div id="selected-bot-capabilities" class="capability-list"></div>
+        </div>
+
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Guild Across The Swarm</h3>
+            <span class="muted">Real data</span>
+          </div>
+          <div id="selected-guild-matrix" class="swarm-guild-grid"></div>
+        </div>
       </div>
     </section>
 
@@ -195,6 +276,6 @@
 </section>
 
 </main>
-  <script src="/static/final_app.js"></script>
+  <script src="/static/final_app.js?v=4"></script>
 </body>
 </html>

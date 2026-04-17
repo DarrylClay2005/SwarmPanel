@@ -183,6 +183,20 @@ body {
   align-items: start;
 }
 
+.diagnostics-layout,
+.capability-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.4fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.diagnostics-column {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
 .control-main {
   min-width: 0;
 }
@@ -361,6 +375,194 @@ body {
 .aria-command-guide {
   display: grid;
   gap: 8px;
+}
+
+.diagnostic-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.diagnostic-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+  padding: 12px;
+}
+
+.diagnostic-item-head,
+.capability-item-head,
+.worker-diagnostic-head,
+.swarm-guild-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.diagnostic-item-head span:first-child,
+.capability-item-head span:first-child {
+  font-weight: 600;
+}
+
+.diagnostic-item-body,
+.capability-item-body {
+  margin-top: 8px;
+  font-size: 0.84rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.diagnostic-item-meta {
+  margin-top: 6px;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  word-break: break-word;
+}
+
+.diag-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.diag-badge-online {
+  color: var(--green);
+  border-color: rgba(166,227,161,0.24);
+  background: rgba(166,227,161,0.08);
+}
+
+.diag-badge-offline {
+  color: var(--red);
+  border-color: rgba(243,139,168,0.24);
+  background: rgba(243,139,168,0.08);
+}
+
+.diag-badge-idle {
+  color: var(--blue);
+  border-color: rgba(137,180,250,0.24);
+  background: rgba(137,180,250,0.08);
+}
+
+.diag-inline-count {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.diagnostic-bullet-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.diagnostic-bullet {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.worker-diagnostic-grid,
+.swarm-guild-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.worker-diagnostic-card,
+.swarm-guild-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+  padding: 12px;
+}
+
+.worker-diagnostic-name {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.worker-diagnostic-meta {
+  margin-top: 4px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.worker-diagnostic-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.worker-diagnostic-row span:last-child {
+  text-align: right;
+}
+
+.worker-diagnostic-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.worker-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 0.72rem;
+  border: 1px solid var(--border);
+}
+
+.worker-chip-ok {
+  color: var(--green);
+  border-color: rgba(166,227,161,0.2);
+  background: rgba(166,227,161,0.07);
+}
+
+.worker-chip-bad {
+  color: var(--red);
+  border-color: rgba(243,139,168,0.2);
+  background: rgba(243,139,168,0.07);
+}
+
+.capability-list {
+  display: grid;
+  gap: 10px;
+}
+
+.capability-header {
+  margin-bottom: 2px;
+}
+
+.capability-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.03);
+  padding: 12px;
+}
+
+.swarm-guild-card-meta {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  color: var(--text-muted);
+  font-size: 0.79rem;
 }
 
 .aria-command-line {
@@ -948,6 +1150,11 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
 
 @media (max-width: 980px) {
   .control-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnostics-layout,
+  .capability-layout {
     grid-template-columns: 1fr;
   }
 }

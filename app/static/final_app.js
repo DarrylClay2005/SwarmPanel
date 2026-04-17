@@ -10,6 +10,7 @@ let eventFeedEntries = [];
 let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
 let eventFeedConnectionState = 'offline';
+let systemDiagnosticsState = null;
 const MAX_EVENT_FEED_ENTRIES = 80;
 
 // ================================
@@ -44,6 +45,15 @@ function formatHeartbeatAge(seconds) {
     return remainder ? `${minutes}m ${remainder}s ago` : `${minutes}m ago`;
 }
 
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+}
+
 function describeBotStatus(status) {
     const normalized = String(status || 'unknown').toLowerCase();
     if (normalized === 'online') {
@@ -56,6 +66,25 @@ function describeBotStatus(status) {
         return { label: 'Offline', color: '#f38ba8', tone: 'offline' };
     }
     return { label: 'Idle', color: '#89b4fa', tone: 'idle' };
+}
+
+function describeDiagnosticState(status) {
+    const normalized = String(status || 'unknown').toLowerCase();
+    if (normalized === 'online') {
+        return { label: 'Online', tone: 'online' };
+    }
+    if (normalized === 'missing') {
+        return { label: 'Missing', tone: 'offline' };
+    }
+    if (normalized === 'error') {
+        return { label: 'Error', tone: 'offline' };
+    }
+    return { label: normalized || 'Unknown', tone: 'idle' };
+}
+
+function diagnosticBadge(status) {
+    const meta = describeDiagnosticState(status);
+    return `<span class="diag-badge diag-badge-${meta.tone}">${escapeHtml(meta.label)}</span>`;
 }
 
 function selectedOptionText(selectId) {
@@ -165,6 +194,8 @@ async function fetchDashboard() {
         syncControlSelectionsFromDashboard();
         renderControlContext();
         renderAriaCommandGuide();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
 
         const meta = document.getElementById('dashboard-meta');
         if (meta && data.generated_at) {
@@ -174,6 +205,197 @@ async function fetchDashboard() {
     } catch (err) {
         console.error("❌ Dashboard fetch failed:", err);
     }
+}
+
+async function fetchDiagnostics(force = false) {
+    try {
+        const res = await fetch(`${API_BASE}/system-diagnostics${force ? '?force=true' : ''}`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || 'Diagnostics request failed');
+        }
+
+        systemDiagnosticsState = data;
+        renderDiagnosticsSummary(data);
+        renderSharedRuntimeCard(data);
+        renderAriaDiagnosticCard(data);
+        renderWorkerDiagnosticGrid(data);
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
+    } catch (err) {
+        console.error('❌ Diagnostics fetch failed:', err);
+    }
+}
+
+function renderDiagnosticsSummary(data) {
+    const container = document.getElementById('diagnostics-summary');
+    if (!container) return;
+
+    const bots = Array.isArray(data?.bots) ? data.bots : [];
+    const botsDbOnline = bots.filter(bot => bot.db?.reachable).length;
+    const botsDiscordReady = bots.filter(bot => bot.discord?.reachable).length;
+    const ariaGemini = data?.aria?.gemini;
+    const ariaDb = data?.aria?.db;
+    const sharedEnv = data?.shared_env;
+
+    const cards = [
+        {
+            label: 'Shared Music Env',
+            value: describeDiagnosticState(sharedEnv?.status).label,
+            detail: sharedEnv?.message || 'No diagnostics data yet.',
+            tone: describeDiagnosticState(sharedEnv?.status).tone,
+        },
+        {
+            label: 'Worker DB Links',
+            value: `${botsDbOnline}/${bots.length}`,
+            detail: 'Database reachability using each bot runtime credential set.',
+            tone: botsDbOnline === bots.length && bots.length ? 'online' : botsDbOnline ? 'stale' : 'offline',
+        },
+        {
+            label: 'Discord Inventory',
+            value: `${botsDiscordReady}/${bots.length}`,
+            detail: 'Panel-side Discord token readiness for live inventory and name resolution.',
+            tone: botsDiscordReady === bots.length && bots.length ? 'online' : botsDiscordReady ? 'stale' : 'offline',
+        },
+        {
+            label: 'Aria Intelligence',
+            value: describeDiagnosticState(ariaGemini?.status).label,
+            detail: ariaDb?.reachable
+                ? (ariaGemini?.message || 'Aria DB online and Gemini diagnostics complete.')
+                : (ariaDb?.message || 'Aria DB not reachable.'),
+            tone: describeDiagnosticState(ariaGemini?.status).tone,
+        },
+    ];
+
+    container.innerHTML = cards.map(card => `
+        <article class="overview-card overview-card-${card.tone}">
+            <div class="overview-card-label">${escapeHtml(card.label)}</div>
+            <div class="overview-card-value">${escapeHtml(card.value)}</div>
+            <div class="overview-card-detail">${escapeHtml(card.detail)}</div>
+        </article>
+    `).join('');
+}
+
+function renderSharedRuntimeCard(data) {
+    const container = document.getElementById('shared-runtime-card');
+    if (!container) return;
+
+    const sharedEnv = data?.shared_env || {};
+    const panelDb = data?.panel?.db || {};
+
+    container.innerHTML = `
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Music/.env discovery</span>
+                ${diagnosticBadge(sharedEnv.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(sharedEnv.message || 'No shared env status available.')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(sharedEnv.path || 'Unknown path')}</div>
+            ${sharedEnv.last_modified ? `<div class="diagnostic-item-meta">Updated ${escapeHtml(new Date(sharedEnv.last_modified).toLocaleString())}</div>` : ''}
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Panel database</span>
+                ${diagnosticBadge(panelDb.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(panelDb.message || 'No panel DB probe available.')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(panelDb.database || 'Unknown schema')} on ${escapeHtml(panelDb.host || 'unknown host')}</div>
+        </div>
+    `;
+}
+
+function renderAriaDiagnosticCard(data) {
+    const container = document.getElementById('aria-diagnostic-card');
+    if (!container) return;
+
+    const aria = data?.aria || {};
+    const env = aria.env || {};
+    const db = aria.db || {};
+    const swarmDb = aria.swarm_db || {};
+    const discord = aria.discord || {};
+    const gemini = aria.gemini || {};
+    const operatorActions = Array.isArray(aria.operator_actions) ? aria.operator_actions : [];
+
+    container.innerHTML = `
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria primary database</span>
+                ${diagnosticBadge(db.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(db.message || 'No DB diagnostics available.')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(db.database || 'discord_aria')} on ${escapeHtml(db.host || 'unknown host')}</div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria swarm bridge database</span>
+                ${diagnosticBadge(swarmDb.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(swarmDb.message || 'No swarm DB diagnostics available.')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(swarmDb.database || 'unknown schema')} on ${escapeHtml(swarmDb.host || 'unknown host')}</div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria Gemini key</span>
+                ${diagnosticBadge(gemini.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(gemini.message || 'No Gemini diagnostics available.')}</div>
+            <div class="diagnostic-item-meta">Model: ${escapeHtml(gemini.model || 'unknown')} | SDK installed: ${gemini.sdk_installed ? 'yes' : 'no'} | Key present: ${env.gemini_key_present ? 'yes' : 'no'}</div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria Discord inventory access</span>
+                ${diagnosticBadge(discord.status)}
+            </div>
+            <div class="diagnostic-item-body">${escapeHtml(discord.message || 'No Discord diagnostics available.')}</div>
+            <div class="diagnostic-item-meta">Shared token: ${env.shared_token_present ? 'present' : 'missing'} | Panel token: ${env.panel_token_present ? 'present' : 'missing'}</div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria operator scope</span>
+                <span class="diag-inline-count">${operatorActions.length} actions</span>
+            </div>
+            <div class="diagnostic-bullet-list">
+                ${operatorActions.map(item => `<span class="diagnostic-bullet">${escapeHtml(item)}</span>`).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function renderWorkerDiagnosticGrid(data) {
+    const container = document.getElementById('worker-diagnostic-grid');
+    if (!container) return;
+
+    const bots = Array.isArray(data?.bots) ? data.bots : [];
+    if (!bots.length) {
+        container.innerHTML = '<div class="control-context-empty">No worker diagnostics available yet.</div>';
+        return;
+    }
+
+    container.innerHTML = bots.map(bot => `
+        <article class="worker-diagnostic-card">
+            <div class="worker-diagnostic-head">
+                <div>
+                    <div class="worker-diagnostic-name">${escapeHtml(bot.display_name || bot.key)}</div>
+                    <div class="worker-diagnostic-meta">Shared env token ${bot.env?.shared_token_present ? 'present' : 'missing'}</div>
+                </div>
+                ${diagnosticBadge(bot.db?.status)}
+            </div>
+            <div class="worker-diagnostic-row">
+                <span>Database</span>
+                <span>${escapeHtml(bot.db?.message || 'No DB result')}</span>
+            </div>
+            <div class="worker-diagnostic-row">
+                <span>Discord inventory</span>
+                <span>${escapeHtml(bot.discord?.message || 'No Discord result')}</span>
+            </div>
+            <div class="worker-diagnostic-chip-row">
+                <span class="worker-chip ${bot.env?.shared_db_password_present ? 'worker-chip-ok' : 'worker-chip-bad'}">DB secret ${bot.env?.shared_db_password_present ? 'present' : 'missing'}</span>
+                <span class="worker-chip ${bot.env?.shared_lavalink_password_present ? 'worker-chip-ok' : 'worker-chip-bad'}">Lavalink ${bot.env?.shared_lavalink_password_present ? 'present' : 'missing'}</span>
+                <span class="worker-chip ${bot.env?.panel_token_present ? 'worker-chip-ok' : 'worker-chip-bad'}">Panel token ${bot.env?.panel_token_present ? 'present' : 'missing'}</span>
+            </div>
+        </article>
+    `).join('');
 }
 
 // ================================
@@ -461,6 +683,8 @@ async function loadBotSelect() {
         }
         renderControlContext();
         renderAriaCommandGuide();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
     } catch (err) {
         console.error("❌ Failed to load bot list:", err);
     }
@@ -774,6 +998,8 @@ function populateControlChannels() {
         voiceSel.value = previousVoice;
     } else if (session?.channel_id && voiceChannels.some(channel => String(channel.id) === String(session.channel_id))) {
         voiceSel.value = String(session.channel_id);
+    } else if (session?.home_channel_id && voiceChannels.some(channel => String(channel.id) === String(session.home_channel_id))) {
+        voiceSel.value = String(session.home_channel_id);
     }
 
     if (previousText && (previousText === '0' || textChannels.some(channel => String(channel.id) === previousText))) {
@@ -787,12 +1013,16 @@ function syncControlSelectionsFromDashboard() {
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
     const loopSel = document.getElementById('control-loop-select');
+    const filterSel = document.getElementById('control-filter-select');
     const voiceSel = document.getElementById('control-voice-select');
     if (!botKey || !guildId) return;
 
     const session = getDashboardSession(botKey, guildId);
     if (loopSel && session?.loop_mode) {
         loopSel.value = session.loop_mode;
+    }
+    if (filterSel && session?.filter_mode) {
+        filterSel.value = session.filter_mode;
     }
 
     if (voiceSel && session?.channel_id) {
@@ -802,6 +1032,12 @@ function syncControlSelectionsFromDashboard() {
 
     renderControlContext();
     renderAriaCommandGuide();
+    renderSelectedBotCapabilities();
+    renderSelectedGuildMatrix();
+}
+
+function getDiagnosticsBot(botKey) {
+    return systemDiagnosticsState?.bots?.find(bot => bot.key === botKey) || null;
 }
 
 function renderControlContext() {
@@ -812,10 +1048,12 @@ function renderControlContext() {
     const guildId = document.getElementById('control-guild-select')?.value;
     const bot = dashboardBotsState.find(item => item.key === botKey) || null;
     const session = botKey && guildId ? getDashboardSession(botKey, guildId) : null;
+    const diagnostics = getDiagnosticsBot(botKey);
     const statusMeta = describeBotStatus(bot?.status);
     const guildName = selectedOptionText('control-guild-select') || 'No guild selected';
     const voiceName = selectedOptionText('control-voice-select') || 'No voice channel selected';
     const textName = selectedOptionText('control-text-select') || 'No text channel selected';
+    const homeName = session?.home_channel_name || (session?.home_channel_id ? `Home channel ${session.home_channel_id}` : 'Not set');
 
     if (!botKey) {
         container.innerHTML = `
@@ -829,19 +1067,22 @@ function renderControlContext() {
     container.innerHTML = `
         <div class="control-context-top">
             <div>
-                <div class="control-context-bot">${bot?.display_name || botKey}</div>
-                <div class="control-context-guild">${guildName}</div>
+                <div class="control-context-bot">${escapeHtml(bot?.display_name || botKey)}</div>
+                <div class="control-context-guild">${escapeHtml(guildName)}</div>
             </div>
-            <span class="control-context-status control-context-status-${statusMeta.tone}">${statusMeta.label}</span>
+            <span class="control-context-status control-context-status-${statusMeta.tone}">${escapeHtml(statusMeta.label)}</span>
         </div>
-        <div class="control-context-track">${session?.title || 'Idle. No live playback in the selected guild.'}</div>
+        <div class="control-context-track">${escapeHtml(session?.title || 'Idle. No live playback in the selected guild.')}</div>
         <div class="control-context-meta">
-            <span>Voice: ${session?.channel_name || voiceName}</span>
-            <span>Text: ${textName}</span>
-            <span>Queue: ${session?.queue_count ?? 0}</span>
-            <span>Loop: ${session?.loop_mode || 'off'}</span>
-            <span>Filter: ${session?.filter_mode || 'none'}</span>
-            <span>Heartbeat: ${formatHeartbeatAge(bot?.heartbeat_age_seconds)}</span>
+            <span>Voice: ${escapeHtml(session?.channel_name || voiceName)}</span>
+            <span>Home: ${escapeHtml(homeName)}</span>
+            <span>Text: ${escapeHtml(textName)}</span>
+            <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
+            <span>Loop: ${escapeHtml(session?.loop_mode || 'off')}</span>
+            <span>Filter: ${escapeHtml(session?.filter_mode || 'none')}</span>
+            <span>Heartbeat: ${escapeHtml(formatHeartbeatAge(bot?.heartbeat_age_seconds))}</span>
+            <span>DB link: ${escapeHtml(diagnostics?.db?.reachable ? 'ready' : 'blocked')}</span>
+            <span>Discord inventory: ${escapeHtml(diagnostics?.discord?.reachable ? 'ready' : 'blocked')}</span>
         </div>
     `;
 }
@@ -860,9 +1101,96 @@ function renderAriaCommandGuide() {
         `aria pause ${botKey}`,
         `aria filter nightcore on ${botKey}`,
         `aria home ${botKey} <#${voiceChannelId}>`,
+        `aria leave ${botKey}`,
     ];
 
-    container.innerHTML = examples.map(example => `<code class="aria-command-line">${example}</code>`).join('');
+    container.innerHTML = examples.map(example => `<code class="aria-command-line">${escapeHtml(example)}</code>`).join('');
+}
+
+function renderSelectedBotCapabilities() {
+    const container = document.getElementById('selected-bot-capabilities');
+    if (!container) return;
+
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const voiceChannelId = document.getElementById('control-voice-select')?.value;
+    if (!botKey) {
+        container.innerHTML = '<div class="control-context-empty">Pick a bot to see what actions are currently ready.</div>';
+        return;
+    }
+
+    const bot = dashboardBotsState.find(item => item.key === botKey) || null;
+    const diagnostics = getDiagnosticsBot(botKey);
+    const session = guildId ? getDashboardSession(botKey, guildId) : null;
+    const dbReady = Boolean(diagnostics?.db?.reachable);
+    const discordReady = Boolean(diagnostics?.discord?.reachable);
+    const hasGuild = Boolean(guildId);
+    const hasVoice = Boolean(voiceChannelId);
+    const hasHome = Boolean(session?.home_channel_id);
+
+    const items = [
+        { label: 'Queue media', ready: dbReady && hasGuild && hasVoice, reason: hasVoice ? 'Voice channel selected for direct play.' : 'Select a guild and voice channel first.' },
+        { label: 'Set home channel', ready: dbReady && hasGuild && hasVoice, reason: hasHome ? 'A home channel already exists and can be overwritten.' : 'Choose a voice channel to anchor this bot.' },
+        { label: 'Pause / resume / skip / stop', ready: dbReady && hasGuild, reason: hasGuild ? 'Guild-scoped control path is available.' : 'Choose a guild before sending transport controls.' },
+        { label: 'Leave voice', ready: dbReady && hasGuild, reason: hasGuild ? 'Direct leave order can be injected now.' : 'Choose a guild before issuing leave.' },
+        { label: 'Shuffle / clear queue', ready: dbReady && hasGuild, reason: hasGuild ? 'Queue mutation path is ready.' : 'Choose a guild to mutate its queue.' },
+        { label: 'Loop / filter changes', ready: dbReady && hasGuild, reason: hasGuild ? 'Guild settings table can be updated.' : 'Choose a guild to update loop or filter state.' },
+        { label: 'Restart node', ready: dbReady, reason: dbReady ? 'Health table reachable for restart order.' : 'DB must be reachable before restart can be requested.' },
+        { label: 'Discord inventory / channel explorer', ready: discordReady, reason: discordReady ? 'Panel token can read Discord identity and guilds.' : 'Panel token is missing or failing for Discord API.' },
+    ];
+
+    container.innerHTML = `
+        <div class="capability-header">
+            <div class="worker-diagnostic-name">${escapeHtml(bot?.display_name || botKey)}</div>
+            <div class="worker-diagnostic-meta">${escapeHtml(guildId ? `Guild ${guildId}` : 'No guild selected')}</div>
+        </div>
+        ${items.map(item => `
+            <div class="capability-item">
+                <div class="capability-item-head">
+                    <span>${escapeHtml(item.label)}</span>
+                    ${diagnosticBadge(item.ready ? 'online' : 'missing')}
+                </div>
+                <div class="capability-item-body">${escapeHtml(item.reason)}</div>
+            </div>
+        `).join('')}
+    `;
+}
+
+function renderSelectedGuildMatrix() {
+    const container = document.getElementById('selected-guild-matrix');
+    if (!container) return;
+
+    const guildId = document.getElementById('control-guild-select')?.value;
+    if (!guildId) {
+        container.innerHTML = '<div class="control-context-empty">Choose a guild to see how the full swarm is positioned there.</div>';
+        return;
+    }
+
+    const workerBots = dashboardBotsState.filter(bot => bot.kind === 'music');
+    container.innerHTML = workerBots.map(bot => {
+        const session = getDashboardSession(bot.key, guildId);
+        const diag = getDiagnosticsBot(bot.key);
+        const status = describeBotStatus(bot.status);
+        const homeLabel = session?.home_channel_name || (session?.home_channel_id ? `Home ${session.home_channel_id}` : 'No home channel');
+        const activityLabel = session?.is_playing ? `Playing ${session.title || 'track'}` : (session?.queue_count ? `${session.queue_count} queued` : 'Idle in this guild');
+        return `
+            <article class="swarm-guild-card">
+                <div class="swarm-guild-card-head">
+                    <div>
+                        <div class="worker-diagnostic-name">${escapeHtml(bot.display_name)}</div>
+                        <div class="worker-diagnostic-meta">${escapeHtml(activityLabel)}</div>
+                    </div>
+                    <span class="control-context-status control-context-status-${status.tone}">${escapeHtml(status.label)}</span>
+                </div>
+                <div class="swarm-guild-card-meta">
+                    <span>Home: ${escapeHtml(homeLabel)}</span>
+                    <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
+                    <span>DB: ${escapeHtml(describeDiagnosticState(diag?.db?.status).label)}</span>
+                    <span>Discord: ${escapeHtml(describeDiagnosticState(diag?.discord?.status).label)}</span>
+                </div>
+            </article>
+        `;
+    }).join('');
 }
 
 async function loadControlInventory(botKey) {
@@ -883,6 +1211,8 @@ async function loadControlInventory(botKey) {
         populateControlGuilds();
         renderControlContext();
         renderAriaCommandGuide();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
         setControlStatus(`Loaded ${data.guilds?.length || 0} guilds for ${data.bot?.display_name || botKey}.`);
     } catch (err) {
         console.error("❌ Failed to load control inventory:", err);
@@ -948,6 +1278,52 @@ async function applyLoopModeFromPanel() {
     setControlStatus(result.data?.message || `Loop mode set to ${loopMode}.`);
 }
 
+async function applyFilterModeFromPanel() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const filterMode = document.getElementById('control-filter-select')?.value || 'none';
+
+    if (!botKey || !guildId) {
+        setControlStatus('Select a bot and guild before changing filter mode.', true);
+        return;
+    }
+
+    setControlStatus('Applying audio filter...');
+    const result = await sendCommand(botKey, guildId, 'FILTER', filterMode);
+    if (!result?.ok) {
+        setControlStatus(result?.error || 'Failed to update filter mode.', true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || `Filter mode set to ${filterMode}.`);
+}
+
+async function setHomeChannelFromPanel() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const voiceChannelId = document.getElementById('control-voice-select')?.value;
+
+    if (!botKey || !guildId) {
+        setControlStatus('Select a bot and guild before setting a home channel.', true);
+        return;
+    }
+    if (!voiceChannelId) {
+        setControlStatus('Select a voice channel to store as the bot home channel.', true);
+        return;
+    }
+
+    setControlStatus('Writing home channel...');
+    const result = await sendCommand(botKey, guildId, 'SET_HOME', {
+        voice_channel_id: voiceChannelId,
+    });
+    if (!result?.ok) {
+        setControlStatus(result?.error || 'Failed to update the home channel.', true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || 'Home channel updated.');
+}
+
 function getDirectControlSelection(action) {
     const botKey = document.getElementById('control-bot-select')?.value;
     const guildId = document.getElementById('control-guild-select')?.value;
@@ -982,6 +1358,7 @@ async function sendPanelAction(action) {
         RESUME: 'Sending resume command...',
         SKIP: 'Sending skip command...',
         STOP: 'Sending stop command...',
+        LEAVE: 'Sending leave command...',
         SHUFFLE: 'Shuffling the queue...',
         CLEAR: 'Clearing the queue and current playback...',
         RESTART: 'Requesting bot restart...',
@@ -1142,6 +1519,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('refresh-dashboard')
         ?.addEventListener('click', fetchDashboard);
 
+    document.getElementById('refresh-diagnostics')
+        ?.addEventListener('click', () => fetchDiagnostics(true));
+
     document.getElementById('load-inventory')
         ?.addEventListener('click', loadInventory);
 
@@ -1155,10 +1535,14 @@ document.addEventListener('DOMContentLoaded', () => {
         ?.addEventListener('change', () => {
             renderControlContext();
             renderAriaCommandGuide();
+            renderSelectedBotCapabilities();
         });
 
     document.getElementById('control-text-select')
-        ?.addEventListener('change', renderControlContext);
+        ?.addEventListener('change', () => {
+            renderControlContext();
+            renderSelectedBotCapabilities();
+        });
 
     document.getElementById('control-source-input')
         ?.addEventListener('input', renderAriaCommandGuide);
@@ -1168,6 +1552,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('apply-loop-mode')
         ?.addEventListener('click', applyLoopModeFromPanel);
+
+    document.getElementById('apply-filter-mode')
+        ?.addEventListener('click', applyFilterModeFromPanel);
+
+    document.getElementById('set-home-channel')
+        ?.addEventListener('click', setHomeChannelFromPanel);
 
     document.querySelectorAll('[data-panel-action]')
         .forEach(button => button.addEventListener('click', () => sendPanelAction(button.dataset.panelAction)));
@@ -1192,6 +1582,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initial page load
     fetchDashboard();
+    fetchDiagnostics();
     loadBotSelect();
     loadDbSchemas();
     loadEventFeedHistory();
@@ -1202,3 +1593,4 @@ document.addEventListener('DOMContentLoaded', () => {
 // 🔄 AUTO REFRESH (5s)
 // ================================
 setInterval(fetchDashboard, 5000);
+setInterval(fetchDiagnostics, 60000);
