@@ -25,11 +25,13 @@ let eventFeedReconnectTimer = null;
 let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
 let controlRefreshTimer = null;
+let lastDashboardFetchAt = Date.now();
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let panelAppStarted = false;
 let panelSessionChecked = false;
+let livePositionTickerStarted = false;
 const MAX_EVENT_FEED_ENTRIES = 80;
 const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
 
@@ -145,7 +147,7 @@ function resolveApiUrl(input) {
     if (typeof input !== 'string') return input;
     if (!input.startsWith('/')) return input;
     if (!remotePanelOrigin) return input;
-    return new URL(input, `${remotePanelOrigin}/`).toString();
+    return remotePanelOrigin.replace(/\/$/, "") + input;
 }
 
 function buildStaticUrl(path) {
@@ -183,7 +185,7 @@ function buildWebSocketUrl(path = '/ws') {
         if (!remotePanelOrigin || !remotePanelToken) return null;
         const url = new URL(remotePanelOrigin);
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        url.pathname = path;
+        url.pathname = (url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "")) + path;
         url.search = token ? `token=${token}` : '';
         return url.toString();
     }
@@ -231,6 +233,31 @@ function formatDuration(seconds) {
     const m = Math.floor(s / 60);
     const rem = String(s % 60).padStart(2, '0');
     return `${m}:${rem}`;
+}
+
+
+function currentLivePositionSeconds(baseSeconds, isPlaying) {
+    const base = Number(baseSeconds || 0);
+    if (!isPlaying) return Math.max(0, Math.floor(base));
+    const elapsed = Math.max(0, Math.floor((Date.now() - lastDashboardFetchAt) / 1000));
+    return Math.max(0, Math.floor(base + elapsed));
+}
+
+function updateLivePositionCounters() {
+    document.querySelectorAll('[data-live-position]').forEach(element => {
+        const baseSeconds = Number(element.dataset.baseSeconds || 0);
+        const isPlaying = String(element.dataset.playing || '').toLowerCase() === 'true';
+        element.textContent = formatDuration(currentLivePositionSeconds(baseSeconds, isPlaying));
+    });
+}
+
+function ensureLivePositionTicker() {
+    if (livePositionTickerStarted) return;
+    livePositionTickerStarted = true;
+    setInterval(() => {
+        if (!panelAppStarted) return;
+        updateLivePositionCounters();
+    }, 1000);
 }
 
 function formatHeartbeatAge(seconds) {
@@ -538,7 +565,8 @@ function getControlBotStatus(botKey, guildId = null) {
     if (liveBot?.db?.reachable === false) return describeBotStatus('offline');
 
     const heartbeatStatus = String(liveBot?.heartbeat?.status || '').toLowerCase();
-    if (heartbeatStatus === 'online') return describeBotStatus('online');
+    // Bots write 'HEALTHY' to swarm_health; treat it the same as 'online'
+    if (heartbeatStatus === 'online' || heartbeatStatus === 'healthy') return describeBotStatus('online');
     if (heartbeatStatus === 'stale') return describeBotStatus('stale');
     if (heartbeatStatus === 'offline' || heartbeatStatus === 'error') return describeBotStatus('offline');
 
@@ -696,6 +724,7 @@ function renderOverview(bots, generatedAt = null) {
 async function fetchDashboard() {
     try {
         const res = await fetch(`${API_BASE}/dashboard`);
+        lastDashboardFetchAt = Date.now();
         if (handle401(res)) return;
         const data = await res.json();
 
@@ -705,18 +734,30 @@ async function fetchDashboard() {
         renderOverview(bots, data.generated_at);
         renderBots(bots);
 
-        let allSessions = [];
+        const sessionMap = new Map();
+        const rememberSession = (session, fallbackBot = null) => {
+            if (!session) return;
+            const botKey = String(session.bot_key || fallbackBot?.key || '');
+            const guildKey = String(session.guild_id ?? '0');
+            if (!botKey) return;
+            const key = `${botKey}:${guildKey}`;
+            sessionMap.set(key, {
+                ...sessionMap.get(key),
+                ...session,
+                bot_key: botKey,
+                bot_display: session.bot_display || fallbackBot?.display_name || session.bot_name || botKey,
+            });
+        };
+
         bots.forEach(bot => {
             if (Array.isArray(bot.sessions)) {
-                bot.sessions.forEach(session => {
-                    allSessions.push({
-                        ...session,
-                        bot_key: bot.key,
-                        bot_display: bot.display_name
-                    });
-                });
+                bot.sessions.forEach(session => rememberSession(session, bot));
             }
         });
+        if (Array.isArray(data.sessions)) {
+            data.sessions.forEach(session => rememberSession(session, getDashboardBot(session.bot_key) || null));
+        }
+        const allSessions = Array.from(sessionMap.values());
 
         renderSessions(allSessions.filter(session => isRuntimeSession(session)));
         renderNowPlaying(allSessions);
@@ -734,6 +775,8 @@ async function fetchDashboard() {
         if (meta && data.generated_at) {
             meta.textContent = `Last updated: ${new Date(data.generated_at).toLocaleTimeString()}`;
         }
+
+        updateLivePositionCounters();
 
     } catch (err) {
         console.error("❌ Dashboard fetch failed:", err);
@@ -954,7 +997,7 @@ function renderNowPlaying(sessions) {
     }
 
     container.innerHTML = playing.map(s => {
-        const pos = formatDuration(s.position_seconds);
+        const pos = formatDuration(currentLivePositionSeconds(s.position_seconds || 0, s.is_playing));
         const thumb = s.thumbnail || null;
         const sourceBadge = s.media_source_label
             ? `<span class="np-stat np-source np-source-${s.media_source || 'unknown'}">${s.media_source_label}</span>`
@@ -996,7 +1039,7 @@ function renderNowPlaying(sessions) {
                 <div class="np-stats-row">
                     <span class="np-stat">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        ${pos}
+                        <span data-live-position="true" data-base-seconds="${Number(s.position_seconds || 0)}" data-playing="${Boolean(s.is_playing)}">${pos}</span>
                     </span>
                     ${sourceBadge}
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
@@ -1042,6 +1085,15 @@ function renderBots(bots) {
     bots.forEach(bot => {
         const statusMeta = describeBotStatus(bot.status);
         const heartbeatLabel = formatHeartbeatAge(bot.heartbeat_age_seconds);
+        const sessions = Array.isArray(bot.sessions) ? bot.sessions : [];
+        const activeSession = sessions.find(session => describeSessionState(session).key === 'playing')
+            || sessions.find(session => describeSessionState(session).key === 'paused')
+            || sessions.find(session => describeSessionState(session).key === 'queued')
+            || null;
+        const activeState = activeSession ? describeSessionState(activeSession) : null;
+        const activePositionText = activeSession
+            ? formatDuration(currentLivePositionSeconds(activeSession.position_seconds || 0, Boolean(activeSession.is_playing)))
+            : null;
 
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
@@ -1055,6 +1107,14 @@ function renderBots(bots) {
         card.style.setProperty('--bot-accent', accent);
 
         const initial = bot.display_name.charAt(0).toUpperCase();
+        const rawHeartbeatStatus = String(bot.heartbeat_status || 'unknown').toLowerCase();
+        const heartbeatStatusLabel = rawHeartbeatStatus === 'healthy' ? 'Healthy'
+            : rawHeartbeatStatus === 'online' ? 'Online'
+            : rawHeartbeatStatus === 'stale' ? 'Stale'
+            : rawHeartbeatStatus === 'offline' ? 'Offline'
+            : rawHeartbeatStatus === 'restart' ? 'Restarting'
+            : rawHeartbeatStatus === 'n/a' ? 'N/A'
+            : bot.heartbeat_status || 'Unknown';
 
         card.innerHTML = `
             <div class="bot-card-header">
@@ -1082,7 +1142,8 @@ function renderBots(bots) {
             </div>
             <div class="bot-meta-row">
                 <span class="bot-meta-pill">Heartbeat ${heartbeatLabel}</span>
-                <span class="bot-meta-pill">${bot.heartbeat_status || 'unknown'}</span>
+                <span class="bot-meta-pill">${heartbeatStatusLabel}</span>
+                ${activeSession ? `<span class="bot-meta-pill">${activeState?.icon || '•'} ${activeState?.label || 'Active'} · <span data-live-position="true" data-base-seconds="${Number(activeSession.position_seconds || 0)}" data-playing="${Boolean(activeSession.is_playing)}">${activePositionText}</span></span>` : ''}
             </div>
             ${bot.kind !== 'orchestrator' ? `
             <div class="bot-actions">
@@ -1133,7 +1194,7 @@ function renderSessions(sessions) {
             <td>${session.filter_mode || "none"}</td>
             <td>${normalizeLoopMode(session.loop_mode)}</td>
             <td>${session.queue_count || 0}</td>
-            <td>${formatDuration(session.position_seconds)}</td>
+            <td><span data-live-position="true" data-base-seconds="${Number(session.position_seconds || 0)}" data-playing="${Boolean(session.is_playing)}">${formatDuration(currentLivePositionSeconds(session.position_seconds || 0, session.is_playing))}</span></td>
             <td>
                 <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
@@ -1154,9 +1215,11 @@ function renderSessions(sessions) {
 // 🎮 SEND COMMAND (event delegation)
 // ================================
 async function sendCommand(bot_key, guild_id, action, payload = null, options = {}) {
-    if (controlCooldown) return;
+    if (controlCooldown) {
+        return { ok: false, error: 'Another panel command is already in flight. Try again in a moment.' };
+    }
     controlCooldown = true;
-    const { refresh = true } = options;
+    const { refresh = true, delayedRefreshMs = 0 } = options;
 
     try {
         const res = await fetch(`${API_BASE}/bots/control`, {
@@ -1175,7 +1238,16 @@ async function sendCommand(bot_key, guild_id, action, payload = null, options = 
             return { ok: false, error: detail, data };
         }
 
-        if (refresh) fetchDashboard();
+        if (refresh) {
+            fetchDashboard();
+            if (delayedRefreshMs > 0) {
+                scheduleDashboardRefresh(delayedRefreshMs);
+            }
+            setTimeout(() => {
+                fetchSelectedControlState({ silent: true });
+                fetchControlMatrix({ silent: true });
+            }, Math.max(700, delayedRefreshMs || 700));
+        }
         return { ok: true, data };
 
     } catch (err) {
@@ -1196,7 +1268,19 @@ document.addEventListener('click', (e) => {
     const payload = btn.dataset.payload || null;
     if (action === 'CLEAR' && !confirm('Clear the queue and stop the current track for this guild?')) return;
     if (action === 'RESTART' && !confirm('Restart this bot node? Active playback may pause briefly.')) return;
-    if (action && bot) sendCommand(bot, guild, action, payload);
+    if (action && bot) {
+        sendCommand(bot, guild, action, payload, { delayedRefreshMs: 2200 }).then((result) => {
+            if (!result?.ok) {
+                setControlStatus(result?.error || `Failed to run ${action}.`, true);
+                return;
+            }
+            setControlStatus(result.data?.message || `${action} sent.`);
+            setTimeout(() => {
+                fetchSelectedControlState({ silent: true });
+                fetchControlMatrix({ silent: true });
+            }, 2200);
+        });
+    }
 });
 
 // ================================
@@ -1447,6 +1531,24 @@ function disconnectEventFeed() {
     eventFeedConnectionState = 'offline';
 }
 
+function updateLiveSyncStatus() {
+    const el = document.getElementById('live-sync-status');
+    if (!el) return;
+    if (eventFeedConnectionState === 'online') {
+        el.textContent = 'Live Sync: WebSocket';
+        el.style.color = '#a6e3a1';
+        el.style.borderColor = '#a6e3a1';
+    } else if (eventFeedConnectionState === 'connecting') {
+        el.textContent = 'Live Sync: Connecting...';
+        el.style.color = '#fab387';
+        el.style.borderColor = '#fab387';
+    } else {
+        el.textContent = 'Live Sync: Polling 5s';
+        el.style.color = '#89b4fa';
+        el.style.borderColor = '#89b4fa';
+    }
+}
+
 function connectEventFeed() {
     const wsUrl = buildWebSocketUrl('/ws');
     if (!wsUrl) {
@@ -1464,12 +1566,14 @@ function connectEventFeed() {
 
     eventFeedConnectionState = 'connecting';
     renderEventFeed();
+    updateLiveSyncStatus();
 
     eventFeedSocket = new WebSocket(wsUrl);
 
     eventFeedSocket.onopen = () => {
         eventFeedConnectionState = 'online';
         renderEventFeed();
+        updateLiveSyncStatus();
     };
 
     eventFeedSocket.onmessage = (event) => {
@@ -1490,12 +1594,14 @@ function connectEventFeed() {
     eventFeedSocket.onerror = () => {
         eventFeedConnectionState = 'offline';
         renderEventFeed();
+        updateLiveSyncStatus();
     };
 
     eventFeedSocket.onclose = (event) => {
         eventFeedSocket = null;
         eventFeedConnectionState = 'offline';
         renderEventFeed();
+        updateLiveSyncStatus();
         if (event?.code === 4401) {
             panelSessionChecked = false;
             panelAppStarted = false;
@@ -2029,9 +2135,7 @@ function renderSelectedGuildMatrix() {
     const liveMatrixReady = Boolean(controlMatrixState.loaded && String(controlMatrixState.guildId) === String(guildId));
     const workerBots = liveMatrixReady
         ? controlMatrixState.bots
-        : dashboardBotsState
-            .filter(bot => bot.kind === 'music')
-            .map(bot => ({ key: bot.key, display_name: bot.display_name }));
+        : dashboardBotsState.filter(bot => bot.kind === 'music');
 
     container.innerHTML = workerBots.map(bot => {
         const session = getBestControlSession(bot.key, guildId);
@@ -2309,7 +2413,7 @@ async function applyLoopModeFromPanel() {
     }
 
     setControlStatus('Applying loop mode...');
-    const result = await sendCommand(botKey, guildId, 'LOOP', loopMode);
+    const result = await sendCommand(botKey, guildId, 'LOOP', loopMode, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update loop mode.', true);
         return;
@@ -2337,7 +2441,7 @@ async function applyFilterModeFromPanel() {
     }
 
     setControlStatus('Applying audio filter...');
-    const result = await sendCommand(botKey, guildId, 'FILTER', filterMode);
+    const result = await sendCommand(botKey, guildId, 'FILTER', filterMode, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update filter mode.', true);
         return;
@@ -2371,7 +2475,7 @@ async function setHomeChannelFromPanel() {
     setControlStatus('Writing home channel...');
     const result = await sendCommand(botKey, guildId, 'SET_HOME', {
         voice_channel_id: voiceChannelId,
-    });
+    }, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update the home channel.', true);
         return;
@@ -2429,7 +2533,7 @@ async function sendPanelAction(action) {
     };
 
     setControlStatus(statusLabels[action] || 'Sending command...');
-    const result = await sendCommand(selection.botKey, selection.guildId, action);
+    const result = await sendCommand(selection.botKey, selection.guildId, action, null, { delayedRefreshMs: 2200 });
     if (!result?.ok) {
         setControlStatus(result?.error || `Failed to run ${action}.`, true);
         return;
@@ -2660,6 +2764,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('logout-button')
         ?.addEventListener('click', logoutPanel);
 
+    ensureLivePositionTicker();
     bootstrapPanelApplication();
 });
 

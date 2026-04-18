@@ -20,7 +20,7 @@ from .discord_api import DiscordInventoryService
 
 logger = logging.getLogger("swarm_panel")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SHARED_ENV_FILE = REPO_ROOT / "Music" / ".env"
+DEFAULT_SHARED_ENV_FILE = REPO_ROOT / "DC" / ".env"
 DIAGNOSTICS_CACHE_TTL_SECONDS = 90
 
 MUSIC_PANEL_ACTIONS = [
@@ -61,11 +61,13 @@ class RuntimeDiagnosticsService:
             return
         timeout = aiohttp.ClientTimeout(total=10)
         self.http_session = aiohttp.ClientSession(timeout=timeout)
+        await self.discord_service.connect()
 
     async def close(self) -> None:
         if self.http_session:
             await self.http_session.close()
             self.http_session = None
+        await self.discord_service.close()
 
     async def get_snapshot(self, *, force: bool = False) -> dict[str, Any]:
         now = time.monotonic()

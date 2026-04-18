@@ -177,16 +177,27 @@ class PanelDatabase:
 
     async def connect(self) -> None:
         if not self.pool:
-            self.pool = await aiomysql.create_pool(
-                host=self.settings.db_host,
-                port=self.settings.db_port,
-                user=self.settings.db_user,
-                password=self.settings.db_password,
-                db=self.settings.db_default_schema,
-                autocommit=True,
-                minsize=1,
-                maxsize=10,
-            )
+            pool_kwargs = {
+                "host": self.settings.db_host,
+                "port": self.settings.db_port,
+                "user": self.settings.db_user,
+                "password": self.settings.db_password,
+                "autocommit": True,
+                "minsize": 1,
+                "maxsize": 10,
+            }
+            try:
+                self.pool = await aiomysql.create_pool(
+                    db=self.settings.db_default_schema,
+                    **pool_kwargs,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Panel DB default schema %s was unavailable at connect time: %s. Falling back to server-level pool.",
+                    self.settings.db_default_schema,
+                    exc,
+                )
+                self.pool = await aiomysql.create_pool(**pool_kwargs)
         if not self.http_session:
             timeout = aiohttp.ClientTimeout(total=10)
             self.http_session = aiohttp.ClientSession(timeout=timeout)
@@ -384,13 +395,13 @@ class PanelDatabase:
         if table_exists["playback"]:
             try:
                 playback = await self._fetchone(
-                    f"SELECT channel_id, title, video_url, position_seconds, is_playing "
+                    f"SELECT * "
                     f"FROM `{schema}`.`{playback_table}` WHERE guild_id = %s AND bot_name = %s LIMIT 1",
                     (gid, bot.key),
                 ) or {}
             except Exception:
                 playback = await self._fetchone(
-                    f"SELECT channel_id, title, position_seconds, is_playing "
+                    f"SELECT * "
                     f"FROM `{schema}`.`{playback_table}` WHERE guild_id = %s LIMIT 1",
                     (gid,),
                 ) or {}
@@ -512,7 +523,7 @@ class PanelDatabase:
             "session": {
                 "guild_id": str(gid),
                 "guild_name": None,
-                "channel_id": playback.get("channel_id"),
+                "channel_id": str(playback.get("channel_id")) if playback.get("channel_id") else None,
                 "channel_name": None,
                 "title": playback.get("title"),
                 "video_url": playback.get("video_url"),
@@ -534,9 +545,9 @@ class PanelDatabase:
                 "backup_restore_ready": backup_queue_count > 0 and queue_count == 0,
                 "pending_direct_orders": pending_direct_orders,
                 "latest_direct_order": latest_direct_order,
-                "home_channel_id": home_channel_id,
+                "home_channel_id": str(home_channel_id) if home_channel_id else None,
                 "home_channel_name": None,
-                "feedback_channel_id": feedback_channel_id,
+                "feedback_channel_id": str(feedback_channel_id) if feedback_channel_id else None,
                 "feedback_channel_name": None,
             },
         }
@@ -548,6 +559,7 @@ class PanelDatabase:
         playback_table = f"{prefix}_playback_state"
         settings_table = f"{prefix}_guild_settings"
         queue_table = f"{prefix}_queue"
+        backup_table = f"{prefix}_queue_backup"
         home_table = f"{prefix}_bot_home_channels"
         heartbeat_table = "swarm_health"
 
@@ -555,6 +567,7 @@ class PanelDatabase:
             "playback": await self._table_exists(schema, playback_table),
             "settings": await self._table_exists(schema, settings_table),
             "queue": await self._table_exists(schema, queue_table),
+            "backup": await self._table_exists(schema, backup_table),
             "home": await self._table_exists(schema, home_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
         }
@@ -562,18 +575,17 @@ class PanelDatabase:
         playback_rows: list[dict[str, Any]] = []
         filter_map: dict[int, dict[str, Any]] = {}
         queue_map: dict[int, int] = {}
+        backup_queue_map: dict[int, int] = {}
         home_map: dict[int, int | None] = {}
         known_guilds: set[int] = set()
 
         if table_exists["playback"]:
             try:
                 playback_rows = await self._fetchall(
-                    f"SELECT guild_id, channel_id, title, video_url, position_seconds, is_playing FROM `{schema}`.`{playback_table}` ORDER BY guild_id"
+                    f"SELECT * FROM `{schema}`.`{playback_table}` ORDER BY guild_id"
                 )
             except Exception:
-                playback_rows = await self._fetchall(
-                    f"SELECT guild_id, channel_id, title, position_seconds, is_playing FROM `{schema}`.`{playback_table}` ORDER BY guild_id"
-                )
+                playback_rows = []
             for row in playback_rows:
                 guild_id = row.get("guild_id")
                 if guild_id is not None:
@@ -586,18 +598,37 @@ class PanelDatabase:
                 filter_map[guild_id] = {
                     "filter_mode": row.get("filter_mode") or "none",
                     "loop_mode": row.get("loop_mode") or "queue",
-                    "shuffle_mode": row.get("shuffle_mode") or 0
                 }
                 known_guilds.add(guild_id)
 
         if table_exists["queue"]:
-            rows = await self._fetchall(
-                f"SELECT guild_id, COUNT(*) AS queue_len FROM `{schema}`.`{queue_table}` GROUP BY guild_id"
-            )
+            try:
+                rows = await self._fetchall(
+                    f"SELECT guild_id, COUNT(*) AS queue_len FROM `{schema}`.`{queue_table}` WHERE bot_name = %s GROUP BY guild_id",
+                    (bot.key,),
+                )
+            except Exception:
+                rows = await self._fetchall(
+                    f"SELECT guild_id, COUNT(*) AS queue_len FROM `{schema}`.`{queue_table}` GROUP BY guild_id"
+                )
             for row in rows:
                 guild_id = int(row["guild_id"])
                 queue_map[guild_id] = int(row.get("queue_len") or 0)
                 known_guilds.add(guild_id)
+
+        if table_exists["backup"]:
+            try:
+                rows = await self._fetchall(
+                    f"SELECT guild_id, COUNT(*) AS backup_len FROM `{schema}`.`{backup_table}` WHERE bot_name = %s GROUP BY guild_id",
+                    (bot.key,),
+                )
+            except Exception:
+                rows = await self._fetchall(
+                    f"SELECT guild_id, COUNT(*) AS backup_len FROM `{schema}`.`{backup_table}` GROUP BY guild_id"
+                )
+            for row in rows:
+                guild_id = int(row["guild_id"])
+                backup_queue_map[guild_id] = int(row.get("backup_len") or 0)
 
         if table_exists["home"]:
             rows = await self._fetchall(
@@ -618,6 +649,7 @@ class PanelDatabase:
             playback = playback_map.get(guild_id, {})
             settings = filter_map.get(guild_id, {})
             queue_count = queue_map.get(guild_id, 0)
+            backup_queue_count = backup_queue_map.get(guild_id, 0)
             home_channel_id = home_map.get(guild_id)
             source_info = _detect_media_source(playback.get("video_url"))
             is_playing = bool(playback.get("is_playing"))
@@ -632,7 +664,7 @@ class PanelDatabase:
             sessions.append(
                 {
                     "guild_id": str(guild_id),
-                    "channel_id": playback.get("channel_id"),
+                    "channel_id": str(playback.get("channel_id")) if playback.get("channel_id") else None,
                     "title": playback.get("title"),
                     "video_url": playback.get("video_url"),
                     "media_source": source_info["key"],
@@ -644,9 +676,10 @@ class PanelDatabase:
                     "session_state_label": session_state_label,
                     "filter_mode": settings.get("filter_mode", "none"),
                     "loop_mode": settings.get("loop_mode", "queue"),
-                    "shuffle_mode": settings.get("shuffle_mode", 0),
                     "queue_count": queue_count,
-                    "home_channel_id": home_channel_id,
+                    "backup_queue_count": backup_queue_count,
+                    "backup_restore_ready": backup_queue_count > 0 and queue_count == 0,
+                    "home_channel_id": str(home_channel_id) if home_channel_id else None,
                     "home_channel_name": None,
                     "guild_name": None,
                     "channel_name": None,
@@ -725,11 +758,12 @@ class PanelDatabase:
         except Exception:
             pass
 
-        aria_status_real = "OFFLINE"
+        # Aria is ONLINE only when it has a recent heartbeat.
+        # Never infer ONLINE from the presence of music bots — that masks an offline Aria.
         if aria_heartbeat_age is not None and aria_heartbeat_age < 120:
             aria_status_real = "ONLINE"
-        elif aria_heartbeat_age is None and len(bots) > 0:
-            aria_status_real = "ONLINE"
+        else:
+            aria_status_real = "OFFLINE"
 
         bots.append(
             {
@@ -810,6 +844,24 @@ class PanelDatabase:
                     "rows": processed_rows
                 }
 
+    async def _clear_pending_orders(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> None:
+        overrides_table = f"{prefix}_swarm_overrides"
+        direct_orders_table = f"{prefix}_swarm_direct_orders"
+        try:
+            await cur.execute(
+                f"DELETE FROM `{schema}`.`{overrides_table}` WHERE guild_id = %s AND bot_name = %s",
+                (gid, bot_key),
+            )
+        except Exception:
+            pass
+        try:
+            await cur.execute(
+                f"DELETE FROM `{schema}`.`{direct_orders_table}` WHERE guild_id = %s AND bot_name = %s",
+                (gid, bot_key),
+            )
+        except Exception:
+            pass
+
     async def control_bot(self, bot_key: str, guild_id: str, action: str, payload: Any = None) -> dict[str, Any]:
         bot = BOT_INDEX.get(bot_key)
         if not bot:
@@ -822,42 +874,56 @@ class PanelDatabase:
         gid = _coerce_int(guild_id, "guild_id")
         action = str(action or "").strip().upper()
 
-        result: dict[str, Any] = {"action": action}
+        result: dict[str, Any] = {"action": action, "command": action}
 
         async with self.pool.acquire() as conn:
             # Explicit DictCursor fixes Shuffle crashes, explicit commit fixes silent rollbacks
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 if action in ["PAUSE", "RESUME", "SKIP", "STOP"]:
+                    await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)
                     await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
                     await cur.execute(f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, bot_key, action))
                     result["message"] = f"{bot.display_name} will {action.lower()} in guild {gid}."
                 
                 elif action == "RESTART":
-                    # Update global health table so the node's system manager actually restarts it
+                    await self._clear_pending_orders(cur, schema, prefix, 0, bot_key)
+                    # BUG FIX: bots poll swarm_overrides every 2 s, but they NEVER read
+                    # swarm_health for a RESTART signal.  Writing to swarm_health was a
+                    # silent no-op.  Corrected: write RESTART to swarm_overrides (guild 0)
+                    # so aria_command_listener picks it up and calls sys.exit(0).
                     await cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS `{schema}`.swarm_health "
-                        "(bot_name VARCHAR(50) PRIMARY KEY, status VARCHAR(20), "
-                        "last_pulse TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)"
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` "
+                        "(guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), "
+                        "PRIMARY KEY(guild_id, bot_name))"
                     )
                     await cur.execute(
-                        f"INSERT INTO `{schema}`.swarm_health (bot_name, status, last_pulse) VALUES (%s, 'RESTART', NOW()) "
-                        "ON DUPLICATE KEY UPDATE status = VALUES(status), last_pulse = NOW()",
-                        (bot_key,),
+                        f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` "
+                        "(guild_id, bot_name, command) VALUES (%s, %s, %s)",
+                        (0, bot_key, "RESTART"),
                     )
-                    # Simulate a global playback stall so the watchdog auto-resumes upon booting back up
+                    # Also mark playback as stopped so the watchdog auto-resumes after restart
                     try:
-                        await cur.execute(f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE")
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE"
+                        )
                     except Exception:
                         pass
-                    result["message"] = f"Restart requested for {bot.display_name}."
+                    result["message"] = f"Restart signal queued for {bot.display_name}."
 
                 elif action == "CLEAR":
+                    await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)
                     await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
                     await cur.execute(
                         f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)",
                         (gid, bot_key, "STOP"),
                     )
-                    await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s", (gid,))
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue` "
+                        "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
+                        "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
+                    )
+                    # BUG FIX: was missing AND bot_name filter – could wipe other bots' rows
+                    await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
                     try:
                         await cur.execute(
                             f"UPDATE `{schema}`.`{prefix}_playback_state` "
@@ -908,7 +974,12 @@ class PanelDatabase:
                     result["message"] = f"Filter mode set to {mode} for guild {gid} on {bot.display_name}."
 
                 elif action == "SHUFFLE":
-                    await cur.execute(f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s ORDER BY id ASC", (gid,))
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue` "
+                        "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
+                        "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
+                    )
+                    await cur.execute(f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC", (gid, bot_key))
                     q = await cur.fetchall()
                     if len(q) > 1:
                         import random
@@ -917,7 +988,7 @@ class PanelDatabase:
                         random.shuffle(l)
                         l.insert(0, first)
                         
-                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s", (gid,))
+                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
                         
                         cols = [k for k in l[0].keys() if k != 'id']
                         col_names = ", ".join(f"`{c}`" for c in cols)
@@ -929,6 +1000,7 @@ class PanelDatabase:
                     result["message"] = f"Shuffled the queue for guild {gid} on {bot.display_name}."
 
                 elif action == "PLAY":
+                    await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)
                     if not isinstance(payload, dict):
                         raise ValueError("PLAY payload must be an object with source_url and voice_channel_id")
 
@@ -967,6 +1039,7 @@ class PanelDatabase:
                     result["message"] = f"Queued a direct PLAY order for {bot.display_name} in guild {gid}."
 
                 elif action == "LEAVE":
+                    await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)
                     force_leave = False
                     if isinstance(payload, dict):
                         force_leave = bool(payload.get("force"))
