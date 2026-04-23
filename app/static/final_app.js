@@ -22,16 +22,100 @@ let selectedControlRequestId = 0;
 let eventFeedEntries = [];
 let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
+let eventFeedPollTimer = null;
 let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
 let controlRefreshTimer = null;
+let lastDashboardFetchAt = Date.now();
+let liveSessionState = [];
+let liveSessionPositionCache = new Map();
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let panelAppStarted = false;
 let panelSessionChecked = false;
 const MAX_EVENT_FEED_ENTRIES = 80;
+const CENTRAL_TIMEZONE = "America/Chicago";
+const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
+const centralTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
+
+
+function getSessionRuntimeKey(session) {
+    const botKey = String(session?.bot_key || session?.bot || 'unknown');
+    const guildId = String(session?.guild_id || '0');
+    const trackKey = String(session?.video_url || session?.title || 'no-track');
+    return `${botKey}:${guildId}:${trackKey}`;
+}
+
+function normalizeLiveSession(session, now = Date.now()) {
+    const normalized = { ...session };
+    const cacheKey = getSessionRuntimeKey(normalized);
+    const cached = liveSessionPositionCache.get(cacheKey);
+    const dbPosition = Number(normalized.position_seconds || 0);
+    const durationSeconds = Number(normalized.duration_seconds || normalized.length_seconds || 0);
+    let basePosition = dbPosition;
+
+    if (cached) {
+        if (cached.trackSignature === cacheKey) {
+            if (normalized.is_playing) {
+                basePosition = Math.max(dbPosition, Number(cached.position_seconds || 0));
+            } else if (!normalized.is_playing && normalized.session_state === 'paused') {
+                basePosition = Math.max(dbPosition, Number(cached.position_seconds || 0));
+            }
+        }
+    }
+
+    if (durationSeconds > 0) {
+        basePosition = Math.min(basePosition, durationSeconds);
+    }
+
+    normalized.position_seconds = Math.max(0, Math.floor(basePosition));
+    normalized._position_anchor_ms = now;
+    liveSessionPositionCache.set(cacheKey, {
+        trackSignature: cacheKey,
+        position_seconds: normalized.position_seconds,
+        duration_seconds: durationSeconds,
+        last_seen_ms: now,
+        is_playing: Boolean(normalized.is_playing),
+        session_state: normalized.session_state || null,
+    });
+    return normalized;
+}
+
+function getDisplayPositionSeconds(session, now = Date.now()) {
+    const cacheKey = getSessionRuntimeKey(session);
+    const cached = liveSessionPositionCache.get(cacheKey);
+    const durationSeconds = Number(session?.duration_seconds || session?.length_seconds || cached?.duration_seconds || 0);
+    const sessionAnchorMs = Number(session?._position_anchor_ms || 0);
+    const cachedAnchorMs = Number(cached?.last_seen_ms || 0);
+    const basePosition = Number(cached?.position_seconds ?? session?.position_seconds ?? 0);
+    const anchorCandidates = [sessionAnchorMs, cachedAnchorMs, lastDashboardFetchAt || 0].filter(value => Number.isFinite(value) && value > 0);
+    const anchorMs = anchorCandidates.length ? Math.max(...anchorCandidates) : now;
+    const shouldAdvance = Boolean(session?.is_playing);
+    const elapsedSeconds = shouldAdvance ? Math.max(0, Math.floor((now - anchorMs) / 1000)) : 0;
+    let display = basePosition + elapsedSeconds;
+    if (durationSeconds > 0) {
+        display = Math.min(display, durationSeconds);
+    }
+    display = Math.max(0, Math.floor(display));
+    const nextAnchorMs = shouldAdvance ? now : anchorMs;
+    liveSessionPositionCache.set(cacheKey, {
+        trackSignature: cacheKey,
+        position_seconds: display,
+        duration_seconds: durationSeconds,
+        last_seen_ms: nextAnchorMs,
+        is_playing: Boolean(session?.is_playing),
+        session_state: session?.session_state || null,
+    });
+    return display;
+}
+
+function renderLivePositionTick() {
+    if (!panelAppStarted || !Array.isArray(liveSessionState) || !liveSessionState.length) return;
+    renderSessions(liveSessionState.filter(session => isRuntimeSession(session)));
+    renderNowPlaying(liveSessionState);
+}
 
 // ================================
 // 🔒 AUTH HELPER
@@ -145,7 +229,7 @@ function resolveApiUrl(input) {
     if (typeof input !== 'string') return input;
     if (!input.startsWith('/')) return input;
     if (!remotePanelOrigin) return input;
-    return new URL(input, `${remotePanelOrigin}/`).toString();
+    return remotePanelOrigin.replace(/\/$/, "") + input;
 }
 
 function buildStaticUrl(path) {
@@ -183,7 +267,7 @@ function buildWebSocketUrl(path = '/ws') {
         if (!remotePanelOrigin || !remotePanelToken) return null;
         const url = new URL(remotePanelOrigin);
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        url.pathname = path;
+        url.pathname = (url.pathname === "/" ? "" : url.pathname.replace(/\/$/, "")) + path;
         url.search = token ? `token=${token}` : '';
         return url.toString();
     }
@@ -251,6 +335,33 @@ function escapeHtml(value) {
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+}
+
+function formatCentralTimestamp(value, withDate = false) {
+    if (!value) return '--';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return withDate ? centralDateTimeFormatter.format(date) : centralTimeFormatter.format(date);
+}
+
+function maskSecret(value) {
+    const raw = String(value || '');
+    if (!raw || raw === 'missing') return 'missing';
+    if (raw === 'present') return 'present';
+    return raw;
+}
+
+function initTabs() {
+    const buttons = Array.from(document.querySelectorAll('.swarm-tab'));
+    const panels = Array.from(document.querySelectorAll('.swarm-tab-panel'));
+    if (!buttons.length || !panels.length) return;
+    buttons.forEach(button => {
+        button.addEventListener('click', () => {
+            const target = button.dataset.tabTarget;
+            buttons.forEach(item => item.classList.toggle('active', item === button));
+            panels.forEach(panel => panel.classList.toggle('active', panel.id === target));
+        });
+    });
 }
 
 function describeBotStatus(status) {
@@ -441,6 +552,15 @@ async function logoutPanel() {
 }
 
 async function startPanelApplication() {
+    initTabs();
+    ["error-feed-level", "error-feed-source", "error-feed-sort"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el && !el.dataset.bound) {
+            el.addEventListener("change", renderEventFeed);
+            el.dataset.bound = "1";
+        }
+    });
+
     if (panelAppStarted) {
         fetchDashboard();
         fetchDiagnostics();
@@ -538,7 +658,8 @@ function getControlBotStatus(botKey, guildId = null) {
     if (liveBot?.db?.reachable === false) return describeBotStatus('offline');
 
     const heartbeatStatus = String(liveBot?.heartbeat?.status || '').toLowerCase();
-    if (heartbeatStatus === 'online') return describeBotStatus('online');
+    // Bots write 'HEALTHY' to swarm_health; treat it the same as 'online'
+    if (heartbeatStatus === 'online' || heartbeatStatus === 'healthy') return describeBotStatus('online');
     if (heartbeatStatus === 'stale') return describeBotStatus('stale');
     if (heartbeatStatus === 'offline' || heartbeatStatus === 'error') return describeBotStatus('offline');
 
@@ -696,6 +817,7 @@ function renderOverview(bots, generatedAt = null) {
 async function fetchDashboard() {
     try {
         const res = await fetch(`${API_BASE}/dashboard`);
+        lastDashboardFetchAt = Date.now();
         if (handle401(res)) return;
         const data = await res.json();
 
@@ -706,18 +828,20 @@ async function fetchDashboard() {
         renderBots(bots);
 
         let allSessions = [];
+        const sessionNow = Date.now();
         bots.forEach(bot => {
             if (Array.isArray(bot.sessions)) {
                 bot.sessions.forEach(session => {
-                    allSessions.push({
+                    allSessions.push(normalizeLiveSession({
                         ...session,
                         bot_key: bot.key,
                         bot_display: bot.display_name
-                    });
+                    }, sessionNow));
                 });
             }
         });
 
+        liveSessionState = allSessions;
         renderSessions(allSessions.filter(session => isRuntimeSession(session)));
         renderNowPlaying(allSessions);
         syncControlSelectionsFromDashboard();
@@ -732,7 +856,7 @@ async function fetchDashboard() {
 
         const meta = document.getElementById('dashboard-meta');
         if (meta && data.generated_at) {
-            meta.textContent = `Last updated: ${new Date(data.generated_at).toLocaleTimeString()}`;
+            meta.textContent = `Last updated: ${formatCentralTimestamp(data.generated_at)}`;
         }
 
     } catch (err) {
@@ -765,7 +889,28 @@ async function fetchDiagnostics(force = false) {
     }
 }
 
+function summarizeDbDetails(details) {
+    const rowCounts = details?.row_counts || {};
+    const extras = details?.extras || {};
+    const parts = [];
+    const queueTables = Object.entries(rowCounts).filter(([name]) => /queue(?!_backup)/.test(name));
+    const backupTables = Object.entries(rowCounts).filter(([name]) => /queue_backup/.test(name));
+    const directTables = Object.entries(rowCounts).filter(([name]) => /direct_orders/.test(name));
+    const overrideTables = Object.entries(rowCounts).filter(([name]) => /overrides/.test(name));
+    const playbackTables = Object.entries(rowCounts).filter(([name]) => /playback_state/.test(name));
+    const sum = pairs => pairs.reduce((acc, [, value]) => acc + (Number.isFinite(value) ? Number(value) : 0), 0);
+    if (playbackTables.length) parts.push(`Playback rows ${sum(playbackTables)}`);
+    if (queueTables.length) parts.push(`Queue rows ${sum(queueTables)}`);
+    if (backupTables.length) parts.push(`Backup rows ${sum(backupTables)}`);
+    if (directTables.length) parts.push(`Direct orders ${sum(directTables)}`);
+    if (overrideTables.length) parts.push(`Overrides ${sum(overrideTables)}`);
+    if (extras.active_playback != null) parts.push(`Active ${extras.active_playback}`);
+    if (extras.paused_playback != null) parts.push(`Paused ${extras.paused_playback}`);
+    return parts.join(' • ');
+}
+
 function renderDiagnosticsSummary(data) {
+
     const container = document.getElementById('diagnostics-summary');
     if (!container) return;
 
@@ -776,6 +921,9 @@ function renderDiagnosticsSummary(data) {
     const ariaDb = data?.aria?.db;
     const sharedEnv = data?.shared_env;
 
+    const totalPendingDirect = bots.reduce((acc, bot) => acc + Number(bot?.db_details?.row_counts?.[`${bot.key}_swarm_direct_orders`] || 0), 0);
+    const totalPendingOverrides = bots.reduce((acc, bot) => acc + Number(bot?.db_details?.row_counts?.[`${bot.key}_swarm_overrides`] || 0), 0);
+    const activePlayback = bots.reduce((acc, bot) => acc + Number(bot?.db_details?.extras?.active_playback || 0), 0);
     const cards = [
         {
             label: 'Shared Music Env',
@@ -786,22 +934,26 @@ function renderDiagnosticsSummary(data) {
         {
             label: 'Worker DB Links',
             value: `${botsDbOnline}/${bots.length}`,
-            detail: 'Database reachability using each bot runtime credential set.',
+            detail: `Active playback rows ${activePlayback} • Pending direct orders ${totalPendingDirect}`,
             tone: botsDbOnline === bots.length && bots.length ? 'online' : botsDbOnline ? 'stale' : 'offline',
         },
         {
             label: 'Discord Inventory',
             value: `${botsDiscordReady}/${bots.length}`,
-            detail: 'Panel-side Discord token readiness for live inventory and name resolution.',
+            detail: `Panel-side Discord token readiness. Pending overrides ${totalPendingOverrides}.`,
             tone: botsDiscordReady === bots.length && bots.length ? 'online' : botsDiscordReady ? 'stale' : 'offline',
         },
         {
             label: 'Aria Intelligence',
             value: describeDiagnosticState(ariaGemini?.status).label,
-            detail: ariaDb?.reachable
-                ? (ariaGemini?.message || 'Aria DB online and Gemini diagnostics complete.')
-                : (ariaDb?.message || 'Aria DB not reachable.'),
+            detail: ariaDb?.reachable ? (`${ariaGemini?.message || 'Aria DB online and Gemini diagnostics complete.'}`) : (ariaDb?.message || 'Aria DB not reachable.'),
             tone: describeDiagnosticState(ariaGemini?.status).tone,
+        },
+        {
+            label: 'Panel DB Writes',
+            value: data?.panel?.db?.write_ok ? 'Healthy' : 'Needs Attention',
+            detail: data?.panel?.db?.write_message || 'No panel DB write probe available.',
+            tone: data?.panel?.db?.write_ok ? 'online' : 'stale',
         },
     ];
 
@@ -829,7 +981,7 @@ function renderSharedRuntimeCard(data) {
             </div>
             <div class="diagnostic-item-body">${escapeHtml(sharedEnv.message || 'No shared env status available.')}</div>
             <div class="diagnostic-item-meta">${escapeHtml(sharedEnv.path || 'Unknown path')}</div>
-            ${sharedEnv.last_modified ? `<div class="diagnostic-item-meta">Updated ${escapeHtml(new Date(sharedEnv.last_modified).toLocaleString())}</div>` : ''}
+            ${sharedEnv.last_modified ? `<div class="diagnostic-item-meta">Updated ${escapeHtml(formatCentralTimestamp(sharedEnv.last_modified, true))}</div>` : ''}
         </div>
         <div class="diagnostic-item">
             <div class="diagnostic-item-head">
@@ -838,6 +990,8 @@ function renderSharedRuntimeCard(data) {
             </div>
             <div class="diagnostic-item-body">${escapeHtml(panelDb.message || 'No panel DB probe available.')}</div>
             <div class="diagnostic-item-meta">${escapeHtml(panelDb.database || 'Unknown schema')} on ${escapeHtml(panelDb.host || 'unknown host')}</div>
+            <div class="diagnostic-item-meta">Write probe: ${panelDb.write_ok ? 'ok' : escapeHtml(panelDb.write_message || 'not tested')}</div>
+            <div class="diagnostic-item-meta">Schema detail: ${escapeHtml(summarizeDbDetails(data?.panel?.db_details) || 'No panel table summary available yet.')}</div>
         </div>
     `;
 }
@@ -852,7 +1006,15 @@ function renderAriaDiagnosticCard(data) {
     const swarmDb = aria.swarm_db || {};
     const discord = aria.discord || {};
     const gemini = aria.gemini || {};
+    const dbDetails = aria.db_details || {};
     const operatorActions = Array.isArray(aria.operator_actions) ? aria.operator_actions : [];
+    const medic = aria.medic_summary || {};
+    const medicEvents = Array.isArray(medic.recent_swarm_events) ? medic.recent_swarm_events : [];
+    const repairCount = Number(medic.pending_repairs || 0);
+    const infraCount = Number(medic.pending_infra || 0);
+    const criticalCount = Number(medic.critical_health || 0);
+    const recoverableCount = Number(medic.recoverable_health || 0);
+    const operatorDecisions = Array.isArray(medic.recent_operator_decisions) ? medic.recent_operator_decisions : [];
 
     container.innerHTML = `
         <div class="diagnostic-item">
@@ -861,7 +1023,9 @@ function renderAriaDiagnosticCard(data) {
                 ${diagnosticBadge(db.status)}
             </div>
             <div class="diagnostic-item-body">${escapeHtml(db.message || 'No DB diagnostics available.')}</div>
-            <div class="diagnostic-item-meta">${escapeHtml(db.database || 'discord_aria')} on ${escapeHtml(db.host || 'unknown host')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(db.database || env.db_name || 'discord_aria')} on ${escapeHtml(db.host || env.db_host || 'unknown host')}</div>
+            <div class="diagnostic-item-meta">Write probe: ${db.write_ok ? 'ok' : escapeHtml(db.write_message || 'not tested')} | DB password: ${escapeHtml(maskSecret(env.masked_db_password))}</div>
+            <div class="diagnostic-item-meta">Schema detail: ${escapeHtml(summarizeDbDetails(dbDetails) || 'No Aria DB table summary available yet.')}</div>
         </div>
         <div class="diagnostic-item">
             <div class="diagnostic-item-head">
@@ -869,7 +1033,8 @@ function renderAriaDiagnosticCard(data) {
                 ${diagnosticBadge(swarmDb.status)}
             </div>
             <div class="diagnostic-item-body">${escapeHtml(swarmDb.message || 'No swarm DB diagnostics available.')}</div>
-            <div class="diagnostic-item-meta">${escapeHtml(swarmDb.database || 'unknown schema')} on ${escapeHtml(swarmDb.host || 'unknown host')}</div>
+            <div class="diagnostic-item-meta">${escapeHtml(swarmDb.database || env.swarm_db_name || 'unknown schema')} on ${escapeHtml(swarmDb.host || env.swarm_db_host || 'unknown host')}</div>
+            <div class="diagnostic-item-meta">Write probe: ${swarmDb.write_ok ? 'ok' : escapeHtml(swarmDb.write_message || 'not tested')} | Swarm DB password: ${escapeHtml(maskSecret(env.masked_swarm_db_password))}</div>
         </div>
         <div class="diagnostic-item">
             <div class="diagnostic-item-head">
@@ -877,7 +1042,7 @@ function renderAriaDiagnosticCard(data) {
                 ${diagnosticBadge(gemini.status)}
             </div>
             <div class="diagnostic-item-body">${escapeHtml(gemini.message || 'No Gemini diagnostics available.')}</div>
-            <div class="diagnostic-item-meta">Model: ${escapeHtml(gemini.model || 'unknown')} | SDK installed: ${gemini.sdk_installed ? 'yes' : 'no'} | Key present: ${env.gemini_key_present ? 'yes' : 'no'}</div>
+            <div class="diagnostic-item-meta">Model: ${escapeHtml(gemini.model || 'unknown')} | SDK installed: ${gemini.sdk_installed ? 'yes' : 'no'} | Key: ${escapeHtml(maskSecret(env.masked_gemini_key))}</div>
         </div>
         <div class="diagnostic-item">
             <div class="diagnostic-item-head">
@@ -896,6 +1061,32 @@ function renderAriaDiagnosticCard(data) {
                 ${operatorActions.map(item => `<span class="diagnostic-bullet">${escapeHtml(item)}</span>`).join('')}
             </div>
         </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Aria medic state</span>
+                ${diagnosticBadge(criticalCount > 0 ? 'critical' : (repairCount > 0 || infraCount > 0 || recoverableCount > 0 ? 'warning' : 'ok'))}
+            </div>
+            <div class="diagnostic-item-body">Pending repairs: ${repairCount} | Pending infra: ${infraCount} | Critical health: ${criticalCount} | Recoverable/degraded: ${recoverableCount}</div>
+            <div class="diagnostic-item-meta">This reflects Aria's new medic/event system, not just heartbeat status.</div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Recent operator decisions</span>
+                <span class="diag-inline-count">${operatorDecisions.length}</span>
+            </div>
+            <div class="diagnostic-bullet-list">
+                ${operatorDecisions.length ? operatorDecisions.map(item => `<span class="diagnostic-bullet">${escapeHtml(String(item.issue_type || 'issue'))} • ${escapeHtml(String(item.bot_name || 'swarm'))} • ${escapeHtml(String(item.urgency_label || 'normal'))}</span>`).join('') : '<span class="diagnostic-bullet">No recent operator decisions recorded yet.</span>'}
+            </div>
+        </div>
+        <div class="diagnostic-item">
+            <div class="diagnostic-item-head">
+                <span>Recent medic events</span>
+                <span class="diag-inline-count">${medicEvents.length}</span>
+            </div>
+            <div class="diagnostic-bullet-list">
+                ${medicEvents.length ? medicEvents.slice(0, 5).map(item => `<span class="diagnostic-bullet">${escapeHtml(String(item.event_type || 'event'))} • ${escapeHtml(String(item.bot_name || 'swarm'))} • ${escapeHtml(String(item.severity || 'info'))}</span>`).join('') : '<span class="diagnostic-bullet">No recent medic events recorded yet.</span>'}
+            </div>
+        </div>
     `;
 }
 
@@ -909,12 +1100,15 @@ function renderWorkerDiagnosticGrid(data) {
         return;
     }
 
-    container.innerHTML = bots.map(bot => `
+    container.innerHTML = bots.map(bot => {
+        const detail = summarizeDbDetails(bot.db_details);
+        const missingTables = Array.isArray(bot.db_details?.missing_tables) ? bot.db_details.missing_tables : [];
+        return `
         <article class="worker-diagnostic-card">
             <div class="worker-diagnostic-head">
                 <div>
                     <div class="worker-diagnostic-name">${escapeHtml(bot.display_name || bot.key)}</div>
-                    <div class="worker-diagnostic-meta">Shared env token ${bot.env?.shared_token_present ? 'present' : 'missing'}</div>
+                    <div class="worker-diagnostic-meta">Schema ${escapeHtml(bot.env?.db_name || 'unknown')} on ${escapeHtml(bot.env?.db_host || 'unknown host')}</div>
                 </div>
                 ${diagnosticBadge(bot.db?.status)}
             </div>
@@ -926,18 +1120,62 @@ function renderWorkerDiagnosticGrid(data) {
                 <span>Discord inventory</span>
                 <span>${escapeHtml(bot.discord?.message || 'No Discord result')}</span>
             </div>
+            <div class="worker-diagnostic-row">
+                <span>Schema detail</span>
+                <span>${escapeHtml(detail || 'No queue/playback table data available yet.')}</span>
+            </div>
+            <div class="worker-diagnostic-row">
+                <span>Missing tables</span>
+                <span>${escapeHtml(missingTables.length ? missingTables.join(', ') : 'none detected')}</span>
+            </div>
             <div class="worker-diagnostic-chip-row">
                 <span class="worker-chip ${bot.env?.shared_db_password_present ? 'worker-chip-ok' : 'worker-chip-bad'}">DB secret ${bot.env?.shared_db_password_present ? 'present' : 'missing'}</span>
                 <span class="worker-chip ${bot.env?.shared_lavalink_password_present ? 'worker-chip-ok' : 'worker-chip-bad'}">Lavalink ${bot.env?.shared_lavalink_password_present ? 'present' : 'missing'}</span>
                 <span class="worker-chip ${bot.env?.panel_token_present ? 'worker-chip-ok' : 'worker-chip-bad'}">Panel token ${bot.env?.panel_token_present ? 'present' : 'missing'}</span>
             </div>
-        </article>
-    `).join('');
+        </article>`;
+    }).join('');
 }
 
 // ================================
 // 🎵 RENDER NOW-PLAYING CARDS
 // ================================
+
+function formatProgressPercent(positionSeconds, durationSeconds) {
+    const duration = Number(durationSeconds || 0);
+    const position = Number(positionSeconds || 0);
+    if (!duration || duration <= 0) return null;
+    return Math.max(0, Math.min(100, Math.round((position / duration) * 100)));
+}
+
+function summarizeRecoveryState(session) {
+    const backupCount = Number(session?.backup_queue_count || 0);
+    const pendingDirect = Number(session?.pending_direct_orders || 0);
+    const pendingOverrides = Number(session?.pending_overrides || 0);
+    const homeChannel = session?.home_channel_id || session?.saved_home_channel_id || null;
+    const recovering = Boolean(session?.recovering || session?.recovery_pending || session?.recovery_state === 'pending');
+    const parts = [];
+    if (backupCount > 0) parts.push(`backup:${backupCount}`);
+    if (homeChannel) parts.push('home saved');
+    if (pendingDirect > 0) parts.push(`direct:${pendingDirect}`);
+    if (pendingOverrides > 0) parts.push(`override:${pendingOverrides}`);
+    if (recovering) parts.push('recovering');
+    return parts.length ? parts.join(' · ') : 'No recovery pressure';
+}
+
+function summarizeSessionSignals(session) {
+    const signals = [];
+    const queue = Number(session?.queue_count || 0);
+    const backup = Number(session?.backup_queue_count || 0);
+    const state = describeSessionState(session).key;
+    if (queue > 0) signals.push(`${queue} queued`);
+    if (backup > 0) signals.push(`${backup} backup`);
+    if (session?.loop_mode && session.loop_mode !== 'off') signals.push(`loop:${session.loop_mode}`);
+    if (session?.filter_mode && session.filter_mode !== 'none') signals.push(`fx:${session.filter_mode}`);
+    if (state === 'recovering' || state === 'queued') signals.push('watching auto-restore');
+    return signals.length ? signals.join(' · ') : 'steady';
+}
+
 function renderNowPlaying(sessions) {
     const container = document.getElementById("now-playing-cards");
     if (!container) return;
@@ -954,7 +1192,11 @@ function renderNowPlaying(sessions) {
     }
 
     container.innerHTML = playing.map(s => {
-        const pos = formatDuration(s.position_seconds);
+        const positionSeconds = getDisplayPositionSeconds(s);
+        const pos = formatDuration(positionSeconds);
+        const durationLabel = formatDuration(s.duration_seconds || s.length_seconds || s.track_length_seconds || 0);
+        const progressPercent = formatProgressPercent(positionSeconds, s.duration_seconds || s.length_seconds || s.track_length_seconds);
+        const recoverySummary = summarizeRecoveryState(s);
         const thumb = s.thumbnail || null;
         const sourceBadge = s.media_source_label
             ? `<span class="np-stat np-source np-source-${s.media_source || 'unknown'}">${s.media_source_label}</span>`
@@ -1002,7 +1244,13 @@ function renderNowPlaying(sessions) {
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
                     ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${s.loop_mode}</span>` : ''}
                     ${s.queue_count > 0 ? `<span class="np-stat">+${s.queue_count} queued</span>` : ''}
+                    ${Number(s?.backup_queue_count || 0) > 0 ? `<span class="np-stat np-loop">backup:${Number(s.backup_queue_count)}</span>` : ''}
                 </div>
+                <div class="np-stats-row" style="margin-top:6px;">
+                    <span class="np-stat">${pos}${durationLabel !== '0:00' ? ` / ${durationLabel}` : ''}</span>
+                    <span class="np-stat">${escapeHtml(recoverySummary)}</span>
+                </div>
+                ${progressPercent !== null ? `<div class="np-progress"><span style="width:${progressPercent}%"></span></div>` : ''}
                 <div class="np-controls">
                     <button class="np-btn" data-action="PAUSE" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Pause">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
@@ -1055,6 +1303,14 @@ function renderBots(bots) {
         card.style.setProperty('--bot-accent', accent);
 
         const initial = bot.display_name.charAt(0).toUpperCase();
+        const rawHeartbeatStatus = String(bot.heartbeat_status || 'unknown').toLowerCase();
+        const heartbeatStatusLabel = rawHeartbeatStatus === 'healthy' ? 'Healthy'
+            : rawHeartbeatStatus === 'online' ? 'Online'
+            : rawHeartbeatStatus === 'stale' ? 'Stale'
+            : rawHeartbeatStatus === 'offline' ? 'Offline'
+            : rawHeartbeatStatus === 'restart' ? 'Restarting'
+            : rawHeartbeatStatus === 'n/a' ? 'N/A'
+            : bot.heartbeat_status || 'Unknown';
 
         card.innerHTML = `
             <div class="bot-card-header">
@@ -1082,8 +1338,25 @@ function renderBots(bots) {
             </div>
             <div class="bot-meta-row">
                 <span class="bot-meta-pill">Heartbeat ${heartbeatLabel}</span>
-                <span class="bot-meta-pill">${bot.heartbeat_status || 'unknown'}</span>
+                <span class="bot-meta-pill">${heartbeatStatusLabel}</span>
             </div>
+            ${bot.kind === 'orchestrator' ? `
+            <div class="bot-meta-row" style="margin-top: 10px; flex-direction: column; align-items: stretch; gap: 8px;">
+                <span class="bot-meta-pill">Interactions ${bot.recent_interaction_count || 0}</span>
+                <span class="bot-meta-pill">Repairs ${Number(bot.medic_summary?.pending_repairs || 0)} • Infra ${Number(bot.medic_summary?.pending_infra || 0)} • Critical ${Number(bot.medic_summary?.critical_health || 0)}</span>
+                ${(Array.isArray(bot.recent_interactions) && bot.recent_interactions.length)
+                    ? bot.recent_interactions.slice(0, 2).map(entry => {
+                        const prompt = escapeHtml(String(entry?.prompt_text || '—')).slice(0, 120);
+                        const response = escapeHtml(String(entry?.response_text || '—')).slice(0, 180);
+                        const kind = escapeHtml(String(entry?.interaction_type || 'chat'));
+                        return `<div class="bot-meta-pill" style="display:block; white-space:normal; line-height:1.35;">
+                            <div style="font-weight:600; color:${accent}; margin-bottom:4px;">${kind}</div>
+                            <div><strong>Q:</strong> ${prompt}</div>
+                            <div style="margin-top:4px;"><strong>A:</strong> ${response}</div>
+                        </div>`;
+                    }).join('')
+                    : `<span class="bot-meta-pill">No recent Aria prompts captured yet.</span>`}
+            </div>` : ''}
             ${bot.kind !== 'orchestrator' ? `
             <div class="bot-actions">
                 <button class="bot-action-btn bot-btn-restart"
@@ -1124,16 +1397,21 @@ function renderSessions(sessions) {
         const channelLabel = getSessionChannelLabel(session);
         const trackLabel = session.title || (stateMeta.key === 'queued' ? 'Queued media awaiting worker pickup' : '—');
         const row = document.createElement("tr");
+        const recoverySummary = summarizeRecoveryState(session);
+        const signalSummary = summarizeSessionSignals(session);
+        const durationLabel = formatDuration(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
         row.innerHTML = `
             <td>${session.bot_display}</td>
             <td>${session.guild_name || session.guild_id}</td>
-            <td>${channelLabel}</td>
+            <td>${channelLabel}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${session.home_channel_id}</div>` : ''}</td>
             <td>${stateMeta.icon} ${stateMeta.label}</td>
-            <td>${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}</td>
+            <td>${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}</td>
             <td>${session.filter_mode || "none"}</td>
             <td>${normalizeLoopMode(session.loop_mode)}</td>
             <td>${session.queue_count || 0}</td>
-            <td>${formatDuration(session.position_seconds)}</td>
+            <td>${escapeHtml(recoverySummary)}</td>
+            <td>${escapeHtml(signalSummary)}</td>
+            <td>${formatDuration(getDisplayPositionSeconds(session))}</td>
             <td>
                 <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
@@ -1239,81 +1517,95 @@ async function loadInventory() {
     const sel = document.getElementById('bot-select');
     const out = document.getElementById('inventory-output');
     if (!sel || !out) return;
-    out.textContent = 'Loading...';
+    out.innerHTML = '<div class="control-context-empty">Loading live guild and channel inventory...</div>';
     try {
         const res = await fetch(`${API_BASE}/bots/${sel.value}/inventory`);
         if (handle401(res)) return;
         const data = await res.json();
         if (!res.ok) {
-            out.textContent = `Inventory load failed: ${data.detail || 'Unknown error'}`;
+            out.innerHTML = `<div class="control-context-empty">Inventory load failed: ${escapeHtml(data.detail || 'Unknown error')}</div>`;
             return;
         }
-        out.textContent = formatInventoryOutput(data);
+        inventoryBrowserState = {
+            bot: data.bot || null,
+            identity: data.identity || null,
+            guilds: Array.isArray(data.guilds) ? data.guilds : [],
+            errors: Array.isArray(data.errors) ? data.errors : [],
+        };
+        renderInventoryBrowser();
     } catch (err) {
-        out.textContent = `Error: ${err}`;
+        out.innerHTML = `<div class="control-context-empty">Error: ${escapeHtml(String(err))}</div>`;
     }
 }
 
-function formatInventoryOutput(data) {
-    const lines = [];
-    const botName = data.bot?.display_name || data.bot?.key || 'Unknown Bot';
-    const identity = data.identity || {};
-    const guilds = Array.isArray(data.guilds) ? [...data.guilds] : [];
-    const errors = Array.isArray(data.errors) ? data.errors : [];
+function getFilteredSortedInventoryGuilds() {
+    const search = (document.getElementById('inventory-search')?.value || '').trim().toLowerCase();
+    const sortMode = document.getElementById('inventory-sort')?.value || 'name';
+    const guilds = [...(inventoryBrowserState.guilds || [])].map(guild => {
+        const channels = Array.isArray(guild.channels) ? guild.channels : [];
+        return {
+            ...guild,
+            channels,
+            voice_count: channels.filter(ch => ch.type === 2 || ch.type === 13).length,
+            text_count: channels.filter(ch => ch.type === 0 || ch.type === 5 || ch.type === 15).length,
+        };
+    }).filter(guild => {
+        if (!search) return true;
+        if (String(guild.name || '').toLowerCase().includes(search)) return true;
+        return guild.channels.some(ch => String(ch.name || '').toLowerCase().includes(search));
+    });
 
-    lines.push(`Bot: ${botName}`);
-    if (identity.username) {
-        lines.push(`Identity: ${identity.username}${identity.global_name ? ` (${identity.global_name})` : ''} [${identity.id || 'unknown id'}]`);
-    } else {
-        lines.push('Identity: unavailable');
-    }
-    lines.push(`Guilds visible: ${guilds.length}`);
+    guilds.sort((a, b) => {
+        if (sortMode === 'channels_desc') return (b.channels.length - a.channels.length) || String(a.name || '').localeCompare(String(b.name || ''));
+        if (sortMode === 'voice_desc') return (b.voice_count - a.voice_count) || String(a.name || '').localeCompare(String(b.name || ''));
+        return String(a.name || '').localeCompare(String(b.name || ''));
+    });
+    return guilds;
+}
 
-    if (errors.length) {
-        lines.push('');
-        lines.push('API warnings:');
-        errors.forEach(error => lines.push(`- ${error}`));
-    }
+function renderInventoryBrowser() {
+    const out = document.getElementById('inventory-output');
+    if (!out) return;
+    const botName = inventoryBrowserState.bot?.display_name || inventoryBrowserState.bot?.key || 'Unknown bot';
+    const identity = inventoryBrowserState.identity || {};
+    const errors = Array.isArray(inventoryBrowserState.errors) ? inventoryBrowserState.errors : [];
+    const guilds = getFilteredSortedInventoryGuilds();
+
+    const summary = `
+        <div class="inventory-summary-grid">
+            <div class="capability-item"><div class="capability-item-head"><span>Bot identity</span></div><div class="capability-item-body">${escapeHtml(identity.username ? `${identity.username}${identity.global_name ? ` (${identity.global_name})` : ''}` : 'Unavailable')}</div></div>
+            <div class="capability-item"><div class="capability-item-head"><span>Guilds visible</span></div><div class="capability-item-body">${escapeHtml(String(guilds.length))} guilds available to ${escapeHtml(botName)}</div></div>
+            <div class="capability-item"><div class="capability-item-head"><span>Why this exists</span></div><div class="capability-item-body">Use this to confirm which guilds/channels each bot can actually route commands to before you issue play, home-channel, or leave actions.</div></div>
+        </div>
+    `;
+
+    const warnings = errors.length ? `<div class="diag-list">${errors.map(error => `<div class="diag-item diag-item-error">${escapeHtml(error)}</div>`).join('')}</div>` : '';
 
     if (!guilds.length) {
-        lines.push('');
-        lines.push('No guilds were returned for this bot.');
-        return lines.join('\n');
+        out.innerHTML = `${summary}${warnings}<div class="control-context-empty">No guilds matched the current filter.</div>`;
+        return;
     }
 
-    guilds
-        .sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')))
-        .forEach(guild => {
-            const channels = Array.isArray(guild.channels) ? [...guild.channels] : [];
-            const sortedChannels = channels.sort((a, b) => {
-                const typeCompare = String(a.type_name || '').localeCompare(String(b.type_name || ''));
-                return typeCompare || String(a.name || '').localeCompare(String(b.name || ''));
-            });
-
-            const textCount = sortedChannels.filter(channel => channel.type === 0 || channel.type === 5).length;
-            const voiceCount = sortedChannels.filter(channel => channel.type === 2 || channel.type === 13).length;
-
-            lines.push('');
-            lines.push(`${guild.name} (${guild.id})`);
-            lines.push(`  Text: ${textCount} | Voice/Stage: ${voiceCount} | Total Channels: ${sortedChannels.length}`);
-
-            if (guild.channels_error) {
-                lines.push(`  Channel lookup warning: ${guild.channels_error}`);
-            }
-
-            if (!sortedChannels.length) {
-                lines.push('  No channels returned.');
-                return;
-            }
-
-            sortedChannels.forEach(channel => {
-                const parentSuffix = channel.parent_id ? ` | parent ${channel.parent_id}` : '';
-                lines.push(`  - [${channel.type_name || channel.type}] ${channel.name} (${channel.id})${parentSuffix}`);
-            });
-        });
-
-    return lines.join('\n');
+    out.innerHTML = `${summary}${warnings}<div class="inventory-guild-grid">${guilds.map(guild => {
+        const channelGroups = [
+            { label: 'Voice / Stage', items: guild.channels.filter(ch => ch.type === 2 || ch.type === 13) },
+            { label: 'Text / Announcement / Forum', items: guild.channels.filter(ch => ch.type === 0 || ch.type === 5 || ch.type === 15) },
+            { label: 'Categories / Other', items: guild.channels.filter(ch => ![0,2,5,13,15].includes(ch.type)) },
+        ].filter(group => group.items.length);
+        return `<article class="inventory-guild-card">
+            <div class="swarm-guild-card-head">
+                <div>
+                    <div class="worker-diagnostic-name">${escapeHtml(guild.name || `Guild ${guild.id}`)}</div>
+                    <div class="worker-diagnostic-meta">${escapeHtml(String(guild.channels.length))} channels • ${escapeHtml(String(guild.voice_count))} voice/stage • ${escapeHtml(String(guild.text_count))} text/forum</div>
+                </div>
+                <span class="control-context-status control-context-status-${guild.owner ? 'online' : 'idle'}">${guild.owner ? 'Owner access' : 'Member access'}</span>
+            </div>
+            ${guild.channels_error ? `<div class="diag-item diag-item-error">${escapeHtml(guild.channels_error)}</div>` : ''}
+            <div class="inventory-channel-groups">${channelGroups.map(group => `<div class="inventory-channel-group"><div class="worker-diagnostic-meta">${escapeHtml(group.label)}</div><div class="inventory-channel-list">${group.items.map(ch => `<span class="inventory-chip">${escapeHtml(ch.name || ch.id)} <small>${escapeHtml(ch.type_name || String(ch.type))}</small></span>`).join('')}</div></div>`).join('')}</div>
+        </article>`;
+    }).join('')}</div>`;
 }
+
 
 function normalizeEventFeedEntry(payload) {
     if (!payload || typeof payload !== 'object') return null;
@@ -1351,6 +1643,9 @@ function normalizeEventFeedEntry(payload) {
         description,
         timestamp: payload.timestamp || new Date().toISOString(),
         source: payload.source || 'panel',
+        bot_key: payload.bot_key || null,
+        guild_id: payload.guild_id || null,
+        error_type: payload.error_type || null,
     };
 }
 
@@ -1368,31 +1663,50 @@ function renderEventFeed() {
     const out = document.getElementById('error-feed');
     if (!out) return;
 
-    const connectionLabel = {
-        connecting: 'connecting',
-        online: 'live',
-        offline: 'offline',
-    }[eventFeedConnectionState] || eventFeedConnectionState;
+    const connectionLabel = { connecting: 'connecting', online: 'live', offline: 'offline' }[eventFeedConnectionState] || eventFeedConnectionState;
+    const levelFilter = document.getElementById('error-feed-level')?.value || 'all';
+    const sourceFilter = document.getElementById('error-feed-source')?.value || 'all';
+    const sortMode = document.getElementById('error-feed-sort')?.value || 'newest';
 
-    const header = `Feed: ${connectionLabel}`;
-    if (!eventFeedEntries.length) {
-        out.textContent = `${header}\n\nNo live events yet.`;
+    let items = eventFeedEntries.slice();
+    if (levelFilter !== 'all') items = items.filter(entry => String(entry.level || '').toLowerCase() === levelFilter);
+    if (sourceFilter !== 'all') {
+        items = items.filter(entry => {
+            const source = String(entry.source || '').toLowerCase();
+            if (sourceFilter === 'bot_error') return entry.type === 'bot_error' || source.includes('bot');
+            return source.includes(sourceFilter);
+        });
+    }
+    if (sortMode === 'oldest') {
+        items.sort((a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0));
+    } else if (sortMode === 'level') {
+        const rank = { error: 0, warning: 1, info: 2 };
+        items.sort((a, b) => (rank[a.level] ?? 9) - (rank[b.level] ?? 9) || new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+    } else {
+        items.sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0));
+    }
+
+    if (!items.length) {
+        out.innerHTML = `<div class="error-feed-empty">Feed: ${escapeHtml(connectionLabel)}<br><br>No matching live events yet.</div>`;
         renderOverview(dashboardBotsState);
         return;
     }
 
-    const lines = eventFeedEntries
-        .slice()
-        .reverse()
-        .map(entry => {
-            const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : '--:--:--';
-            const level = String(entry.level || 'info').toUpperCase();
-            const source = entry.source ? ` | ${entry.source}` : '';
-            const description = entry.description ? `\n${entry.description}` : '';
-            return `[${ts}] ${level}${source} :: ${entry.title}${description}`;
-        });
-
-    out.textContent = `${header}\n\n${lines.join('\n\n')}`;
+    out.innerHTML = `<div class="error-feed-status">Feed: ${escapeHtml(connectionLabel)} • Timezone: CST/CDT</div>` + items.map(entry => {
+        const ts = formatCentralTimestamp(entry.timestamp, true);
+        const level = String(entry.level || 'info').toLowerCase();
+        const source = entry.source || 'panel';
+        const meta = [source, entry.bot_key ? `bot=${entry.bot_key}` : null, entry.guild_id ? `guild=${entry.guild_id}` : null, entry.error_type ? `type=${entry.error_type}` : null].filter(Boolean).join(' • ');
+        return `<article class="error-entry error-entry-${escapeHtml(level)}">
+            <div class="error-entry-head">
+                <span class="error-entry-level">${escapeHtml(level.toUpperCase())}</span>
+                <span class="error-entry-time">${escapeHtml(ts)}</span>
+            </div>
+            <div class="error-entry-title">${escapeHtml(entry.title || 'Untitled event')}</div>
+            <div class="error-entry-meta">${escapeHtml(meta)}</div>
+            <div class="error-entry-body">${escapeHtml(entry.description || '')}</div>
+        </article>`;
+    }).join('');
     renderOverview(dashboardBotsState);
 }
 
@@ -1430,11 +1744,25 @@ async function loadEventFeedHistory() {
     }
 }
 
+function startEventFeedPolling() {
+    if (eventFeedPollTimer) return;
+    eventFeedPollTimer = setInterval(() => {
+        loadEventFeedHistory();
+    }, 8000);
+}
+
+function stopEventFeedPolling() {
+    if (!eventFeedPollTimer) return;
+    clearInterval(eventFeedPollTimer);
+    eventFeedPollTimer = null;
+}
+
 function disconnectEventFeed() {
     if (eventFeedReconnectTimer) {
         clearTimeout(eventFeedReconnectTimer);
         eventFeedReconnectTimer = null;
     }
+    stopEventFeedPolling();
     if (eventFeedSocket) {
         try {
             eventFeedSocket.onclose = null;
@@ -1447,10 +1775,29 @@ function disconnectEventFeed() {
     eventFeedConnectionState = 'offline';
 }
 
+function updateLiveSyncStatus() {
+    const el = document.getElementById('live-sync-status');
+    if (!el) return;
+    if (eventFeedConnectionState === 'online') {
+        el.textContent = 'Live Sync: WebSocket';
+        el.style.color = '#a6e3a1';
+        el.style.borderColor = '#a6e3a1';
+    } else if (eventFeedConnectionState === 'connecting') {
+        el.textContent = 'Live Sync: Connecting...';
+        el.style.color = '#fab387';
+        el.style.borderColor = '#fab387';
+    } else {
+        el.textContent = 'Live Sync: Polling 5s';
+        el.style.color = '#89b4fa';
+        el.style.borderColor = '#89b4fa';
+    }
+}
+
 function connectEventFeed() {
     const wsUrl = buildWebSocketUrl('/ws');
     if (!wsUrl) {
         eventFeedConnectionState = 'offline';
+        startEventFeedPolling();
         renderEventFeed();
         return;
     }
@@ -1461,15 +1808,20 @@ function connectEventFeed() {
         clearTimeout(eventFeedReconnectTimer);
         eventFeedReconnectTimer = null;
     }
+    stopEventFeedPolling();
 
     eventFeedConnectionState = 'connecting';
     renderEventFeed();
+    updateLiveSyncStatus();
 
     eventFeedSocket = new WebSocket(wsUrl);
 
     eventFeedSocket.onopen = () => {
         eventFeedConnectionState = 'online';
+        stopEventFeedPolling();
+        loadEventFeedHistory();
         renderEventFeed();
+        updateLiveSyncStatus();
     };
 
     eventFeedSocket.onmessage = (event) => {
@@ -1489,13 +1841,17 @@ function connectEventFeed() {
 
     eventFeedSocket.onerror = () => {
         eventFeedConnectionState = 'offline';
+        startEventFeedPolling();
         renderEventFeed();
+        updateLiveSyncStatus();
     };
 
     eventFeedSocket.onclose = (event) => {
         eventFeedSocket = null;
         eventFeedConnectionState = 'offline';
+        startEventFeedPolling();
         renderEventFeed();
+        updateLiveSyncStatus();
         if (event?.code === 4401) {
             panelSessionChecked = false;
             panelAppStarted = false;
@@ -1982,8 +2338,8 @@ function renderSelectedBotCapabilities() {
             reason: !dbReady ? dbAccess.message
                 : !hasGuild ? 'Choose a guild before checking backup recovery state.'
                 : Number(session?.backup_queue_count || 0) === 0 ? 'No backup queue entries exist for this bot and guild right now.'
-                : session?.backup_restore_ready ? 'Backup queue is armed and should repopulate the live queue when playback goes idle.'
-                : 'Backup queue exists, but the live queue is not empty yet.',
+                : session?.backup_restore_ready ? (session?.backup_restore_reason || 'Backup queue is armed and should repopulate the live queue when playback goes idle.')
+                : (session?.backup_restore_reason || 'Backup queue exists, but the live queue is not empty yet.'),
         },
         {
             label: 'Restart node',
@@ -2029,9 +2385,7 @@ function renderSelectedGuildMatrix() {
     const liveMatrixReady = Boolean(controlMatrixState.loaded && String(controlMatrixState.guildId) === String(guildId));
     const workerBots = liveMatrixReady
         ? controlMatrixState.bots
-        : dashboardBotsState
-            .filter(bot => bot.kind === 'music')
-            .map(bot => ({ key: bot.key, display_name: bot.display_name }));
+        : dashboardBotsState.filter(bot => bot.kind === 'music');
 
     container.innerHTML = workerBots.map(bot => {
         const session = getBestControlSession(bot.key, guildId);
@@ -2048,7 +2402,7 @@ function renderSelectedGuildMatrix() {
                     : sessionState.key === 'queued'
                         ? `${session.queue_count || 0} queued`
                         : session?.backup_restore_ready
-                            ? 'Idle, backup queue armed'
+                            ? 'Idle, backup restore armed'
                         : 'Configured standby'
             : 'No runtime state in this guild';
         return `
@@ -2597,6 +2951,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('load-inventory')
         ?.addEventListener('click', loadInventory);
+    document.getElementById('inventory-search')
+        ?.addEventListener('input', renderInventoryBrowser);
+    document.getElementById('inventory-sort')
+        ?.addEventListener('change', renderInventoryBrowser);
 
     document.getElementById('control-bot-select')
         ?.addEventListener('change', (event) => loadControlInventory(event.target.value));
@@ -2673,3 +3031,7 @@ setInterval(() => {
 setInterval(() => {
     if (panelAppStarted) fetchDiagnostics();
 }, 60000);
+
+setInterval(() => {
+    renderLivePositionTick();
+}, 1000);

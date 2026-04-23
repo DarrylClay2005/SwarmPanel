@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="stylesheet" href="/static/styles.css?v=8" />
 </head>
@@ -15,6 +15,14 @@
   </header>
 
   <main class="container">
+  <nav class="swarm-tabs" aria-label="Swarm sections">
+    <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
+    <button class="swarm-tab" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
+    <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
+    <button class="swarm-tab" data-tab-target="intel-tab" type="button">Intel + Errors</button>
+  </nav>
+
+  <div class="swarm-tab-panel active" id="overview-tab">
     <section class="panel deck-panel">
       <div class="section-title-row">
         <div>
@@ -61,6 +69,8 @@
               <th>Filter</th>
               <th>Loop</th>
               <th>Queue</th>
+              <th>Recovery</th>
+              <th>Signals</th>
               <th>Position</th>
               <th>Actions</th>
             </tr>
@@ -70,6 +80,8 @@
       </div>
     </section>
 
+  </div>
+  <div class="swarm-tab-panel" id="diagnostics-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
@@ -110,6 +122,8 @@
       </div>
     </section>
 
+  </div>
+  <div class="swarm-tab-panel" id="controls-tab">
     <section class="panel">
       <div class="section-title-row">
         <h2>Direct Bot Controls</h2>
@@ -232,12 +246,20 @@
 
     <section class="panel">
       <h2>Bot Server + Channel Explorer</h2>
-      <p class="muted">View all guilds/channels visible to each bot token.</p>
+      <p class="muted">This shows exactly what each bot can currently see in Discord: guilds, text channels, voice channels, categories, and where your selected control routes can actually go.</p>
       <div class="row">
         <select id="bot-select"></select>
         <button id="load-inventory" type="button">Load inventory</button>
       </div>
-      <pre id="inventory-output" class="pre"></pre>
+      <div class="row">
+        <input id="inventory-search" type="text" placeholder="Filter guilds/channels..." />
+        <select id="inventory-sort">
+          <option value="name">Sort by name</option>
+          <option value="channels_desc">Most channels</option>
+          <option value="voice_desc">Most voice channels</option>
+        </select>
+      </div>
+      <div id="inventory-output" class="inventory-browser"></div>
     </section>
 
     <section class="panel">
@@ -271,6 +293,7 @@
   <pre id="error-feed" class="pre"></pre>
 </section>
 
+  </div>
 </main>
   <script src="/static/final_app.js?v=8"></script>
 </body>

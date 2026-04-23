@@ -49,7 +49,7 @@ def load_settings() -> Settings:
         session_secret = secrets.token_urlsafe(48)
 
     settings = Settings(
-        db_host=_env("PANEL_DB_HOST", "127.0.0.1"),
+        db_host=_env("PANEL_DB_HOST", "host.docker.internal"),
         db_port=int(_env("PANEL_DB_PORT", "3306")),
         db_user=_env("PANEL_DB_USER", "botuser"),
         db_password=_env("PANEL_DB_PASSWORD"),

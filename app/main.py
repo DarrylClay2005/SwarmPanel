@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
@@ -45,6 +45,7 @@ action_logger = logging.getLogger("swarm_panel.actions")
 background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
+VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME"}
 
 
 class TruncateTableRequest(BaseModel):
@@ -183,7 +184,6 @@ async def lifespan(_: FastAPI):
     background_tasks.extend(
         [
             asyncio.create_task(command_worker(), name="swarm_panel_command_worker"),
-            asyncio.create_task(monitor_bots(), name="swarm_panel_monitor_bots"),
         ]
     )
     recent_feed_events.append(
@@ -210,7 +210,7 @@ if settings.cors_allowed_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -309,6 +309,7 @@ async def list_bots(request: Request):
             {
                 "key": bot.key,
                 "display_name": bot.display_name,
+                "name": bot.display_name,
                 "kind": bot.kind,
                 "schema": bot.db_schema,
                 "token_configured": bool(settings.bot_tokens.get(bot.key)),
@@ -344,7 +345,10 @@ async def dashboard_data(request: Request):
             ],
         }
 
+    flattened_sessions: list[dict[str, Any]] = []
     for bot in data["bots"]:
+        bot.setdefault("name", bot.get("display_name"))
+        bot.setdefault("guild_count", bot.get("known_guild_count", 0))
         token = settings.bot_tokens.get(bot["key"], "")
         bot["discord"] = {"token_configured": bool(token)}
         if not token:
@@ -356,21 +360,25 @@ async def dashboard_data(request: Request):
             bot["discord"]["error"] = str(exc)
 
         sessions = bot.get("sessions", [])
+        for session in sessions:
+            session.setdefault("bot_key", bot.get("key"))
+            session.setdefault("bot_name", bot.get("display_name"))
+            flattened_sessions.append(session)
         if not sessions:
             continue
         placements = []
         for session in sessions:
-            guild_id = int(session["guild_id"])
+            guild_id = str(session["guild_id"])
             if session.get("channel_id"):
-                placements.append((guild_id, int(session["channel_id"])))
+                placements.append((guild_id, str(session["channel_id"])))
             if session.get("home_channel_id"):
-                placements.append((guild_id, int(session["home_channel_id"])))
+                placements.append((guild_id, str(session["home_channel_id"])))
         try:
             name_map = await discord_service.resolve_guild_channel_names(token, placements)
             for session in sessions:
-                guild_id = int(session["guild_id"])
-                channel_key = (guild_id, int(session["channel_id"])) if session.get("channel_id") else None
-                home_key = (guild_id, int(session["home_channel_id"])) if session.get("home_channel_id") else None
+                guild_id = str(session["guild_id"])
+                channel_key = (guild_id, str(session["channel_id"])) if session.get("channel_id") else None
+                home_key = (guild_id, str(session["home_channel_id"])) if session.get("home_channel_id") else None
 
                 channel_names = name_map.get(channel_key) if channel_key else None
                 if channel_names:
@@ -384,6 +392,7 @@ async def dashboard_data(request: Request):
         except Exception as exc:
             bot["discord"]["name_resolution_error"] = str(exc)
 
+    data.setdefault("sessions", flattened_sessions)
     return data
 
 
@@ -476,7 +485,7 @@ def _control_state_error_payload(bot_key: str, display_name: str, guild_id: int,
 
 async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> dict[str, Any]:
     bot_key = control_state["key"]
-    guild_id = int(control_state["guild_id"])
+    guild_id = str(control_state["guild_id"])
     token = settings.bot_tokens.get(bot_key, "").strip()
     session = control_state.get("session", {})
 
@@ -498,18 +507,18 @@ async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> d
             session.get("feedback_channel_id"),
         ):
             if channel_id:
-                placements.append((guild_id, int(channel_id)))
+                placements.append((guild_id, str(channel_id)))
 
         name_map = await discord_service.resolve_guild_channel_names(token, placements)
         guild_meta = name_map.get((guild_id, None), {})
         session["guild_name"] = guild_meta.get("guild_name") or guild.get("name") or f"Guild {guild_id}"
 
         if session.get("channel_id"):
-            session["channel_name"] = (name_map.get((guild_id, int(session["channel_id"]))) or {}).get("channel_name")
+            session["channel_name"] = (name_map.get((guild_id, str(session["channel_id"]))) or {}).get("channel_name")
         if session.get("home_channel_id"):
-            session["home_channel_name"] = (name_map.get((guild_id, int(session["home_channel_id"]))) or {}).get("channel_name")
+            session["home_channel_name"] = (name_map.get((guild_id, str(session["home_channel_id"]))) or {}).get("channel_name")
         if session.get("feedback_channel_id"):
-            session["feedback_channel_name"] = (name_map.get((guild_id, int(session["feedback_channel_id"]))) or {}).get("channel_name")
+            session["feedback_channel_name"] = (name_map.get((guild_id, str(session["feedback_channel_id"]))) or {}).get("channel_name")
 
         control_state["discord"] = {
             "status": "online",
@@ -529,7 +538,7 @@ async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> d
 
 
 @app.get("/api/bots/{bot_key}/control-state")
-async def bot_control_state(request: Request, bot_key: str, guild_id: int):
+async def bot_control_state(request: Request, bot_key: str, guild_id: str):
     _require_api_auth(request)
     bot = BOT_INDEX.get(bot_key)
     if not bot or bot.kind != "music":
@@ -546,7 +555,7 @@ async def bot_control_state(request: Request, bot_key: str, guild_id: int):
 
 
 @app.get("/api/guilds/{guild_id}/control-matrix")
-async def guild_control_matrix(request: Request, guild_id: int):
+async def guild_control_matrix(request: Request, guild_id: str):
     _require_api_auth(request)
 
     async def collect(bot) -> dict[str, Any]:
@@ -647,9 +656,21 @@ async def get_table_data(
 
 class BotControlRequest(BaseModel):
     bot_key: str
-    guild_id: str | int
-    action: str
+    guild_id: str | int | None = None
+    action: str | None = None
+    command: str | None = None
     payload: Any | None = None
+
+    @model_validator(mode="after")
+    def _sync_action_aliases(self):
+        normalized_action = (self.action or self.command or "").strip()
+        if not normalized_action:
+            raise ValueError("Missing action")
+        self.action = normalized_action
+        self.command = normalized_action
+        if self.guild_id in (None, ""):
+            self.guild_id = "0" if normalized_action.upper() == "RESTART" else None
+        return self
 
 @app.post("/api/bots/control")
 async def api_bot_control(request: Request, req: BotControlRequest):
@@ -657,6 +678,7 @@ async def api_bot_control(request: Request, req: BotControlRequest):
     try:
         action, guild_id, payload = await _normalize_bot_control_request(req)
         result = await db.control_bot(req.bot_key, guild_id, action, payload)
+        result.setdefault("command", action)
         await push_feed_event(
             "info",
             "Bot Control Accepted",
@@ -672,6 +694,16 @@ async def api_bot_control(request: Request, req: BotControlRequest):
         await push_feed_event("error", "Bot Control Failed", str(e), source="api")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+@app.post("/api/control")
+async def api_bot_control_legacy(request: Request, req: BotControlRequest):
+    return await api_bot_control(request, req)
+
+
+@app.post("/api/bot-control")
+async def api_bot_control_legacy_alt(request: Request, req: BotControlRequest):
+    return await api_bot_control(request, req)
 active_connections=[]
 command_queue=asyncio.Queue()
 bot_health={}
@@ -720,8 +752,32 @@ async def push_feed_event(
 async def list_events(request: Request, limit: int = 50):
     _require_api_auth(request)
     bounded_limit = max(1, min(int(limit), 100))
-    events = list(recent_feed_events)[-bounded_limit:]
-    return {"events": events}
+    events = list(recent_feed_events)
+    try:
+        bot_error_events = await db.get_recent_bot_error_events(limit=bounded_limit)
+    except Exception:
+        bot_error_events = []
+    try:
+        aria_medic_events = await db.get_recent_aria_medic_events(limit=max(5, bounded_limit // 2))
+    except Exception:
+        aria_medic_events = []
+
+    combined = events + bot_error_events + aria_medic_events
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for event in sorted(combined, key=lambda item: item.get("timestamp") or ""):
+        key = (
+            str(event.get("timestamp") or ""),
+            str(event.get("source") or ""),
+            str(event.get("title") or ""),
+            str(event.get("description") or ""),
+            str(event.get("type") or "feed_event"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return {"events": deduped[-bounded_limit:]}
 
 async def execute_bot_command(cmd: dict):
     if not cmd.get("bot_key") or not cmd.get("action"):
@@ -747,16 +803,6 @@ async def command_worker():
             await push_feed_event("error", "Command Error", str(e), source="worker")
         command_queue.task_done()
 
-async def monitor_bots():
-    while True:
-        now=time.time()
-        for bot,data in bot_health.items():
-            if now-data.get("last_seen",0)>15:
-                print(f"[AUTO-HEAL] Restarting {bot}")
-        await asyncio.sleep(5)
-
 def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):
         raise HTTPException(403,"Unauthorized")
-
-VALID_ACTIONS={"PAUSE","RESUME","SKIP","STOP","CLEAR","SHUFFLE","LOOP","PLAY","RESTART","FILTER","LEAVE","SET_HOME"}

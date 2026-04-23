@@ -95,7 +95,7 @@ class DiscordInventoryService:
     async def fetch_identity(self, token: str) -> dict[str, Any]:
         data = await self._cached_request(token, "/users/@me")
         return {
-            "id": data.get("id"),
+            "id": str(data.get("id")) if data.get("id") else None,
             "username": data.get("username"),
             "global_name": data.get("global_name"),
             "discriminator": data.get("discriminator"),
@@ -107,7 +107,7 @@ class DiscordInventoryService:
         for guild in data if isinstance(data, list) else []:
             guilds.append(
                 {
-                    "id": int(guild.get("id")),
+                    "id": str(guild.get("id")),
                     "name": guild.get("name") or f"Guild {guild.get('id')}",
                     "owner": bool(guild.get("owner")),
                     "permissions": guild.get("permissions"),
@@ -115,22 +115,32 @@ class DiscordInventoryService:
             )
         return guilds
 
-    async def fetch_guild(self, token: str, guild_id: int) -> dict[str, Any]:
-        data = await self._cached_request(token, f"/guilds/{int(guild_id)}")
-        return {"id": int(data.get("id")), "name": data.get("name") or f"Guild {guild_id}"}
+    async def fetch_guild(self, token: str, guild_id: int | str) -> dict[str, Any]:
+        try:
+            data = await self._cached_request(token, f"/guilds/{int(guild_id)}")
+            return {"id": str(data.get("id")), "name": data.get("name") or f"Guild {guild_id}"}
+        except DiscordAPIError as e:
+            if e.status_code in (403, 404):
+                return {"id": str(guild_id), "name": f"Unknown/Inaccessible Guild {guild_id}"}
+            raise
 
-    async def fetch_guild_channels(self, token: str, guild_id: int) -> list[dict[str, Any]]:
-        data = await self._cached_request(token, f"/guilds/{int(guild_id)}/channels")
+    async def fetch_guild_channels(self, token: str, guild_id: int | str) -> list[dict[str, Any]]:
+        try:
+            data = await self._cached_request(token, f"/guilds/{int(guild_id)}/channels")
+        except DiscordAPIError as e:
+            if e.status_code in (403, 404):
+                return []
+            raise
         channels = []
         for channel in data if isinstance(data, list) else []:
             channel_type = int(channel.get("type", -1))
             channels.append(
                 {
-                    "id": int(channel.get("id")),
+                    "id": str(channel.get("id")),
                     "name": channel.get("name") or f"Channel {channel.get('id')}",
                     "type": channel_type,
                     "type_name": CHANNEL_TYPE_NAMES.get(channel_type, str(channel_type)),
-                    "parent_id": int(channel["parent_id"]) if channel.get("parent_id") else None,
+                    "parent_id": str(channel["parent_id"]) if channel.get("parent_id") else None,
                 }
             )
         return channels
@@ -140,7 +150,7 @@ class DiscordInventoryService:
         token: str,
         *,
         include_channels: bool = True,
-        guild_hints: list[int] | None = None,
+        guild_hints: list[int | str] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"identity": None, "guilds": [], "errors": []}
 
@@ -161,14 +171,14 @@ class DiscordInventoryService:
                     if hint_exc.status_code == 404:
                         payload["errors"].append(f"guild_hint {guild_id}: stale guild reference skipped")
                         continue
-                    guilds.append({"id": int(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+                    guilds.append({"id": str(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
                 except Exception as hint_exc:
-                    guilds.append({"id": int(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+                    guilds.append({"id": str(guild_id), "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
 
         deduped_guilds: list[dict[str, Any]] = []
-        seen_guild_ids: set[int] = set()
+        seen_guild_ids: set[str] = set()
         for guild in guilds:
-            guild_id = int(guild.get("id"))
+            guild_id = str(guild.get("id"))
             if guild_id in seen_guild_ids:
                 continue
             seen_guild_ids.add(guild_id)
@@ -178,7 +188,7 @@ class DiscordInventoryService:
         for guild in guilds:
             if include_channels:
                 try:
-                    guild["channels"] = await self.fetch_guild_channels(token, int(guild["id"]))
+                    guild["channels"] = await self.fetch_guild_channels(token, guild["id"])
                 except DiscordAPIError as exc:
                     guild["channels"] = []
                     guild["channels_error"] = "Guild is no longer reachable by this bot." if exc.status_code == 404 else str(exc)
@@ -193,13 +203,13 @@ class DiscordInventoryService:
     async def resolve_guild_channel_names(
         self,
         token: str,
-        placements: list[tuple[int, int | None]],
+        placements: list[tuple[int | str, int | str | None]],
     ) -> dict[tuple[int, int | None], dict[str, str | None]]:
-        output: dict[tuple[int, int | None], dict[str, str | None]] = {}
-        by_guild: dict[int, set[int | None]] = {}
+        output: dict[tuple[str, str | None], dict[str, str | None]] = {}
+        by_guild: dict[str, set[str | None]] = {}
 
         for guild_id, channel_id in placements:
-            by_guild.setdefault(int(guild_id), set()).add(None if channel_id is None else int(channel_id))
+            by_guild.setdefault(str(guild_id), set()).add(str(channel_id) if channel_id is not None else None)
 
         for guild_id, channel_ids in by_guild.items():
             guild_name = f"Guild {guild_id}"
@@ -212,7 +222,7 @@ class DiscordInventoryService:
 
             try:
                 channels = await self.fetch_guild_channels(token, guild_id)
-                channel_name_map = {int(ch["id"]): ch.get("name") or str(ch["id"]) for ch in channels}
+                channel_name_map = {str(ch["id"]): ch.get("name") or str(ch["id"]) for ch in channels}
             except Exception:
                 pass
 
