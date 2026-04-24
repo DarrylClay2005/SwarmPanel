@@ -82,10 +82,13 @@ def _derive_session_state(
     backup_queue_count: int = 0,
 ) -> tuple[str, str]:
     is_playing = bool(playback.get("is_playing"))
+    is_paused = bool(playback.get("is_paused"))
     has_track = bool(playback.get("title") or playback.get("video_url"))
     has_channel = playback.get("channel_id") is not None
     has_recovery_path = bool(home_channel_id and (has_track or queue_count > 0 or backup_queue_count > 0))
 
+    if is_paused and has_track and has_channel:
+        return "paused", "Paused"
     if is_playing and has_track and has_channel:
         return "playing", "Playing"
     if has_track and has_channel:
@@ -190,6 +193,7 @@ class PanelDatabase:
                 autocommit=True,
                 minsize=1,
                 maxsize=10,
+                connect_timeout=10,
             )
         if not self.http_session:
             timeout = aiohttp.ClientTimeout(total=10)
@@ -210,8 +214,8 @@ class PanelDatabase:
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             async with conn.cursor(cursor_cls) as cur:
-                await cur.execute(query, params)
-                return await cur.fetchall()
+                await asyncio.wait_for(cur.execute(query, params), timeout=15)
+                return await asyncio.wait_for(cur.fetchall(), timeout=15)
 
     async def _fetchone(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
         if not self.pool:
@@ -219,28 +223,31 @@ class PanelDatabase:
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             async with conn.cursor(cursor_cls) as cur:
-                await cur.execute(query, params)
-                return await cur.fetchone()
+                await asyncio.wait_for(cur.execute(query, params), timeout=15)
+                return await asyncio.wait_for(cur.fetchone(), timeout=15)
 
     async def _execute(self, query: str, params: tuple[Any, ...] = ()) -> int:
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, params)
+                await asyncio.wait_for(cur.execute(query, params), timeout=15)
                 return cur.rowcount
 
     async def _ensure_music_guild_settings_schema(self, cur, schema: str, prefix: str) -> None:
-        await cur.execute(
+        schema = _validate_identifier(schema, "schema")
+        prefix = _validate_identifier(prefix, "table prefix")
+        await asyncio.wait_for(cur.execute(
             f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_guild_settings` "
             "(guild_id BIGINT PRIMARY KEY)"
-        )
+        ), timeout=15)
         for column_name, definition in GUILD_SETTINGS_COLUMNS:
             try:
-                await cur.execute(
+                safe_column = _validate_identifier(column_name, "column name")
+                await asyncio.wait_for(cur.execute(
                     f"ALTER TABLE `{schema}`.`{prefix}_guild_settings` "
-                    f"ADD COLUMN {column_name} {definition}"
-                )
+                    f"ADD COLUMN {safe_column} {definition}"
+                ), timeout=15)
             except Exception:
                 pass
 
@@ -889,6 +896,127 @@ class PanelDatabase:
         }
 
 
+
+    async def get_metrics_snapshot(self) -> dict[str, Any]:
+        """Aggregate bot-written voice persistence and runtime metrics for the panel."""
+        if not self.pool:
+            raise RuntimeError("Database pool not initialized")
+
+        bots: list[dict[str, Any]] = []
+        totals = {
+            "bots": 0,
+            "guilds": 0,
+            "voice_connected": 0,
+            "playing": 0,
+            "paused": 0,
+            "queued_tracks": 0,
+            "backup_tracks": 0,
+            "recovering": 0,
+            "lavalink_ready": 0,
+            "stale_metrics": 0,
+        }
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                for bot in MUSIC_BOTS:
+                    schema = bot.db_schema
+                    prefix = bot.table_prefix
+                    bot_metrics: list[dict[str, Any]] = []
+                    error: str | None = None
+                    try:
+                        await cur.execute(
+                            f"""
+                            SELECT
+                                m.guild_id,
+                                m.voice_connected,
+                                m.connected_channel_id,
+                                m.player_connected,
+                                m.player_playing,
+                                m.player_paused,
+                                m.queue_count,
+                                m.backup_queue_count,
+                                m.is_playing_db,
+                                m.is_paused_db,
+                                m.position_seconds,
+                                m.recovery_pending,
+                                m.lavalink_ready,
+                                m.last_error,
+                                TIMESTAMPDIFF(SECOND, m.updated_at, NOW()) AS metrics_age_seconds,
+                                v.last_channel_id,
+                                v.connected_channel_id AS voice_state_connected_channel_id,
+                                v.desired_connected,
+                                v.reconnect_attempts,
+                                v.last_error AS voice_last_error,
+                                TIMESTAMPDIFF(SECOND, v.last_seen_at, NOW()) AS voice_age_seconds
+                            FROM `{schema}`.`{prefix}_metrics` m
+                            LEFT JOIN `{schema}`.`{prefix}_voice_state` v
+                              ON v.guild_id = m.guild_id AND v.bot_name = m.bot_name
+                            WHERE m.bot_name = %s
+                            ORDER BY m.updated_at DESC
+                            LIMIT 200
+                            """,
+                            (bot.key,),
+                        )
+                        rows = list(await cur.fetchall() or [])
+                        for row in rows:
+                            age = int(row.get("metrics_age_seconds") or 0)
+                            stale = age > 45
+                            item = {
+                                "guild_id": str(row.get("guild_id")),
+                                "voice_connected": bool(row.get("voice_connected")),
+                                "connected_channel_id": str(row.get("connected_channel_id") or row.get("voice_state_connected_channel_id") or ""),
+                                "last_channel_id": str(row.get("last_channel_id") or ""),
+                                "desired_connected": bool(row.get("desired_connected")),
+                                "player_connected": bool(row.get("player_connected")),
+                                "player_playing": bool(row.get("player_playing")),
+                                "player_paused": bool(row.get("player_paused")),
+                                "queue_count": int(row.get("queue_count") or 0),
+                                "backup_queue_count": int(row.get("backup_queue_count") or 0),
+                                "is_playing_db": bool(row.get("is_playing_db")),
+                                "is_paused_db": bool(row.get("is_paused_db")),
+                                "position_seconds": int(row.get("position_seconds") or 0),
+                                "recovery_pending": bool(row.get("recovery_pending")),
+                                "lavalink_ready": bool(row.get("lavalink_ready")),
+                                "reconnect_attempts": int(row.get("reconnect_attempts") or 0),
+                                "metrics_age_seconds": age,
+                                "voice_age_seconds": int(row.get("voice_age_seconds") or 0),
+                                "stale": stale,
+                                "last_error": row.get("last_error") or row.get("voice_last_error"),
+                            }
+                            bot_metrics.append(item)
+                            totals["guilds"] += 1
+                            totals["voice_connected"] += int(item["voice_connected"])
+                            totals["playing"] += int(item["player_playing"])
+                            totals["paused"] += int(item["player_paused"])
+                            totals["queued_tracks"] += item["queue_count"]
+                            totals["backup_tracks"] += item["backup_queue_count"]
+                            totals["recovering"] += int(item["recovery_pending"])
+                            totals["lavalink_ready"] += int(item["lavalink_ready"])
+                            totals["stale_metrics"] += int(stale)
+                    except Exception as exc:
+                        msg = str(exc)
+                        if "doesn't exist" in msg or "1146" in msg:
+                            error = None
+                        else:
+                            error = msg
+
+                    totals["bots"] += 1
+                    bots.append({
+                        "key": bot.key,
+                        "display_name": bot.display_name,
+                        "schema": schema,
+                        "metrics": bot_metrics,
+                        "error": error,
+                        "status": "error" if error else ("stale" if any(m["stale"] for m in bot_metrics) else "ok"),
+                    })
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "totals": totals,
+            "bots": bots,
+        }
+
+
     async def get_recent_aria_medic_events(self, limit: int = 25) -> list[dict[str, Any]]:
         if not self.pool:
             raise RuntimeError("Database pool not initialized")
@@ -1061,8 +1189,8 @@ class PanelDatabase:
         if bot.kind != "music" or not bot.db_schema or not bot.table_prefix:
             raise ValueError("This action is only supported for music bots")
 
-        schema = bot.db_schema
-        prefix = bot.table_prefix
+        schema = _validate_identifier(bot.db_schema, "schema")
+        prefix = _validate_identifier(bot.table_prefix, "table prefix")
         gid = _coerce_int(guild_id, "guild_id")
         action = str(action or "").strip().upper()
 
@@ -1072,8 +1200,28 @@ class PanelDatabase:
             # Explicit DictCursor fixes Shuffle crashes, explicit commit fixes silent rollbacks
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 if action in ["PAUSE", "RESUME", "SKIP", "STOP"]:
-                    await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
+                    await asyncio.wait_for(cur.execute(f"CREATE TABLE IF NOT EXISTS `{_validate_identifier(schema, 'schema')}`.`{_validate_identifier(prefix, 'table prefix')}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"), timeout=15)
                     await cur.execute(f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)", (gid, bot_key, action))
+                    # Mirror the intended pause/resume state immediately so the panel does not lag behind Discord.
+                    try:
+                        await cur.execute(f"ALTER TABLE `{schema}`.`{prefix}_playback_state` ADD COLUMN is_paused BOOLEAN DEFAULT FALSE")
+                    except Exception:
+                        pass
+                    if action == "PAUSE":
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_paused = TRUE, is_playing = FALSE WHERE guild_id = %s AND bot_name = %s",
+                            (gid, bot_key),
+                        )
+                    elif action == "RESUME":
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_paused = FALSE, is_playing = TRUE WHERE guild_id = %s AND bot_name = %s",
+                            (gid, bot_key),
+                        )
+                    elif action in {"STOP", "SKIP"}:
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_paused = FALSE WHERE guild_id = %s AND bot_name = %s",
+                            (gid, bot_key),
+                        )
                     result["message"] = f"{bot.display_name} will {action.lower()} in guild {gid}."
                 
                 elif action == "RESTART":
@@ -1091,17 +1239,18 @@ class PanelDatabase:
                         "(guild_id, bot_name, command) VALUES (%s, %s, %s)",
                         (0, bot_key, "RESTART"),
                     )
-                    # Also mark playback as stopped so the watchdog auto-resumes after restart
+                    # Mark only this bot's runtime flags stale without wiping recovery metadata for other bots.
                     try:
                         await cur.execute(
-                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE"
+                            f"UPDATE `{schema}`.`{prefix}_playback_state` SET is_playing = FALSE, is_paused = FALSE WHERE bot_name = %s",
+                            (bot_key,),
                         )
                     except Exception:
                         pass
                     result["message"] = f"Restart signal queued for {bot.display_name}."
 
                 elif action == "CLEAR":
-                    await cur.execute(f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))")
+                    await asyncio.wait_for(cur.execute(f"CREATE TABLE IF NOT EXISTS `{_validate_identifier(schema, 'schema')}`.`{_validate_identifier(prefix, 'table prefix')}_swarm_overrides` (guild_id BIGINT, bot_name VARCHAR(50), command VARCHAR(20), PRIMARY KEY(guild_id, bot_name))"), timeout=15)
                     await cur.execute(
                         f"REPLACE INTO `{schema}`.`{prefix}_swarm_overrides` (guild_id, bot_name, command) VALUES (%s, %s, %s)",
                         (gid, bot_key, "STOP"),
@@ -1111,25 +1260,37 @@ class PanelDatabase:
                         "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
                         "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
                     )
-                    # BUG FIX: was missing AND bot_name filter – could wipe other bots' rows
+                    # Scope every clear by bot_name; clear backup + voice desired state so cleared tracks do not resurrect.
                     await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
+                    try:
+                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue_backup` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
+                    except Exception:
+                        pass
                     try:
                         await cur.execute(
                             f"UPDATE `{schema}`.`{prefix}_playback_state` "
-                            "SET title = NULL, video_url = NULL, position_seconds = 0, is_playing = FALSE "
-                            "WHERE guild_id = %s",
-                            (gid,),
+                            "SET title = NULL, video_url = NULL, position_seconds = 0, is_playing = FALSE, is_paused = FALSE "
+                            "WHERE guild_id = %s AND bot_name = %s",
+                            (gid, bot_key),
                         )
                     except Exception:
                         try:
                             await cur.execute(
                                 f"UPDATE `{schema}`.`{prefix}_playback_state` "
-                                "SET title = NULL, position_seconds = 0, is_playing = FALSE "
-                                "WHERE guild_id = %s",
-                                (gid,),
+                                "SET title = NULL, position_seconds = 0, is_playing = FALSE, is_paused = FALSE "
+                                "WHERE guild_id = %s AND bot_name = %s",
+                                (gid, bot_key),
                             )
                         except Exception:
                             pass
+                    try:
+                        await cur.execute(
+                            f"UPDATE `{schema}`.`{prefix}_voice_state` SET desired_connected = FALSE, connected_channel_id = NULL, disconnected_at = CURRENT_TIMESTAMP "
+                            "WHERE guild_id = %s AND bot_name = %s",
+                            (gid, bot_key),
+                        )
+                    except Exception:
+                        pass
                     result["message"] = f"Cleared the queue and current playback for guild {gid} on {bot.display_name}."
 
                 elif action == "LOOP":
@@ -1177,7 +1338,7 @@ class PanelDatabase:
                         random.shuffle(l)
                         l.insert(0, first)
                         
-                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s", (gid,))
+                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
                         
                         cols = [k for k in l[0].keys() if k != 'id']
                         col_names = ", ".join(f"`{c}`" for c in cols)

@@ -7,6 +7,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -46,6 +47,18 @@ background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
 VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME"}
+
+
+def _validate_discord_webhook_url(value: Any) -> str:
+    url = str(value or "").strip()
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    if parsed.scheme != "https" or host not in {"discord.com", "www.discord.com", "discordapp.com", "www.discordapp.com"}:
+        raise ValueError("Invalid Discord webhook URL")
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 4 or parts[0] != "api" or parts[1] != "webhooks":
+        raise ValueError("Invalid Discord webhook URL")
+    return url
 
 
 class TruncateTableRequest(BaseModel):
@@ -113,6 +126,10 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
 
     guild_id = _coerce_control_int(req.guild_id, "guild_id")
     normalized_payload = req.payload
+    if isinstance(normalized_payload, dict):
+        for key, value in list(normalized_payload.items()):
+            if "webhook" in str(key).lower() and value:
+                normalized_payload[key] = _validate_discord_webhook_url(value)
 
     if action not in {"PLAY", "SET_HOME"}:
         return action, str(guild_id), normalized_payload
@@ -669,7 +686,10 @@ class BotControlRequest(BaseModel):
         self.action = normalized_action
         self.command = normalized_action
         if self.guild_id in (None, ""):
-            self.guild_id = "0" if normalized_action.upper() == "RESTART" else None
+            if normalized_action.upper() == "RESTART":
+                self.guild_id = "0"
+            else:
+                raise ValueError("guild_id is required for non-RESTART actions")
         return self
 
 @app.post("/api/bots/control")
@@ -712,7 +732,14 @@ recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     token = websocket.query_params.get("token")
-    if not verify_api_token(token, settings.session_secret, settings.api_token_ttl_seconds):
+    auth = verify_api_token(token, settings.session_secret, settings.api_token_ttl_seconds)
+    if not auth:
+        try:
+            if bool(websocket.session.get(SESSION_AUTH_KEY)):
+                auth = {"mode": "session"}
+        except Exception:
+            auth = None
+    if not auth:
         await websocket.close(code=4401)
         return
     await websocket.accept()
@@ -728,7 +755,7 @@ async def broadcast(data: dict):
     for ws in active_connections:
         try:
             await ws.send_text(json.dumps(data))
-        except:
+        except Exception:
             dead.append(ws)
     for ws in dead:
         active_connections.remove(ws)
@@ -746,6 +773,26 @@ async def push_feed_event(
     recent_feed_events.append(event)
     await broadcast(event)
     return event
+
+
+
+
+@app.get("/api/metrics")
+async def metrics_data(request: Request):
+    _require_api_auth(request)
+    try:
+        return await db.get_metrics_snapshot()
+    except Exception as exc:
+        await push_feed_event("error", "Metrics Snapshot Failed", str(exc), source="api")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "db_error": str(exc),
+                "totals": {},
+                "bots": [],
+            },
+        )
 
 
 @app.get("/api/events")
@@ -798,10 +845,13 @@ async def command_worker():
     while True:
         cmd = await command_queue.get()
         try:
+            if not getattr(db, "pool", None):
+                await db.connect()
             await execute_bot_command(cmd)
         except Exception as e:
             await push_feed_event("error", "Command Error", str(e), source="worker")
-        command_queue.task_done()
+        finally:
+            command_queue.task_done()
 
 def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):

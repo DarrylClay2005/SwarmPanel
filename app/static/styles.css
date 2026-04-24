@@ -1468,3 +1468,16 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
 
 .np-progress{height:6px;background:#1a1f2b;border:1px solid #283042;border-radius:999px;overflow:hidden;margin-top:10px;}
 .np-progress span{display:block;height:100%;background:linear-gradient(90deg,var(--accent,#89b4fa),rgba(255,255,255,0.55));border-radius:999px;}
+
+
+.status-warning,
+.status-stale {
+  background: rgba(245, 194, 231, 0.15);
+  color: #f5c2e7;
+  border: 1px solid rgba(245, 194, 231, 0.35);
+}
+
+#metrics-grid table td,
+#metrics-grid table th {
+  white-space: nowrap;
+}

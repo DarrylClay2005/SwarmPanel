@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=8" />
+  <link rel="stylesheet" href="/static/styles.css?v=9" />
 </head>
 <body>
   <header class="topbar">
@@ -288,13 +288,37 @@
       </div>
     </section>
   
-<section class="panel">
-  <h2>🚨 Live Error Feed</h2>
-  <pre id="error-feed" class="pre"></pre>
-</section>
+  </div>
+  <div class="swarm-tab-panel" id="intel-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>🚨 Intel + Live Error Feed</h2>
+          <p class="muted">Recent panel, bot, Aria medic, and live swarm events. This loads from /api/events and keeps polling if the websocket is offline.</p>
+        </div>
+        <button id="refresh-event-feed" type="button">Refresh Feed</button>
+      </div>
+      <div class="row">
+        <label class="control-inline"><span>Level</span><select id="error-feed-level"><option value="all">All</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select></label>
+        <label class="control-inline"><span>Source</span><select id="error-feed-source"><option value="all">All</option><option value="panel">Panel</option><option value="worker">Worker</option><option value="bot_error">Bot Errors</option><option value="aria">Aria</option><option value="system">System</option></select></label>
+        <label class="control-inline"><span>Sort</span><select id="error-feed-sort"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="level">Severity</option></select></label>
+      </div>
+      <pre id="error-feed" class="pre"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>📊 Metrics Dashboard</h2>
+          <p class="muted">Live bot observability from bot-written metrics tables: voice state, Lavalink readiness, queue depth, stale heartbeats, and recovery flags.</p>
+        </div>
+        <button id="refresh-metrics" type="button">Refresh Metrics</button>
+      </div>
+      <div id="metrics-dashboard" class="diagnostic-grid"></div>
+    </section>
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=8"></script>
+  <script src="/static/final_app.js?v=9"></script>
 </body>
 </html>

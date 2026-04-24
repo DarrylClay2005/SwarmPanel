@@ -25,6 +25,7 @@ let eventFeedReconnectTimer = null;
 let eventFeedPollTimer = null;
 let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
+let metricsSnapshotState = null;
 let controlRefreshTimer = null;
 let lastDashboardFetchAt = Date.now();
 let liveSessionState = [];
@@ -880,6 +881,7 @@ async function fetchDiagnostics(force = false) {
         renderWorkerDiagnosticGrid(data);
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
+        fetchMetrics();
     } catch (err) {
         systemDiagnosticsState = null;
         renderControlContext();
@@ -887,6 +889,73 @@ async function fetchDiagnostics(force = false) {
         renderSelectedGuildMatrix();
         console.error('❌ Diagnostics fetch failed:', err);
     }
+}
+
+
+async function fetchMetrics() {
+    try {
+        const res = await fetch(`${API_BASE}/metrics`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.detail || data.db_error || 'Metrics request failed');
+        }
+        metricsSnapshotState = data;
+        renderMetricsDashboard(data);
+    } catch (err) {
+        metricsSnapshotState = null;
+        renderMetricsDashboard({ error: String(err), totals: {}, bots: [] });
+        console.error('❌ Metrics fetch failed:', err);
+    }
+}
+
+function renderMetricsDashboard(data = metricsSnapshotState) {
+    const container = document.getElementById('metrics-dashboard');
+    if (!container) return;
+
+    if (!data) {
+        container.innerHTML = '<div class="control-context-empty">Metrics have not loaded yet.</div>';
+        return;
+    }
+
+    if (data.error || data.db_error) {
+        container.innerHTML = `<div class="diag-item diag-item-error"><div class="diag-item-title">Metrics unavailable</div><div class="diagnostic-item-body">${escapeHtml(data.error || data.db_error)}</div></div>`;
+        return;
+    }
+
+    const totals = data.totals || {};
+    const botCards = (data.bots || []).map(bot => {
+        const metrics = Array.isArray(bot.metrics) ? bot.metrics : [];
+        const staleCount = metrics.filter(m => m.stale).length;
+        const recovering = metrics.filter(m => m.recovery_pending).length;
+        const playing = metrics.filter(m => m.player_playing).length;
+        const paused = metrics.filter(m => m.player_paused).length;
+        const queued = metrics.reduce((acc, m) => acc + Number(m.queue_count || 0), 0);
+        const voiceConnected = metrics.filter(m => m.voice_connected).length;
+        const status = bot.error ? 'error' : (staleCount ? 'warning' : 'ok');
+        const detail = bot.error
+            ? bot.error
+            : metrics.length
+                ? `guilds=${metrics.length} • voice=${voiceConnected} • playing=${playing} • paused=${paused} • queued=${queued} • recovering=${recovering} • stale=${staleCount}`
+                : 'No metrics rows yet; bot may still be warming up or has not joined a guild since metrics were added.';
+        const latestErrors = metrics
+            .filter(m => m.last_error)
+            .slice(0, 3)
+            .map(m => `<div class="diag-list-item">guild ${escapeHtml(m.guild_id)}: ${escapeHtml(m.last_error)}</div>`)
+            .join('');
+        return `<div class="diagnostic-card diagnostic-${escapeHtml(status)}">
+            <div class="diagnostic-card-title">${escapeHtml(bot.display_name || bot.key)}</div>
+            <div class="diagnostic-card-value">${escapeHtml(String(bot.status || status).toUpperCase())}</div>
+            <div class="diagnostic-card-detail">${escapeHtml(detail)}</div>
+            ${latestErrors ? `<div class="diag-list">${latestErrors}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    container.innerHTML = `<div class="diagnostic-card diagnostic-ok">
+        <div class="diagnostic-card-title">Swarm Totals</div>
+        <div class="diagnostic-card-value">${Number(totals.bots || 0)} bots / ${Number(totals.guilds || 0)} guild rows</div>
+        <div class="diagnostic-card-detail">voice=${Number(totals.voice_connected || 0)} • playing=${Number(totals.playing || 0)} • paused=${Number(totals.paused || 0)} • queued=${Number(totals.queued_tracks || 0)} • backup=${Number(totals.backup_tracks || 0)} • stale=${Number(totals.stale_metrics || 0)}</div>
+    </div>${botCards || '<div class="control-context-empty">No bot metrics available yet.</div>'}`;
 }
 
 function summarizeDbDetails(details) {
@@ -2949,6 +3018,12 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('refresh-diagnostics')
         ?.addEventListener('click', () => fetchDiagnostics(true));
 
+    document.getElementById('refresh-event-feed')
+        ?.addEventListener('click', loadEventFeedHistory);
+
+    document.getElementById('refresh-metrics')
+        ?.addEventListener('click', fetchMetrics);
+
     document.getElementById('load-inventory')
         ?.addEventListener('click', loadInventory);
     document.getElementById('inventory-search')
@@ -3031,6 +3106,10 @@ setInterval(() => {
 setInterval(() => {
     if (panelAppStarted) fetchDiagnostics();
 }, 60000);
+
+setInterval(() => {
+    if (panelAppStarted) fetchMetrics();
+}, 15000);
 
 setInterval(() => {
     renderLivePositionTick();
