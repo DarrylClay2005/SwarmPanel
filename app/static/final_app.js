@@ -498,7 +498,12 @@ function showRemoteAuthShell(message = '') {
     if (usernameInput && remotePanelUsername) usernameInput.value = remotePanelUsername;
     setRemoteAuthError(message);
     shell.classList.add('visible');
-    updateRemoteConnectionStatus('Phone site waiting for a live panel URL', 'offline');
+    updateRemoteConnectionStatus(
+        remotePanelOrigin
+            ? `Sign in to ${remotePanelOrigin}`
+            : 'Phone site waiting for a live panel URL',
+        remotePanelOrigin ? 'idle' : 'offline',
+    );
 }
 
 function hideRemoteAuthShell() {
@@ -579,6 +584,7 @@ async function loginRemotePanel() {
 
         setRemoteToken(data.token);
         panelSessionChecked = true;
+        updateRemoteConnectionStatus(`Connected to ${remotePanelOrigin}`, 'online');
         hideRemoteAuthShell();
         if (passwordInput) passwordInput.value = '';
         await startPanelApplication();

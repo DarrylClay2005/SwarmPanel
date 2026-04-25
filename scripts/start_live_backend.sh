@@ -106,6 +106,9 @@ CLOUDFLARED="$(cloudflared_bin)"
 
 export PANEL_PAGES_PUBLIC_URL="${PAGES_URL}"
 export PANEL_CORS_ALLOWED_ORIGINS="${PANEL_CORS_ALLOWED_ORIGINS:-${PAGES_ORIGIN},${PAGES_URL%/},http://127.0.0.1:${PORT},http://localhost:${PORT}}"
+if [[ "${PANEL_DB_HOST:-${DB_HOST:-${MYSQL_HOST:-}}}" == "host.docker.internal" ]]; then
+  export PANEL_DB_HOST="127.0.0.1"
+fi
 
 cd "${ROOT_DIR}"
 echo "Starting SwarmPanel backend on http://127.0.0.1:${PORT}"
