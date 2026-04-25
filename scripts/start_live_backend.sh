@@ -128,7 +128,7 @@ for _ in {1..40}; do
 done
 
 echo "Opening Cloudflare quick tunnel..."
-"${CLOUDFLARED}" tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
+"${CLOUDFLARED}" tunnel --no-autoupdate --protocol http2 --url "http://127.0.0.1:${PORT}" >"${TUNNEL_LOG}" 2>&1 &
 TUNNEL_PID="$!"
 
 PANEL_URL=""
@@ -140,6 +140,23 @@ for _ in {1..80}; do
   fi
   PANEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9.]+trycloudflare\.com' "${TUNNEL_LOG}" | tail -1 || true)"
   if [[ -n "${PANEL_URL}" ]]; then
+    echo "Waiting for ${PANEL_URL} to answer through Cloudflare..."
+    for _ in {1..40}; do
+      if curl -fsS --max-time 10 "${PANEL_URL}/api/session" >/dev/null 2>&1; then
+        break
+      fi
+      if ! kill -0 "${TUNNEL_PID}" >/dev/null 2>&1; then
+        echo "Tunnel exited before it became reachable. Last log lines:" >&2
+        tail -80 "${TUNNEL_LOG}" >&2 || true
+        exit 1
+      fi
+      sleep 1
+    done
+    if ! curl -fsS --max-time 10 "${PANEL_URL}/api/session" >/dev/null 2>&1; then
+      echo "Tunnel URL was created but never became reachable. Last log lines:" >&2
+      tail -80 "${TUNNEL_LOG}" >&2 || true
+      exit 1
+    fi
     write_config "${PANEL_URL}"
     publish_config
     echo
