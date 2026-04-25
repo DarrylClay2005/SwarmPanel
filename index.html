@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=8" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=9" />
 </head>
 <body>
   <header class="topbar">
@@ -51,6 +51,14 @@
   </div>
 
   <main class="container">
+  <nav class="swarm-tabs" aria-label="Swarm sections">
+    <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
+    <button class="swarm-tab" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
+    <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
+    <button class="swarm-tab" data-tab-target="intel-tab" type="button">Intel + Errors</button>
+  </nav>
+
+  <div class="swarm-tab-panel active" id="overview-tab">
     <section class="panel deck-panel">
       <div class="section-title-row">
         <div>
@@ -97,6 +105,8 @@
               <th>Filter</th>
               <th>Loop</th>
               <th>Queue</th>
+              <th>Recovery</th>
+              <th>Signals</th>
               <th>Position</th>
               <th>Actions</th>
             </tr>
@@ -106,6 +116,8 @@
       </div>
     </section>
 
+  </div>
+  <div class="swarm-tab-panel" id="diagnostics-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
@@ -146,6 +158,8 @@
       </div>
     </section>
 
+  </div>
+  <div class="swarm-tab-panel" id="controls-tab">
     <section class="panel">
       <div class="section-title-row">
         <h2>Direct Bot Controls</h2>
@@ -268,12 +282,20 @@
 
     <section class="panel">
       <h2>Bot Server + Channel Explorer</h2>
-      <p class="muted">View all guilds/channels visible to each bot token.</p>
+      <p class="muted">This shows exactly what each bot can currently see in Discord: guilds, text channels, voice channels, categories, and where your selected control routes can actually go.</p>
       <div class="row">
         <select id="bot-select"></select>
         <button id="load-inventory" type="button">Load inventory</button>
       </div>
-      <pre id="inventory-output" class="pre"></pre>
+      <div class="row">
+        <input id="inventory-search" type="text" placeholder="Filter guilds/channels..." />
+        <select id="inventory-sort">
+          <option value="name">Sort by name</option>
+          <option value="channels_desc">Most channels</option>
+          <option value="voice_desc">Most voice channels</option>
+        </select>
+      </div>
+      <div id="inventory-output" class="inventory-browser"></div>
     </section>
 
     <section class="panel">
@@ -302,15 +324,41 @@
       </div>
     </section>
 
+  </div>
+  <div class="swarm-tab-panel" id="intel-tab">
     <section class="panel">
-      <h2>🚨 Live Error Feed</h2>
+      <div class="section-title-row">
+        <div>
+          <h2>🚨 Intel + Live Error Feed</h2>
+          <p class="muted">Recent panel, bot, Aria medic, and live swarm events. This loads from /api/events and keeps polling if the websocket is offline.</p>
+        </div>
+        <button id="refresh-event-feed" type="button">Refresh Feed</button>
+      </div>
+      <div class="row">
+        <label class="control-inline"><span>Level</span><select id="error-feed-level"><option value="all">All</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select></label>
+        <label class="control-inline"><span>Source</span><select id="error-feed-source"><option value="all">All</option><option value="panel">Panel</option><option value="worker">Worker</option><option value="bot_error">Bot Errors</option><option value="aria">Aria</option><option value="system">System</option></select></label>
+        <label class="control-inline"><span>Sort</span><select id="error-feed-sort"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="level">Severity</option></select></label>
+      </div>
       <pre id="error-feed" class="pre"></pre>
     </section>
-  </main>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>📊 Metrics Dashboard</h2>
+          <p class="muted">Live bot observability from bot-written metrics tables: voice state, Lavalink readiness, queue depth, stale heartbeats, and recovery flags.</p>
+        </div>
+        <button id="refresh-metrics" type="button">Refresh Metrics</button>
+      </div>
+      <div id="metrics-dashboard" class="diagnostic-grid"></div>
+    </section>
+
+  </div>
+</main>
 
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=8"></script>
+  <script src="./app/static/final_app.js?v=9"></script>
 </body>
 </html>
