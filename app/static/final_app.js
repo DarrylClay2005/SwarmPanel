@@ -235,8 +235,12 @@ function normalizeRemoteOrigin(value) {
 }
 
 function setRemoteOrigin(value, persist = true) {
+    const previousOrigin = remotePanelOrigin;
     remotePanelOrigin = normalizeRemoteOrigin(value);
     if (!REMOTE_MODE) return remotePanelOrigin;
+    if (previousOrigin && remotePanelOrigin && previousOrigin !== remotePanelOrigin) {
+        setRemoteToken('');
+    }
     if (persist) {
         writeStoredValue(REMOTE_ORIGIN_KEY, remotePanelOrigin);
     }
@@ -551,7 +555,8 @@ async function loginRemotePanel() {
     const passwordInput = document.getElementById('remote-password');
     const submitButton = document.getElementById('remote-login-button');
 
-    const nextOrigin = normalizeRemoteOrigin(originInput?.value);
+    const configuredOrigin = await loadRemotePanelConfig();
+    const nextOrigin = normalizeRemoteOrigin(configuredOrigin || originInput?.value);
     const username = String(usernameInput?.value || '').trim();
     const password = String(passwordInput?.value || '');
 
@@ -565,6 +570,7 @@ async function loginRemotePanel() {
     }
 
     setRemoteOrigin(nextOrigin);
+    if (originInput) originInput.value = remotePanelOrigin;
     setRemoteUsername(username);
     setRemoteAuthError('');
     if (submitButton) submitButton.disabled = true;
@@ -662,6 +668,9 @@ async function bootstrapPanelApplication() {
         }
         setRemoteToken(readStoredValue(REMOTE_TOKEN_KEY) || '', false);
         setRemoteUsername(readStoredValue(REMOTE_USERNAME_KEY) || '', false);
+        if (configuredOrigin && configuredOrigin === remotePanelOrigin) {
+            writeStoredValue(REMOTE_ORIGIN_KEY, configuredOrigin);
+        }
 
         if (!remotePanelOrigin) {
             showRemoteAuthShell('Paste the live SwarmPanel URL to connect this GitHub Pages view.');
