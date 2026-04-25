@@ -28,6 +28,7 @@ let systemDiagnosticsState = null;
 let metricsSnapshotState = null;
 let controlRefreshTimer = null;
 let lastDashboardFetchAt = Date.now();
+<<<<<<< HEAD
 let liveSessionState = [];
 let liveSessionPositionCache = new Map();
 let dashboardRefreshTimer = null;
@@ -35,11 +36,14 @@ let diagnosticsRefreshTimer = null;
 let metricsRefreshTimer = null;
 const LIVE_POSITION_CACHE_MAX = 300;
 const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
+=======
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let panelAppStarted = false;
 let panelSessionChecked = false;
+let livePositionTickerStarted = false;
 const MAX_EVENT_FEED_ENTRIES = 80;
 const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -351,6 +355,31 @@ function formatDuration(seconds) {
     const m = Math.floor(s / 60);
     const rem = String(s % 60).padStart(2, '0');
     return `${m}:${rem}`;
+}
+
+
+function currentLivePositionSeconds(baseSeconds, isPlaying) {
+    const base = Number(baseSeconds || 0);
+    if (!isPlaying) return Math.max(0, Math.floor(base));
+    const elapsed = Math.max(0, Math.floor((Date.now() - lastDashboardFetchAt) / 1000));
+    return Math.max(0, Math.floor(base + elapsed));
+}
+
+function updateLivePositionCounters() {
+    document.querySelectorAll('[data-live-position]').forEach(element => {
+        const baseSeconds = Number(element.dataset.baseSeconds || 0);
+        const isPlaying = String(element.dataset.playing || '').toLowerCase() === 'true';
+        element.textContent = formatDuration(currentLivePositionSeconds(baseSeconds, isPlaying));
+    });
+}
+
+function ensureLivePositionTicker() {
+    if (livePositionTickerStarted) return;
+    livePositionTickerStarted = true;
+    setInterval(() => {
+        if (!panelAppStarted) return;
+        updateLivePositionCounters();
+    }, 1000);
 }
 
 function formatHeartbeatAge(seconds) {
@@ -863,6 +892,7 @@ async function fetchDashboard() {
         renderOverview(bots, data.generated_at);
         renderBots(bots);
 
+<<<<<<< HEAD
         let allSessions = [];
         const sessionNow = Date.now();
         const flattened = Array.isArray(data.sessions) ? data.sessions : [];
@@ -888,6 +918,32 @@ async function fetchDashboard() {
                 }
             });
         }
+=======
+        const sessionMap = new Map();
+        const rememberSession = (session, fallbackBot = null) => {
+            if (!session) return;
+            const botKey = String(session.bot_key || fallbackBot?.key || '');
+            const guildKey = String(session.guild_id ?? '0');
+            if (!botKey) return;
+            const key = `${botKey}:${guildKey}`;
+            sessionMap.set(key, {
+                ...sessionMap.get(key),
+                ...session,
+                bot_key: botKey,
+                bot_display: session.bot_display || fallbackBot?.display_name || session.bot_name || botKey,
+            });
+        };
+
+        bots.forEach(bot => {
+            if (Array.isArray(bot.sessions)) {
+                bot.sessions.forEach(session => rememberSession(session, bot));
+            }
+        });
+        if (Array.isArray(data.sessions)) {
+            data.sessions.forEach(session => rememberSession(session, getDashboardBot(session.bot_key) || null));
+        }
+        const allSessions = Array.from(sessionMap.values());
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
 
         liveSessionState = allSessions;
         pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
@@ -907,6 +963,8 @@ async function fetchDashboard() {
         if (meta && data.generated_at) {
             meta.textContent = `Last updated: ${formatCentralTimestamp(data.generated_at)}`;
         }
+
+        updateLivePositionCounters();
 
     } catch (err) {
         console.error("❌ Dashboard fetch failed:", err);
@@ -1309,12 +1367,16 @@ function renderNowPlaying(sessions) {
     }
 
     container.innerHTML = playing.map(s => {
+<<<<<<< HEAD
         const positionSeconds = getDisplayPositionSeconds(s);
         const pos = formatDuration(positionSeconds);
         const durationLabel = formatDuration(s.duration_seconds || s.length_seconds || s.track_length_seconds || 0);
         const progressPercent = formatProgressPercent(positionSeconds, s.duration_seconds || s.length_seconds || s.track_length_seconds);
         const positionKey = escapeHtml(getSessionRuntimeKey(s));
         const recoverySummary = summarizeRecoveryState(s);
+=======
+        const pos = formatDuration(currentLivePositionSeconds(s.position_seconds || 0, s.is_playing));
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
         const thumb = s.thumbnail || null;
         const sourceBadge = s.media_source_label
             ? `<span class="np-stat np-source np-source-${s.media_source || 'unknown'}">${s.media_source_label}</span>`
@@ -1356,7 +1418,11 @@ function renderNowPlaying(sessions) {
                 <div class="np-stats-row">
                     <span class="np-stat">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+<<<<<<< HEAD
                         <span data-position-key="${positionKey}">${pos}</span>
+=======
+                        <span data-live-position="true" data-base-seconds="${Number(s.position_seconds || 0)}" data-playing="${Boolean(s.is_playing)}">${pos}</span>
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
                     </span>
                     ${sourceBadge}
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
@@ -1408,6 +1474,15 @@ function renderBots(bots) {
     bots.forEach(bot => {
         const statusMeta = describeBotStatus(bot.status);
         const heartbeatLabel = formatHeartbeatAge(bot.heartbeat_age_seconds);
+        const sessions = Array.isArray(bot.sessions) ? bot.sessions : [];
+        const activeSession = sessions.find(session => describeSessionState(session).key === 'playing')
+            || sessions.find(session => describeSessionState(session).key === 'paused')
+            || sessions.find(session => describeSessionState(session).key === 'queued')
+            || null;
+        const activeState = activeSession ? describeSessionState(activeSession) : null;
+        const activePositionText = activeSession
+            ? formatDuration(currentLivePositionSeconds(activeSession.position_seconds || 0, Boolean(activeSession.is_playing)))
+            : null;
 
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
@@ -1457,6 +1532,10 @@ function renderBots(bots) {
             <div class="bot-meta-row">
                 <span class="bot-meta-pill">Heartbeat ${heartbeatLabel}</span>
                 <span class="bot-meta-pill">${heartbeatStatusLabel}</span>
+<<<<<<< HEAD
+=======
+                ${activeSession ? `<span class="bot-meta-pill">${activeState?.icon || '•'} ${activeState?.label || 'Active'} · <span data-live-position="true" data-base-seconds="${Number(activeSession.position_seconds || 0)}" data-playing="${Boolean(activeSession.is_playing)}">${activePositionText}</span></span>` : ''}
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
             </div>
             ${bot.kind === 'orchestrator' ? `
             <div class="bot-meta-row" style="margin-top: 10px; flex-direction: column; align-items: stretch; gap: 8px;">
@@ -1528,9 +1607,13 @@ function renderSessions(sessions) {
             <td>${session.filter_mode || "none"}</td>
             <td>${normalizeLoopMode(session.loop_mode)}</td>
             <td>${session.queue_count || 0}</td>
+<<<<<<< HEAD
             <td>${escapeHtml(recoverySummary)}</td>
             <td>${escapeHtml(signalSummary)}</td>
             <td data-position-key="${positionKey}">${formatDuration(getDisplayPositionSeconds(session))}</td>
+=======
+            <td><span data-live-position="true" data-base-seconds="${Number(session.position_seconds || 0)}" data-playing="${Boolean(session.is_playing)}">${formatDuration(currentLivePositionSeconds(session.position_seconds || 0, session.is_playing))}</span></td>
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
             <td>
                 <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
@@ -1552,9 +1635,11 @@ function renderSessions(sessions) {
 // 🎮 SEND COMMAND (event delegation)
 // ================================
 async function sendCommand(bot_key, guild_id, action, payload = null, options = {}) {
-    if (controlCooldown) return;
+    if (controlCooldown) {
+        return { ok: false, error: 'Another panel command is already in flight. Try again in a moment.' };
+    }
     controlCooldown = true;
-    const { refresh = true } = options;
+    const { refresh = true, delayedRefreshMs = 0 } = options;
 
     try {
         const res = await fetch(`${API_BASE}/bots/control`, {
@@ -1573,7 +1658,16 @@ async function sendCommand(bot_key, guild_id, action, payload = null, options = 
             return { ok: false, error: detail, data };
         }
 
-        if (refresh) fetchDashboard();
+        if (refresh) {
+            fetchDashboard();
+            if (delayedRefreshMs > 0) {
+                scheduleDashboardRefresh(delayedRefreshMs);
+            }
+            setTimeout(() => {
+                fetchSelectedControlState({ silent: true });
+                fetchControlMatrix({ silent: true });
+            }, Math.max(700, delayedRefreshMs || 700));
+        }
         return { ok: true, data };
 
     } catch (err) {
@@ -1597,7 +1691,19 @@ document.addEventListener('click', (e) => {
     }
     if (action === 'CLEAR' && !confirm('Clear the queue and stop the current track for this guild?')) return;
     if (action === 'RESTART' && !confirm('Restart this bot node? Active playback may pause briefly.')) return;
-    if (action && bot) sendCommand(bot, guild, action, payload);
+    if (action && bot) {
+        sendCommand(bot, guild, action, payload, { delayedRefreshMs: 2200 }).then((result) => {
+            if (!result?.ok) {
+                setControlStatus(result?.error || `Failed to run ${action}.`, true);
+                return;
+            }
+            setControlStatus(result.data?.message || `${action} sent.`);
+            setTimeout(() => {
+                fetchSelectedControlState({ silent: true });
+                fetchControlMatrix({ silent: true });
+            }, 2200);
+        });
+    }
 });
 
 // ================================
@@ -2786,7 +2892,7 @@ async function applyLoopModeFromPanel() {
     }
 
     setControlStatus('Applying loop mode...');
-    const result = await sendCommand(botKey, guildId, 'LOOP', loopMode);
+    const result = await sendCommand(botKey, guildId, 'LOOP', loopMode, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update loop mode.', true);
         return;
@@ -2814,7 +2920,7 @@ async function applyFilterModeFromPanel() {
     }
 
     setControlStatus('Applying audio filter...');
-    const result = await sendCommand(botKey, guildId, 'FILTER', filterMode);
+    const result = await sendCommand(botKey, guildId, 'FILTER', filterMode, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update filter mode.', true);
         return;
@@ -2848,7 +2954,7 @@ async function setHomeChannelFromPanel() {
     setControlStatus('Writing home channel...');
     const result = await sendCommand(botKey, guildId, 'SET_HOME', {
         voice_channel_id: voiceChannelId,
-    });
+    }, { delayedRefreshMs: 900 });
     if (!result?.ok) {
         setControlStatus(result?.error || 'Failed to update the home channel.', true);
         return;
@@ -2907,7 +3013,7 @@ async function sendPanelAction(action) {
     };
 
     setControlStatus(statusLabels[action] || 'Sending command...');
-    const result = await sendCommand(selection.botKey, selection.guildId, action);
+    const result = await sendCommand(selection.botKey, selection.guildId, action, null, { delayedRefreshMs: 2200 });
     if (!result?.ok) {
         setControlStatus(result?.error || `Failed to run ${action}.`, true);
         return;
@@ -3148,6 +3254,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('logout-button')
         ?.addEventListener('click', logoutPanel);
 
+    ensureLivePositionTicker();
     bootstrapPanelApplication();
 });
 

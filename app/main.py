@@ -46,6 +46,7 @@ action_logger = logging.getLogger("swarm_panel.actions")
 background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
+<<<<<<< HEAD
 VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER"}
 
 
@@ -59,6 +60,9 @@ def _validate_discord_webhook_url(value: Any) -> str:
     if len(parts) < 4 or parts[0] != "api" or parts[1] != "webhooks":
         raise ValueError("Invalid Discord webhook URL")
     return url
+=======
+VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME"}
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
 
 
 class TruncateTableRequest(BaseModel):
@@ -198,8 +202,16 @@ async def lifespan(_: FastAPI):
     await discord_service.connect()
     await diagnostics_service.connect()
     background_tasks.clear()
+<<<<<<< HEAD
     # Commands execute directly through /api/bots/control. The old command_queue
     # worker is intentionally not started because no endpoint enqueues work.
+=======
+    background_tasks.extend(
+        [
+            asyncio.create_task(command_worker(), name="swarm_panel_command_worker"),
+        ]
+    )
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
     recent_feed_events.append(
         _feed_event(
             "info",
@@ -360,6 +372,10 @@ async def dashboard_data(request: Request):
         }
 
     flattened_sessions: list[dict[str, Any]] = []
+<<<<<<< HEAD
+=======
+    seen_session_keys: set[tuple[str, str]] = set()
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
     for bot in data["bots"]:
         bot.setdefault("name", bot.get("display_name"))
         bot.setdefault("guild_count", bot.get("known_guild_count", 0))
@@ -377,6 +393,13 @@ async def dashboard_data(request: Request):
         for session in sessions:
             session.setdefault("bot_key", bot.get("key"))
             session.setdefault("bot_name", bot.get("display_name"))
+<<<<<<< HEAD
+=======
+            session_key = (str(session.get("bot_key") or bot.get("key")), str(session.get("guild_id") or "0"))
+            if session_key in seen_session_keys:
+                continue
+            seen_session_keys.add(session_key)
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
             flattened_sessions.append(session)
         if not sessions:
             continue
@@ -683,10 +706,14 @@ class BotControlRequest(BaseModel):
         self.action = normalized_action
         self.command = normalized_action
         if self.guild_id in (None, ""):
+<<<<<<< HEAD
             if normalized_action.upper() == "RESTART":
                 self.guild_id = "0"
             else:
                 raise ValueError("guild_id is required for non-RESTART actions")
+=======
+            self.guild_id = "0" if normalized_action.upper() == "RESTART" else None
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
         return self
 
 @app.post("/api/bots/control")
@@ -844,9 +871,19 @@ async def execute_bot_command(cmd: dict):
     )
 
 async def command_worker():
+<<<<<<< HEAD
     # Retained for compatibility with old imports, but intentionally disabled.
     # The live panel dispatches bot commands synchronously through api_bot_control.
     return
+=======
+    while True:
+        cmd = await command_queue.get()
+        try:
+            await execute_bot_command(cmd)
+        except Exception as e:
+            await push_feed_event("error", "Command Error", str(e), source="worker")
+        command_queue.task_done()
+>>>>>>> c39f5b7d637b8aaec71e22fee983f0fdc54006d5
 
 def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):
