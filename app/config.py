@@ -1,5 +1,4 @@
 import os
-import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +7,7 @@ from dotenv import load_dotenv
 from .bots import ALL_BOTS
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / "Music" / ".env", override=False)
 
 
 def _env(name: str, default: str = "") -> str:
@@ -45,14 +45,12 @@ class Settings:
 def load_settings() -> Settings:
     tokens = {bot.key: _env(bot.token_env) for bot in ALL_BOTS}
     session_secret = _env("PANEL_SESSION_SECRET")
-    if not session_secret:
-        session_secret = secrets.token_urlsafe(48)
 
     settings = Settings(
-        db_host=_env("PANEL_DB_HOST", "host.docker.internal"),
+        db_host=_env("PANEL_DB_HOST") or _env("DB_HOST") or _env("MYSQL_HOST") or "host.docker.internal",
         db_port=int(_env("PANEL_DB_PORT", "3306")),
-        db_user=_env("PANEL_DB_USER", "botuser"),
-        db_password=_env("PANEL_DB_PASSWORD"),
+        db_user=_env("PANEL_DB_USER") or _env("DB_USER") or _env("MYSQL_USER") or "botuser",
+        db_password=_env("PANEL_DB_PASSWORD") or _env("DB_PASSWORD") or _env("MYSQL_PASSWORD") or _env("GWS_DB_PASSWORD"),
         db_default_schema=_env("PANEL_DB_DEFAULT_SCHEMA", "discord_music_gws"),
         admin_username=_env("PANEL_ADMIN_USERNAME", "admin"),
         admin_password=_env("PANEL_ADMIN_PASSWORD"),
@@ -72,5 +70,7 @@ def validate_settings(settings: Settings) -> None:
         missing.append("PANEL_DB_PASSWORD")
     if not settings.admin_password:
         missing.append("PANEL_ADMIN_PASSWORD")
+    if not settings.session_secret:
+        missing.append("PANEL_SESSION_SECRET")
     if missing:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")

@@ -30,6 +30,11 @@ let controlRefreshTimer = null;
 let lastDashboardFetchAt = Date.now();
 let liveSessionState = [];
 let liveSessionPositionCache = new Map();
+let dashboardRefreshTimer = null;
+let diagnosticsRefreshTimer = null;
+let metricsRefreshTimer = null;
+const LIVE_POSITION_CACHE_MAX = 300;
+const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
@@ -47,6 +52,21 @@ function getSessionRuntimeKey(session) {
     const guildId = String(session?.guild_id || '0');
     const trackKey = String(session?.video_url || session?.title || 'no-track');
     return `${botKey}:${guildId}:${trackKey}`;
+}
+
+function pruneLiveSessionPositionCache(activeKeys = new Set(), now = Date.now()) {
+    for (const [key, value] of liveSessionPositionCache.entries()) {
+        const stale = now - Number(value?.last_seen_ms || 0) > LIVE_POSITION_CACHE_TTL_MS;
+        if (stale && !activeKeys.has(key)) liveSessionPositionCache.delete(key);
+    }
+    if (liveSessionPositionCache.size <= LIVE_POSITION_CACHE_MAX) return;
+    const sorted = [...liveSessionPositionCache.entries()]
+        .sort((a, b) => Number(a[1]?.last_seen_ms || 0) - Number(b[1]?.last_seen_ms || 0));
+    while (liveSessionPositionCache.size > LIVE_POSITION_CACHE_MAX && sorted.length) {
+        const [oldestKey] = sorted.shift();
+        if (!activeKeys.has(oldestKey)) liveSessionPositionCache.delete(oldestKey);
+        else if (liveSessionPositionCache.size > LIVE_POSITION_CACHE_MAX) liveSessionPositionCache.delete(oldestKey);
+    }
 }
 
 function normalizeLiveSession(session, now = Date.now()) {
@@ -114,8 +134,23 @@ function getDisplayPositionSeconds(session, now = Date.now()) {
 
 function renderLivePositionTick() {
     if (!panelAppStarted || !Array.isArray(liveSessionState) || !liveSessionState.length) return;
-    renderSessions(liveSessionState.filter(session => isRuntimeSession(session)));
-    renderNowPlaying(liveSessionState);
+    const now = Date.now();
+    liveSessionState.forEach(session => {
+        const positionSeconds = getDisplayPositionSeconds(session, now);
+        const durationSeconds = Number(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
+        const label = formatDuration(positionSeconds);
+        const fullLabel = `${label}${durationSeconds > 0 ? ` / ${formatDuration(durationSeconds)}` : ''}`;
+        const key = getSessionRuntimeKey(session);
+        document.querySelectorAll(`[data-position-key="${CSS.escape(key)}"]`).forEach(node => {
+            node.textContent = node.dataset.positionFull === '1' ? fullLabel : label;
+        });
+        const progressPercent = formatProgressPercent(positionSeconds, durationSeconds);
+        if (progressPercent !== null) {
+            document.querySelectorAll(`[data-progress-key="${CSS.escape(key)}"]`).forEach(node => {
+                node.style.width = `${progressPercent}%`;
+            });
+        }
+    });
 }
 
 // ================================
@@ -830,19 +865,32 @@ async function fetchDashboard() {
 
         let allSessions = [];
         const sessionNow = Date.now();
-        bots.forEach(bot => {
-            if (Array.isArray(bot.sessions)) {
-                bot.sessions.forEach(session => {
-                    allSessions.push(normalizeLiveSession({
-                        ...session,
-                        bot_key: bot.key,
-                        bot_display: bot.display_name
-                    }, sessionNow));
-                });
-            }
-        });
+        const flattened = Array.isArray(data.sessions) ? data.sessions : [];
+        if (flattened.length) {
+            flattened.forEach(session => {
+                const owningBot = bots.find(bot => bot.key === session.bot_key || bot.display_name === session.bot_name) || {};
+                allSessions.push(normalizeLiveSession({
+                    ...session,
+                    bot_key: session.bot_key || owningBot.key,
+                    bot_display: session.bot_display || session.bot_name || owningBot.display_name
+                }, sessionNow));
+            });
+        } else {
+            bots.forEach(bot => {
+                if (Array.isArray(bot.sessions)) {
+                    bot.sessions.forEach(session => {
+                        allSessions.push(normalizeLiveSession({
+                            ...session,
+                            bot_key: bot.key,
+                            bot_display: bot.display_name
+                        }, sessionNow));
+                    });
+                }
+            });
+        }
 
         liveSessionState = allSessions;
+        pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
         renderSessions(allSessions.filter(session => isRuntimeSession(session)));
         renderNowPlaying(allSessions);
         syncControlSelectionsFromDashboard();
@@ -1265,6 +1313,7 @@ function renderNowPlaying(sessions) {
         const pos = formatDuration(positionSeconds);
         const durationLabel = formatDuration(s.duration_seconds || s.length_seconds || s.track_length_seconds || 0);
         const progressPercent = formatProgressPercent(positionSeconds, s.duration_seconds || s.length_seconds || s.track_length_seconds);
+        const positionKey = escapeHtml(getSessionRuntimeKey(s));
         const recoverySummary = summarizeRecoveryState(s);
         const thumb = s.thumbnail || null;
         const sourceBadge = s.media_source_label
@@ -1307,7 +1356,7 @@ function renderNowPlaying(sessions) {
                 <div class="np-stats-row">
                     <span class="np-stat">
                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                        ${pos}
+                        <span data-position-key="${positionKey}">${pos}</span>
                     </span>
                     ${sourceBadge}
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
@@ -1316,10 +1365,10 @@ function renderNowPlaying(sessions) {
                     ${Number(s?.backup_queue_count || 0) > 0 ? `<span class="np-stat np-loop">backup:${Number(s.backup_queue_count)}</span>` : ''}
                 </div>
                 <div class="np-stats-row" style="margin-top:6px;">
-                    <span class="np-stat">${pos}${durationLabel !== '0:00' ? ` / ${durationLabel}` : ''}</span>
+                    <span class="np-stat" data-position-key="${positionKey}" data-position-full="1">${pos}${durationLabel !== '0:00' ? ` / ${durationLabel}` : ''}</span>
                     <span class="np-stat">${escapeHtml(recoverySummary)}</span>
                 </div>
-                ${progressPercent !== null ? `<div class="np-progress"><span style="width:${progressPercent}%"></span></div>` : ''}
+                ${progressPercent !== null ? `<div class="np-progress"><span data-progress-key="${positionKey}" style="width:${progressPercent}%"></span></div>` : ''}
                 <div class="np-controls">
                     <button class="np-btn" data-action="PAUSE" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Pause">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
@@ -1469,6 +1518,7 @@ function renderSessions(sessions) {
         const recoverySummary = summarizeRecoveryState(session);
         const signalSummary = summarizeSessionSignals(session);
         const durationLabel = formatDuration(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
+        const positionKey = escapeHtml(getSessionRuntimeKey(session));
         row.innerHTML = `
             <td>${session.bot_display}</td>
             <td>${session.guild_name || session.guild_id}</td>
@@ -1480,10 +1530,11 @@ function renderSessions(sessions) {
             <td>${session.queue_count || 0}</td>
             <td>${escapeHtml(recoverySummary)}</td>
             <td>${escapeHtml(signalSummary)}</td>
-            <td>${formatDuration(getDisplayPositionSeconds(session))}</td>
+            <td data-position-key="${positionKey}">${formatDuration(getDisplayPositionSeconds(session))}</td>
             <td>
                 <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
+                <button class="tbl-btn" data-action="RECOVER" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Recover</button>
                 <button class="tbl-btn" data-action="SKIP"   data-bot="${session.bot_key}" data-guild="${session.guild_id}">Skip</button>
                 <button class="tbl-btn tbl-btn-stop" data-action="STOP" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Stop</button>
                 <button class="tbl-btn" data-action="SHUFFLE" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Shuffle</button>
@@ -1540,7 +1591,10 @@ document.addEventListener('click', (e) => {
     const action = btn.dataset.action;
     const bot = btn.dataset.bot;
     const guild = btn.dataset.guild || '0';
-    const payload = btn.dataset.payload || null;
+    let payload = btn.dataset.payload || null;
+    if (payload && ((payload.startsWith("{") && payload.endsWith("}")) || (payload.startsWith("[") && payload.endsWith("]")))) {
+        try { payload = JSON.parse(payload); } catch (_) {}
+    }
     if (action === 'CLEAR' && !confirm('Clear the queue and stop the current track for this guild?')) return;
     if (action === 'RESTART' && !confirm('Restart this bot node? Active playback may pause briefly.')) return;
     if (action && bot) sendCommand(bot, guild, action, payload);
@@ -2843,6 +2897,7 @@ async function sendPanelAction(action) {
     const statusLabels = {
         PAUSE: 'Sending pause command...',
         RESUME: 'Sending resume command...',
+        RECOVER: 'Requesting voice reconnect and queue recovery...',
         SKIP: 'Sending skip command...',
         STOP: 'Sending stop command...',
         LEAVE: 'Sending leave command...',
@@ -3097,20 +3152,26 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ================================
-// 🔄 AUTO REFRESH (5s)
+// 🔄 AUTO REFRESH
 // ================================
-setInterval(() => {
-    if (panelAppStarted) fetchDashboard();
-}, 5000);
+async function dashboardRefreshLoop() {
+    if (panelAppStarted) await fetchDashboard();
+    dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, 5000);
+}
 
-setInterval(() => {
-    if (panelAppStarted) fetchDiagnostics();
-}, 60000);
+async function diagnosticsRefreshLoop() {
+    if (panelAppStarted) await fetchDiagnostics();
+    diagnosticsRefreshTimer = setTimeout(diagnosticsRefreshLoop, 60000);
+}
 
-setInterval(() => {
-    if (panelAppStarted) fetchMetrics();
-}, 15000);
+async function metricsRefreshLoop() {
+    if (panelAppStarted) await fetchMetrics();
+    metricsRefreshTimer = setTimeout(metricsRefreshLoop, 15000);
+}
 
+dashboardRefreshLoop();
+diagnosticsRefreshLoop();
+metricsRefreshLoop();
 setInterval(() => {
     renderLivePositionTick();
 }, 1000);

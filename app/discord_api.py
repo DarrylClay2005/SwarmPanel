@@ -183,6 +183,26 @@ class DiscordInventoryService:
                 continue
             seen_guild_ids.add(guild_id)
             deduped_guilds.append(guild)
+
+        # Only resolve hinted guilds that were not returned by /users/@me/guilds.
+        # This avoids N redundant Discord API calls on every inventory refresh.
+        for guild_id in guild_hints or []:
+            guild_id_str = str(guild_id)
+            if guild_id_str in seen_guild_ids:
+                continue
+            try:
+                guild = await self.fetch_guild(token, int(guild_id))
+                deduped_guilds.append(guild)
+                seen_guild_ids.add(str(guild.get("id") or guild_id_str))
+            except DiscordAPIError as hint_exc:
+                if hint_exc.status_code == 404:
+                    payload["errors"].append(f"guild_hint {guild_id}: stale guild reference skipped")
+                    continue
+                deduped_guilds.append({"id": guild_id_str, "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+                seen_guild_ids.add(guild_id_str)
+            except Exception as hint_exc:
+                deduped_guilds.append({"id": guild_id_str, "name": f"Guild {guild_id}", "channels_error": str(hint_exc)})
+                seen_guild_ids.add(guild_id_str)
         guilds = deduped_guilds
 
         for guild in guilds:

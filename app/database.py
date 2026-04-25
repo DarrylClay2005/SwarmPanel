@@ -182,8 +182,30 @@ class PanelDatabase:
         self.http_session: aiohttp.ClientSession | None = None
         self.thumbnail_cache: dict[str, tuple[float, str | None]] = {}
 
+
+    async def _ensure_schema_exists(self, schema_name: str) -> None:
+        schema_name = _validate_identifier(schema_name, "schema")
+        conn = await aiomysql.connect(
+            host=self.settings.db_host,
+            port=self.settings.db_port,
+            user=self.settings.db_user,
+            password=self.settings.db_password,
+            autocommit=True,
+            connect_timeout=10,
+        )
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(f"CREATE DATABASE IF NOT EXISTS `{schema_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        finally:
+            conn.close()
+
     async def connect(self) -> None:
         if not self.pool:
+            # Create every schema the dashboard can read before the pool opens.
+            startup_schemas = {self.settings.db_default_schema, "discord_aria"}
+            startup_schemas.update(bot.db_schema for bot in MUSIC_BOTS if bot.db_schema)
+            for schema in sorted(startup_schemas):
+                await self._ensure_schema_exists(schema)
             self.pool = await aiomysql.create_pool(
                 host=self.settings.db_host,
                 port=self.settings.db_port,
@@ -195,9 +217,39 @@ class PanelDatabase:
                 maxsize=10,
                 connect_timeout=10,
             )
+        await self._ensure_startup_schema()
         if not self.http_session:
             timeout = aiohttp.ClientTimeout(total=10)
             self.http_session = aiohttp.ClientSession(timeout=timeout)
+
+    async def _ensure_startup_schema(self) -> None:
+        """Create low-churn panel/Aria support tables once at startup.
+
+        Dashboard polling must never execute DDL. Running this from connect() keeps
+        the hot dashboard path read-only and avoids repeated metadata locks.
+        """
+        if not self.pool:
+            raise RuntimeError("Database pool not initialized")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                try:
+                    await asyncio.wait_for(cur.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS `discord_aria`.`aria_interactions` (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            guild_id BIGINT NULL,
+                            channel_id BIGINT NULL,
+                            user_id BIGINT NULL,
+                            user_name VARCHAR(150) NULL,
+                            interaction_type VARCHAR(32) NOT NULL DEFAULT 'chat',
+                            prompt_text TEXT,
+                            response_text TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    ), timeout=15)
+                except Exception as exc:
+                    logger.warning("Could not ensure discord_aria.aria_interactions: %s", exc)
 
     async def close(self) -> None:
         if self.pool:
@@ -208,9 +260,12 @@ class PanelDatabase:
             await self.http_session.close()
             self.http_session = None
 
-    async def _fetchall(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
+    async def _ensure_connected(self) -> None:
         if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+            await self.connect()
+
+    async def _fetchall(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
+        await self._ensure_connected()
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             async with conn.cursor(cursor_cls) as cur:
@@ -218,8 +273,7 @@ class PanelDatabase:
                 return await asyncio.wait_for(cur.fetchall(), timeout=15)
 
     async def _fetchone(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+        await self._ensure_connected()
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             async with conn.cursor(cursor_cls) as cur:
@@ -227,8 +281,7 @@ class PanelDatabase:
                 return await asyncio.wait_for(cur.fetchone(), timeout=15)
 
     async def _execute(self, query: str, params: tuple[Any, ...] = ()) -> int:
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+        await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await asyncio.wait_for(cur.execute(query, params), timeout=15)
@@ -370,6 +423,7 @@ class PanelDatabase:
         home_table = f"{prefix}_bot_home_channels"
         direct_orders_table = f"{prefix}_swarm_direct_orders"
         heartbeat_table = "swarm_health"
+        metrics_table = f"{prefix}_metrics"
 
         table_exists = {
             "playback": await self._table_exists(schema, playback_table),
@@ -379,6 +433,7 @@ class PanelDatabase:
             "home": await self._table_exists(schema, home_table),
             "direct_orders": await self._table_exists(schema, direct_orders_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
+            "metrics": await self._table_exists(schema, metrics_table),
         }
 
         playback: dict[str, Any] = {}
@@ -584,6 +639,7 @@ class PanelDatabase:
         backup_table = f"{prefix}_queue_backup"
         home_table = f"{prefix}_bot_home_channels"
         heartbeat_table = "swarm_health"
+        metrics_table = f"{prefix}_metrics"
 
         table_exists = {
             "playback": await self._table_exists(schema, playback_table),
@@ -592,6 +648,7 @@ class PanelDatabase:
             "backup": await self._table_exists(schema, backup_table),
             "home": await self._table_exists(schema, home_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
+            "metrics": await self._table_exists(schema, metrics_table),
         }
 
         playback_rows: list[dict[str, Any]] = []
@@ -599,6 +656,7 @@ class PanelDatabase:
         queue_map: dict[int, int] = {}
         backup_queue_map: dict[int, int] = {}
         home_map: dict[int, int | None] = {}
+        metrics_map: dict[int, dict[str, Any]] = {}
         known_guilds: set[int] = set()
 
         if table_exists["playback"]:
@@ -662,6 +720,19 @@ class PanelDatabase:
                 home_map[guild_id] = int(row["home_vc_id"]) if row.get("home_vc_id") else None
                 known_guilds.add(guild_id)
 
+        if table_exists.get("metrics"):
+            try:
+                rows = await self._fetchall(
+                    f"SELECT *, TIMESTAMPDIFF(SECOND, updated_at, NOW()) AS metric_age_seconds FROM `{schema}`.`{metrics_table}` WHERE bot_name = %s",
+                    (bot.key,),
+                )
+                for row in rows:
+                    guild_id = int(row["guild_id"])
+                    metrics_map[guild_id] = row
+                    known_guilds.add(guild_id)
+            except Exception:
+                logger.exception("Failed reading metrics for %s", bot.key)
+
         playback_map = {int(row["guild_id"]): row for row in playback_rows if row.get("guild_id") is not None}
         sessions = []
         active_playing_count = 0
@@ -669,14 +740,20 @@ class PanelDatabase:
 
         for guild_id in sorted_guild_ids:
             playback = playback_map.get(guild_id, {})
+            metric = metrics_map.get(guild_id, {})
             settings = filter_map.get(guild_id, {})
             queue_count = queue_map.get(guild_id, 0)
             backup_queue_count = backup_queue_map.get(guild_id, 0)
             home_channel_id = home_map.get(guild_id)
             source_info = _detect_media_source(playback.get("video_url"))
-            is_playing = bool(playback.get("is_playing"))
+            metric_fresh = int(metric.get("metric_age_seconds") or 999999) <= 90 if metric else False
+            is_playing = bool(metric.get("player_playing")) if metric_fresh else bool(playback.get("is_playing"))
+            is_paused = bool(metric.get("player_paused")) if metric_fresh else bool(playback.get("is_paused"))
+            effective_channel_id = metric.get("connected_channel_id") if metric_fresh and metric.get("connected_channel_id") else playback.get("channel_id")
+            effective_position = int(metric.get("position_seconds") or playback.get("position_seconds") or 0)
+            effective_playback = {**playback, "is_playing": is_playing, "is_paused": is_paused, "channel_id": effective_channel_id}
             session_state, session_state_label = _derive_session_state(
-                playback,
+                effective_playback,
                 queue_count=queue_count,
                 has_settings=guild_id in filter_map,
                 home_channel_id=home_channel_id,
@@ -687,14 +764,16 @@ class PanelDatabase:
             sessions.append(
                 {
                     "guild_id": str(guild_id),
-                    "channel_id": str(playback.get("channel_id")) if playback.get("channel_id") else None,
+                    "channel_id": str(effective_channel_id) if effective_channel_id else None,
                     "title": playback.get("title"),
                     "video_url": playback.get("video_url"),
                     "media_source": source_info["key"],
                     "media_source_label": source_info["label"],
                     "thumbnail": None,
-                    "position_seconds": int(playback.get("position_seconds") or 0),
+                    "position_seconds": effective_position,
                     "is_playing": is_playing,
+                    "is_paused": is_paused,
+                    "metric_age_seconds": int(metric.get("metric_age_seconds") or -1) if metric else None,
                     "session_state": session_state,
                     "session_state_label": session_state_label,
                     "filter_mode": settings.get("filter_mode", "none"),
@@ -744,6 +823,7 @@ class PanelDatabase:
         }
 
     async def get_dashboard_data(self) -> dict[str, Any]:
+        await self._ensure_connected()
         bots = []
         for bot in MUSIC_BOTS:
             try:
@@ -791,21 +871,6 @@ class PanelDatabase:
                         aria_heartbeat_age = row["age"]
                         aria_heartbeat_status = row["status"]
                     try:
-                        await cur.execute(
-                            """
-                            CREATE TABLE IF NOT EXISTS `discord_aria`.`aria_interactions` (
-                                id INT AUTO_INCREMENT PRIMARY KEY,
-                                guild_id BIGINT NULL,
-                                channel_id BIGINT NULL,
-                                user_id BIGINT NULL,
-                                user_name VARCHAR(150) NULL,
-                                interaction_type VARCHAR(32) NOT NULL DEFAULT 'chat',
-                                prompt_text TEXT,
-                                response_text TEXT,
-                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                            )
-                            """
-                        )
                         await cur.execute(
                             "SELECT COUNT(*) AS total FROM `discord_aria`.`aria_interactions`"
                         )
@@ -899,8 +964,7 @@ class PanelDatabase:
 
     async def get_metrics_snapshot(self) -> dict[str, Any]:
         """Aggregate bot-written voice persistence and runtime metrics for the panel."""
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+        await self._ensure_connected()
 
         bots: list[dict[str, Any]] = []
         totals = {
@@ -1018,8 +1082,7 @@ class PanelDatabase:
 
 
     async def get_recent_aria_medic_events(self, limit: int = 25) -> list[dict[str, Any]]:
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+        await self._ensure_connected()
 
         bounded_limit = max(1, min(int(limit), 50))
         events: list[dict[str, Any]] = []
@@ -1073,8 +1136,7 @@ class PanelDatabase:
 
 
     async def get_recent_bot_error_events(self, limit: int = 50) -> list[dict[str, Any]]:
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+        await self._ensure_connected()
 
         per_bot_limit = max(3, min(25, int(limit // max(len(MUSIC_BOTS), 1)) + 2))
         events: list[dict[str, Any]] = []
@@ -1128,22 +1190,29 @@ class PanelDatabase:
         table = _validate_identifier(table, "table")
         if schema in SYSTEM_SCHEMAS:
             raise ValueError(f"Refusing operation on system schema: {schema}")
+        await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SET FOREIGN_KEY_CHECKS = 0")
-                await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table}`")
-                await cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+                try:
+                    await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table}`")
+                finally:
+                    await cur.execute("SET FOREIGN_KEY_CHECKS = 1")
 
     async def truncate_schema(self, schema: str) -> dict[str, Any]:
         schema = _validate_identifier(schema, "schema")
         if schema in SYSTEM_SCHEMAS:
             raise ValueError(f"Refusing operation on system schema: {schema}")
+        await self._ensure_connected()
         tables = await self.list_tables(schema)
-        for table in tables:
-            async with self.pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("SET FOREIGN_KEY_CHECKS = 0")
-                    await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table['table_name']}`")
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SET FOREIGN_KEY_CHECKS = 0")
+                try:
+                    for table in tables:
+                        table_name = _validate_identifier(table["table_name"], "table")
+                        await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table_name}`")
+                finally:
                     await cur.execute("SET FOREIGN_KEY_CHECKS = 1")
         return {"schema": schema, "truncated_tables": len(tables), "tables": [t["table_name"] for t in tables]}
 
@@ -1152,9 +1221,8 @@ class PanelDatabase:
         table = _validate_identifier(table, "table")
         if schema in SYSTEM_SCHEMAS:
             raise ValueError(f"Refusing operation on system schema: {schema}")
-            
-        if not self.pool:
-            raise RuntimeError("Database pool not initialized")
+
+        await self._ensure_connected()
 
         async with self.pool.acquire() as conn:
             # Use DictCursor so the frontend gets column names alongside the values
@@ -1196,6 +1264,7 @@ class PanelDatabase:
 
         result: dict[str, Any] = {"action": action, "command": action}
 
+        await self._ensure_connected()
         async with self.pool.acquire() as conn:
             # Explicit DictCursor fixes Shuffle crashes, explicit commit fixes silent rollbacks
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -1365,7 +1434,7 @@ class PanelDatabase:
                         f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
                         "id INT AUTO_INCREMENT PRIMARY KEY, "
                         "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
-                        "command VARCHAR(50), data TEXT)"
+                        "command VARCHAR(50), data TEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL)"
                     )
                     await cur.execute(
                         f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_overrides` "
@@ -1376,8 +1445,8 @@ class PanelDatabase:
                         (gid, bot_key),
                     )
                     await cur.execute(
-                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s",
-                        (gid, bot_key),
+                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s AND command = %s",
+                        (gid, bot_key, action),
                     )
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
@@ -1387,6 +1456,25 @@ class PanelDatabase:
                     )
                     result["message"] = f"Queued a direct PLAY order for {bot.display_name} in guild {gid}."
 
+                elif action == "RECOVER":
+                    recover_voice_channel_id = 0
+                    if isinstance(payload, dict):
+                        raw_recover_vc = payload.get("voice_channel_id") or payload.get("vc_id")
+                        recover_voice_channel_id = _coerce_int(raw_recover_vc, "voice_channel_id") if raw_recover_vc not in (None, "", 0, "0") else 0
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
+                        "id INT AUTO_INCREMENT PRIMARY KEY, "
+                        "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
+                        "command VARCHAR(50), data TEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL)"
+                    )
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
+                        "(bot_name, guild_id, vc_id, text_channel_id, command, data) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (bot_key, gid, recover_voice_channel_id, 0, "RECOVER", "panel"),
+                    )
+                    result["message"] = f"Queued a direct RECOVER order for {bot.display_name} in guild {gid}."
+
                 elif action == "LEAVE":
                     force_leave = False
                     if isinstance(payload, dict):
@@ -1395,11 +1483,11 @@ class PanelDatabase:
                         f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
                         "id INT AUTO_INCREMENT PRIMARY KEY, "
                         "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
-                        "command VARCHAR(50), data TEXT)"
+                        "command VARCHAR(50), data TEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL)"
                     )
                     await cur.execute(
-                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s",
-                        (gid, bot_key),
+                        f"DELETE FROM `{schema}`.`{prefix}_swarm_direct_orders` WHERE guild_id = %s AND bot_name = %s AND command = %s",
+                        (gid, bot_key, action),
                     )
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "

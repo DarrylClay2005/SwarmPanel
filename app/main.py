@@ -46,7 +46,7 @@ action_logger = logging.getLogger("swarm_panel.actions")
 background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
-VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME"}
+VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER"}
 
 
 def _validate_discord_webhook_url(value: Any) -> str:
@@ -194,15 +194,12 @@ async def lifespan(_: FastAPI):
     try:
         await db.connect()
     except Exception as exc:
-        logging.getLogger("swarm_panel").warning("Initial DB connection failed at startup: %s", exc)
+        logging.getLogger("swarm_panel").exception("Initial DB connection failed at startup; endpoints will retry lazily.")
     await discord_service.connect()
     await diagnostics_service.connect()
     background_tasks.clear()
-    background_tasks.extend(
-        [
-            asyncio.create_task(command_worker(), name="swarm_panel_command_worker"),
-        ]
-    )
+    # Commands execute directly through /api/bots/control. The old command_queue
+    # worker is intentionally not started because no endpoint enqueues work.
     recent_feed_events.append(
         _feed_event(
             "info",
@@ -725,7 +722,6 @@ async def api_bot_control_legacy(request: Request, req: BotControlRequest):
 async def api_bot_control_legacy_alt(request: Request, req: BotControlRequest):
     return await api_bot_control(request, req)
 active_connections=[]
-command_queue=asyncio.Queue()
 bot_health={}
 recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
 
@@ -748,17 +744,23 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
+        try:
+            active_connections.remove(websocket)
+        except ValueError:
+            pass
 
 async def broadcast(data: dict):
     dead=[]
-    for ws in active_connections:
+    for ws in list(active_connections):
         try:
             await ws.send_text(json.dumps(data))
         except Exception:
             dead.append(ws)
     for ws in dead:
-        active_connections.remove(ws)
+        try:
+            active_connections.remove(ws)
+        except ValueError:
+            pass
 
 
 async def push_feed_event(
@@ -842,16 +844,9 @@ async def execute_bot_command(cmd: dict):
     )
 
 async def command_worker():
-    while True:
-        cmd = await command_queue.get()
-        try:
-            if not getattr(db, "pool", None):
-                await db.connect()
-            await execute_bot_command(cmd)
-        except Exception as e:
-            await push_feed_event("error", "Command Error", str(e), source="worker")
-        finally:
-            command_queue.task_done()
+    # Retained for compatibility with old imports, but intentionally disabled.
+    # The live panel dispatches bot commands synchronously through api_bot_control.
+    return
 
 def verify_token(token: str = Header(None)):
     if token != os.getenv("PANEL_API_KEY"):
