@@ -11,6 +11,7 @@ PAGES_URL="${PANEL_PAGES_PUBLIC_URL:-https://darrylclay2005.github.io/SwarmPanel
 LOG_DIR="${ROOT_DIR}/.runtime"
 UVICORN_LOG="${LOG_DIR}/uvicorn.log"
 TUNNEL_LOG="${LOG_DIR}/cloudflared.log"
+AUTO_PUSH_CONFIG="${PANEL_AUTO_PUSH_CONFIG:-1}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
 
@@ -22,6 +23,31 @@ write_config() {
   "updated_at": "$(date -Is)"
 }
 EOF
+}
+
+run_host_git() {
+  if command -v flatpak-spawn >/dev/null 2>&1; then
+    flatpak-spawn --host git -C "${ROOT_DIR}" "$@"
+  else
+    git -C "${ROOT_DIR}" "$@"
+  fi
+}
+
+publish_config() {
+  if [[ "${AUTO_PUSH_CONFIG}" != "1" ]]; then
+    return
+  fi
+  if ! command -v git >/dev/null 2>&1 && ! command -v flatpak-spawn >/dev/null 2>&1; then
+    echo "Skipping live-config push because git is unavailable." >&2
+    return
+  fi
+  if run_host_git diff --quiet -- live-config.json; then
+    return
+  fi
+  echo "Publishing updated live-config.json to GitHub Pages..."
+  run_host_git add live-config.json
+  run_host_git commit -m "Update live backend URL" -- live-config.json || true
+  run_host_git push origin main || echo "Could not push live-config.json automatically. Push it manually when convenient." >&2
 }
 
 install_python_deps() {
@@ -112,6 +138,7 @@ for _ in {1..80}; do
   PANEL_URL="$(grep -Eo 'https://[-a-zA-Z0-9.]+trycloudflare\.com' "${TUNNEL_LOG}" | tail -1 || true)"
   if [[ -n "${PANEL_URL}" ]]; then
     write_config "${PANEL_URL}"
+    publish_config
     echo
     echo "Live backend URL: ${PANEL_URL}"
     echo "Updated ${CONFIG_FILE}"
