@@ -2,5 +2,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+.bin/
+.runtime/
 .env
 *.log

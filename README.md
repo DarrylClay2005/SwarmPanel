@@ -44,6 +44,9 @@ Web control panel for all 8 music bots plus Aria.
 
 ## Run
 - `uvicorn app.main:app --host 0.0.0.0 --port 8787`
+- Live GitHub Pages backend tunnel:
+  - `scripts/start_live_backend.sh 8000`
+  - Keep the script running while you want the GitHub Pages site connected.
 
 ## Notes
 - Destructive DB actions require explicit confirmation text in the UI.
