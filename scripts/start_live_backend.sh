@@ -51,6 +51,10 @@ publish_config() {
 }
 
 install_python_deps() {
+  if [[ -x "${VENV_DIR}/bin/python" ]] && ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+    echo "Existing virtualenv cannot run pip; rebuilding ${VENV_DIR}..." >&2
+    rm -rf "${VENV_DIR}"
+  fi
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
     python3 -m venv "${VENV_DIR}"
   fi

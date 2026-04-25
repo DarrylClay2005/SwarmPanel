@@ -47,6 +47,9 @@ Web control panel for all 8 music bots plus Aria.
 - Live GitHub Pages backend tunnel:
   - `scripts/start_live_backend.sh 8000`
   - Keep the script running while you want the GitHub Pages site connected.
+- Auto-start the live backend after login/reboot:
+  - `scripts/install_live_backend_service.sh`
+  - Stop/remove it with `scripts/uninstall_live_backend_service.sh`
 
 ## Notes
 - Destructive DB actions require explicit confirmation text in the UI.
