@@ -16,8 +16,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${ROOT_DIR}
-ExecStart=/usr/bin/env bash -lc 'cd "${ROOT_DIR}" && exec ./scripts/start_live_backend.sh 8787'
-ExecStop=/usr/bin/env bash -lc 'cd "${ROOT_DIR}" && ./scripts/stop_live_backend.sh || true'
+ExecStart=/usr/bin/env bash -lc 'cd "${ROOT_DIR}" && exec ./scripts/start_live_tunnel_service.sh 8000'
 Restart=always
 RestartSec=15
 TimeoutStopSec=20

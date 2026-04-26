@@ -50,6 +50,7 @@ Web control panel for all 8 music bots plus Aria.
 - Auto-start the live backend after login/reboot:
   - `scripts/install_live_backend_service.sh`
   - Stop/remove it with `scripts/uninstall_live_backend_service.sh`
+  - The service tunnels the Docker `web_swarmpanel` backend on port `8000` and republishes `live-config.json`.
 
 ## Notes
 - Destructive DB actions require explicit confirmation text in the UI.
