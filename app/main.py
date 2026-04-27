@@ -576,7 +576,9 @@ async def list_bots(request: Request):
             }
             for bot in visible_bots
         ],
-        "invite_bots": [await invite_payload(bot) for bot in ALL_BOTS],
+        # Build identity-backed invite cards concurrently so the panel does not
+        # wait on nine Discord identity requests in series.
+        "invite_bots": list(await asyncio.gather(*(invite_payload(bot) for bot in ALL_BOTS))),
         "scoped_guild_id": scoped_guild_id,
     }
 
