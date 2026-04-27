@@ -12,6 +12,7 @@ const storageFallback = new Map();
 let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
+let inviteCatalogState = [];
 let controlInventoryState = null;
 let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
 let selectedControlState = { botKey: null, guildId: null, loaded: false, data: null };
@@ -39,6 +40,7 @@ let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let currentPanelSession = { role: 'admin', guild_id: null, username: '' };
+let inviteOnlyMode = false;
 let panelAppStarted = false;
 let panelSessionChecked = false;
 let livePositionTickerStarted = false;
@@ -279,6 +281,10 @@ function isAdminSession() {
     return currentPanelSession.role === 'admin';
 }
 
+function isGuildScopedSession() {
+    return !isAdminSession() && Boolean(currentPanelSession.guild_id);
+}
+
 function resolveApiUrl(input) {
     if (!REMOTE_MODE) return input;
     if (typeof input !== 'string') return input;
@@ -431,15 +437,28 @@ function maskSecret(value) {
     return raw;
 }
 
+function activateSwarmTab(target) {
+    const buttons = Array.from(document.querySelectorAll('.swarm-tab'));
+    const panels = Array.from(document.querySelectorAll('.swarm-tab-panel'));
+    if (!target || !buttons.length || !panels.length) return;
+    buttons.forEach(item => item.classList.toggle('active', item.dataset.tabTarget === target));
+    panels.forEach(panel => panel.classList.toggle('active', panel.id === target));
+}
+
 function initTabs() {
     const buttons = Array.from(document.querySelectorAll('.swarm-tab'));
     const panels = Array.from(document.querySelectorAll('.swarm-tab-panel'));
     if (!buttons.length || !panels.length) return;
     buttons.forEach(button => {
+        if (button.dataset.bound === '1') return;
+        button.dataset.bound = '1';
         button.addEventListener('click', () => {
             const target = button.dataset.tabTarget;
-            buttons.forEach(item => item.classList.toggle('active', item === button));
-            panels.forEach(panel => panel.classList.toggle('active', panel.id === target));
+            if (inviteOnlyMode && target !== 'invites-tab') {
+                activateSwarmTab('invites-tab');
+                return;
+            }
+            activateSwarmTab(target);
         });
     });
 }
@@ -967,6 +986,82 @@ function renderOverview(bots, generatedAt = null) {
     }
 }
 
+function updateInviteOnlyMode() {
+    const hasConnectedMusicBot = dashboardBotsState.some(bot => bot.kind === 'music')
+        || botCatalogState.length > 0
+        || inviteCatalogState.some(bot => bot.kind === 'music' && bot.connected_to_session_guild);
+    inviteOnlyMode = isGuildScopedSession() && !hasConnectedMusicBot;
+    document.body.classList.toggle('invite-only-mode', inviteOnlyMode);
+
+    const lockout = document.getElementById('invite-lockout-message');
+    if (lockout) {
+        lockout.hidden = !inviteOnlyMode;
+        lockout.textContent = inviteOnlyMode
+            ? `No swarm bot is connected to guild ${currentPanelSession.guild_id}. Invite at least one bot to unlock the rest of the panel.`
+            : '';
+    }
+
+    const copy = document.getElementById('invite-panel-copy');
+    if (copy) {
+        copy.textContent = inviteOnlyMode
+            ? 'Add a bot to this Discord server, then refresh once Discord finishes the invite.'
+            : 'Add the swarm nodes your server needs, then refresh once Discord finishes the invite.';
+    }
+
+    if (inviteOnlyMode) {
+        activateSwarmTab('invites-tab');
+    }
+}
+
+function renderInviteCatalog() {
+    const grid = document.getElementById('invite-bot-grid');
+    if (!grid) return;
+
+    const bots = inviteCatalogState;
+    if (!bots.length) {
+        grid.innerHTML = '<div class="control-context-empty">Invite metadata is not available yet.</div>';
+        return;
+    }
+
+    grid.innerHTML = bots.map(bot => {
+        const permissions = Array.isArray(bot.permissions) ? bot.permissions : [];
+        const connected = Boolean(bot.connected_to_session_guild);
+        const inviteUrl = bot.invite_url || '';
+        const initial = String(bot.display_name || bot.key || '?').slice(0, 1).toUpperCase();
+        const logo = bot.icon_url
+            ? `<img class="invite-bot-logo-img" src="${escapeHtml(bot.icon_url)}" alt="${escapeHtml(bot.display_name)} logo" loading="lazy" />`
+            : `<span>${escapeHtml(initial)}</span>`;
+        const action = inviteUrl
+            ? `<a class="invite-bot-button" href="${escapeHtml(inviteUrl)}" target="_blank" rel="noopener noreferrer">${connected ? 'Invite Again' : 'Invite Bot'}</a>`
+            : '<span class="invite-bot-button invite-bot-button-disabled">Missing Client ID</span>';
+        const statusLabel = isGuildScopedSession()
+            ? (connected ? 'Connected' : 'Needed')
+            : 'Invite';
+        const statusClass = connected ? 'invite-bot-status' : 'invite-bot-status invite-bot-status-needed';
+
+        return `
+            <article class="invite-bot-card" style="--invite-accent: ${escapeHtml(bot.accent || '#89b4fa')};">
+                <div class="invite-bot-card-head">
+                    <div class="invite-bot-logo">${logo}</div>
+                    <div class="invite-bot-title">
+                        <h3>${escapeHtml(bot.display_name || bot.key)}</h3>
+                        <span>${escapeHtml(bot.kind === 'orchestrator' ? 'Orchestrator' : 'Music worker')}</span>
+                    </div>
+                    <span class="${statusClass}">${escapeHtml(statusLabel)}</span>
+                </div>
+                <p class="invite-bot-summary">${escapeHtml(bot.capability_summary || '')}</p>
+                <div class="invite-bot-permissions">
+                    ${permissions.map(permission => `<span>${escapeHtml(permission)}</span>`).join('')}
+                </div>
+                <div class="invite-bot-footer">
+                    <span class="invite-bot-permission-code">Permissions ${escapeHtml(bot.permission_integer || '0')}</span>
+                    ${action}
+                </div>
+            </article>
+        `;
+    }).join('');
+}
+
 // ================================
 // 📡 FETCH DASHBOARD DATA
 // ================================
@@ -979,6 +1074,7 @@ async function fetchDashboard() {
 
         const bots = data.bots || [];
         dashboardBotsState = bots;
+        updateInviteOnlyMode();
 
         renderOverview(bots, data.generated_at);
         renderBots(bots);
@@ -1652,18 +1748,18 @@ function renderSessions(sessions) {
         const durationLabel = formatDuration(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
         const positionKey = escapeHtml(getSessionRuntimeKey(session));
         row.innerHTML = `
-            <td>${session.bot_display}</td>
-            <td>${session.guild_name || session.guild_id}</td>
-            <td>${channelLabel}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${session.home_channel_id}</div>` : ''}</td>
-            <td>${stateMeta.icon} ${stateMeta.label}</td>
-            <td>${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}</td>
-            <td>${session.filter_mode || "none"}</td>
-            <td>${normalizeLoopMode(session.loop_mode)}</td>
-            <td>${session.queue_count || 0}</td>
-            <td>${escapeHtml(recoverySummary)}</td>
-            <td>${escapeHtml(signalSummary)}</td>
-            <td data-position-key="${positionKey}">${formatDuration(getDisplayPositionSeconds(session))}</td>
-            <td>
+            <td data-label="Bot">${session.bot_display}</td>
+            <td data-label="Guild">${session.guild_name || session.guild_id}</td>
+            <td data-label="Channel">${channelLabel}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${session.home_channel_id}</div>` : ''}</td>
+            <td data-label="Status">${stateMeta.icon} ${stateMeta.label}</td>
+            <td data-label="Track">${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}</td>
+            <td data-label="Filter">${session.filter_mode || "none"}</td>
+            <td data-label="Loop">${normalizeLoopMode(session.loop_mode)}</td>
+            <td data-label="Queue">${session.queue_count || 0}</td>
+            <td data-label="Recovery">${escapeHtml(recoverySummary)}</td>
+            <td data-label="Signals">${escapeHtml(signalSummary)}</td>
+            <td data-label="Position" data-position-key="${positionKey}">${formatDuration(getDisplayPositionSeconds(session))}</td>
+            <td data-label="Actions">
                 <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
                 <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
                 <button class="tbl-btn" data-action="RECOVER" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Recover</button>
@@ -1766,16 +1862,20 @@ async function loadBotSelect() {
         const res = await fetch(`${API_BASE}/bots`);
         if (handle401(res)) return;
         const data = await res.json();
-        const allBots = data.bots || [];
-        botCatalogState = allBots.filter(b => b.kind === 'music');
-        const inventoryOptionsHtml = allBots
+        const visibleBots = data.bots || [];
+        inviteCatalogState = Array.isArray(data.invite_bots) ? data.invite_bots : visibleBots;
+        botCatalogState = visibleBots.filter(b => b.kind === 'music');
+        renderInviteCatalog();
+        updateInviteOnlyMode();
+
+        const inventoryOptionsHtml = visibleBots
             .map(b => `<option value="${b.key}">${b.display_name}</option>`)
             .join('');
         const controlOptionsHtml = botCatalogState
             .map(b => `<option value="${b.key}">${b.display_name}</option>`)
             .join('');
-        sel.innerHTML = inventoryOptionsHtml;
-        if (controlSel) controlSel.innerHTML = controlOptionsHtml;
+        sel.innerHTML = inventoryOptionsHtml || '<option value="">No connected bots</option>';
+        if (controlSel) controlSel.innerHTML = controlOptionsHtml || '<option value="">No connected music bots</option>';
         if (sel.value) {
             loadInventory();
         }
@@ -1788,6 +1888,7 @@ async function loadBotSelect() {
         renderSelectedGuildMatrix();
     } catch (err) {
         console.error("❌ Failed to load bot list:", err);
+        renderInviteCatalog();
     }
 }
 
@@ -3224,6 +3325,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('refresh-dashboard')
         ?.addEventListener('click', fetchDashboard);
+
+    document.getElementById('refresh-invite-catalog')
+        ?.addEventListener('click', () => {
+            loadBotSelect();
+            fetchDashboard();
+        });
 
     document.getElementById('refresh-diagnostics')
         ?.addEventListener('click', () => fetchDiagnostics(true));

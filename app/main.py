@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -29,7 +30,16 @@ from .auth import (
     verify_api_token,
     verify_credentials,
 )
-from .bots import ALL_BOTS, BOT_INDEX, MUSIC_BOTS
+from .bots import (
+    ALL_BOTS,
+    BOT_ACCENTS,
+    BOT_CAPABILITY_SUMMARIES,
+    BOT_INDEX,
+    MUSIC_BOTS,
+    invite_url_for_bot,
+    permission_value,
+    permissions_for_bot,
+)
 from .config import load_settings
 from .database import PanelDatabase
 from .diagnostics import RuntimeDiagnosticsService
@@ -123,6 +133,16 @@ def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
     return str(guild_id) if guild_id not in (None, "") else None
 
 
+def _client_id_from_token(token: str) -> str | None:
+    token_head = str(token or "").split(".", 1)[0].strip()
+    if not token_head:
+        return None
+    try:
+        return base64.urlsafe_b64decode(token_head + ("=" * (-len(token_head) % 4))).decode().strip()
+    except Exception:
+        return None
+
+
 def _require_admin_auth(request: Request) -> dict[str, Any]:
     auth = _require_api_auth(request)
     if not _is_admin_auth(auth):
@@ -204,12 +224,6 @@ async def _ensure_registerable_guild(guild_id: str | int) -> str:
         guild_id_text = str(int(str(guild_id).strip()))
     except (TypeError, ValueError):
         raise ValueError("Guild ID must be a Discord server ID number.") from None
-    checks = await asyncio.gather(
-        *(_bot_has_registered_guild(bot.key, guild_id_text) for bot in MUSIC_BOTS),
-        return_exceptions=True,
-    )
-    if not any(ok is True for ok in checks):
-        raise ValueError("No configured music bot is currently in that guild. Check the guild ID or invite a swarm bot first.")
     return guild_id_text
 
 
@@ -512,10 +526,44 @@ async def api_health(request: Request):
 @app.get("/api/bots")
 async def list_bots(request: Request):
     auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
     visible_music_bots = await _visible_music_bots_for_auth(auth)
     visible_bots = [*visible_music_bots]
     if _is_admin_auth(auth):
         visible_bots.append(BOT_INDEX["aria"])
+    visible_keys = {bot.key for bot in visible_bots}
+
+    async def invite_payload(bot) -> dict[str, Any]:
+        token = settings.bot_tokens.get(bot.key, "")
+        client_id = _client_id_from_token(token)
+        identity: dict[str, Any] = {}
+        if token:
+            try:
+                identity = await discord_service.fetch_identity(token)
+                client_id = identity.get("id") or client_id
+            except Exception as exc:
+                identity = {"error": str(exc)}
+        permissions = permissions_for_bot(bot)
+        permission_integer = permission_value(permissions)
+        return {
+            "key": bot.key,
+            "display_name": bot.display_name,
+            "name": bot.display_name,
+            "kind": bot.kind,
+            "schema": bot.db_schema,
+            "token_configured": bool(token),
+            "client_id": client_id,
+            "invite_url": invite_url_for_bot(client_id, permission_integer, scoped_guild_id) if client_id else None,
+            "permission_integer": str(permission_integer),
+            "permissions": permissions,
+            "capability_summary": BOT_CAPABILITY_SUMMARIES.get(bot.kind, "Discord bot with slash commands and server tools."),
+            "accent": BOT_ACCENTS.get(bot.key, "#89b4fa"),
+            "connected_to_session_guild": bool(scoped_guild_id and bot.key in visible_keys),
+            "icon_url": identity.get("avatar_url"),
+            "identity_name": identity.get("global_name") or identity.get("username"),
+            "identity_error": identity.get("error"),
+        }
+
     return {
         "bots": [
             {
@@ -527,7 +575,9 @@ async def list_bots(request: Request):
                 "token_configured": bool(settings.bot_tokens.get(bot.key)),
             }
             for bot in visible_bots
-        ]
+        ],
+        "invite_bots": [await invite_payload(bot) for bot in ALL_BOTS],
+        "scoped_guild_id": scoped_guild_id,
     }
 
 

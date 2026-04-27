@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=13" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=15" />
 </head>
 <body>
   <header class="topbar">
@@ -68,8 +68,23 @@
     <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
     <button class="swarm-tab admin-only" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
+    <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
+
+  <div class="swarm-tab-panel" id="invites-tab">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Invite Bots</h2>
+          <p class="muted" id="invite-panel-copy">Add the swarm nodes your server needs, then refresh once Discord finishes the invite.</p>
+        </div>
+        <button id="refresh-invite-catalog" type="button">Refresh Invites</button>
+      </div>
+      <div id="invite-lockout-message" class="invite-lockout-message" hidden></div>
+      <div id="invite-bot-grid" class="invite-bot-grid"></div>
+    </section>
+  </div>
 
   <div class="swarm-tab-panel active" id="overview-tab">
     <section class="panel deck-panel">
@@ -107,7 +122,7 @@
       <h3 style="color: #89b4fa; margin-bottom: 8px; border-bottom: 1px solid #283042; padding-bottom: 5px;">🎶 Swarm Worker Nodes</h3>
       <div id="bot-cards" class="cards"></div>
       <div class="table-wrap">
-        <table>
+        <table class="sessions-table">
           <thead>
             <tr>
               <th>Bot</th>
@@ -372,6 +387,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=13"></script>
+  <script src="./app/static/final_app.js?v=15"></script>
 </body>
 </html>

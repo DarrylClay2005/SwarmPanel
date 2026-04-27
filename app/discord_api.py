@@ -94,11 +94,15 @@ class DiscordInventoryService:
 
     async def fetch_identity(self, token: str) -> dict[str, Any]:
         data = await self._cached_request(token, "/users/@me")
+        user_id = str(data.get("id")) if data.get("id") else None
+        avatar = data.get("avatar")
         return {
-            "id": str(data.get("id")) if data.get("id") else None,
+            "id": user_id,
             "username": data.get("username"),
             "global_name": data.get("global_name"),
             "discriminator": data.get("discriminator"),
+            "avatar": avatar,
+            "avatar_url": f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.png?size=128" if user_id and avatar else None,
         }
 
     async def fetch_guilds(self, token: str) -> list[dict[str, Any]]:
