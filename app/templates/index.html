@@ -4,22 +4,27 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
-  <link rel="stylesheet" href="/static/styles.css?v=9" />
+  <link rel="stylesheet" href="/static/styles.css?v=12" />
 </head>
-<body>
+<body class="{% if session_role != 'admin' and session_guild_id %}guild-scoped-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
-    <form method="post" action="/logout">
-      <button type="submit">Logout</button>
-    </form>
+    <div class="topbar-actions">
+      <span class="topbar-status" data-tone="idle">
+        {{ session_username }}{% if session_role != "admin" and session_guild_id %} · Guild {{ session_guild_id }}{% endif %}
+      </span>
+      <form method="post" action="/logout">
+        <button type="submit">Logout</button>
+      </form>
+    </div>
   </header>
 
   <main class="container">
   <nav class="swarm-tabs" aria-label="Swarm sections">
     <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
-    <button class="swarm-tab" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
+    <button class="swarm-tab admin-only" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
-    <button class="swarm-tab" data-tab-target="intel-tab" type="button">Intel + Errors</button>
+    <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
   <div class="swarm-tab-panel active" id="overview-tab">
@@ -192,7 +197,7 @@
             <button class="control-action-btn" data-panel-action="LEAVE" type="button">Leave Voice</button>
             <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
             <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
-            <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
+            <button class="control-action-btn admin-only" data-panel-action="RESTART" type="button">Restart Bot</button>
           </div>
 
           <div id="control-status" class="status"></div>
@@ -262,7 +267,7 @@
       <div id="inventory-output" class="inventory-browser"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel admin-only">
       <h2>Database Controls</h2>
       <p class="muted">Danger zone: clear one table or clear an entire schema.</p>
       <div class="row">
@@ -319,6 +324,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=9"></script>
+  <script src="/static/final_app.js?v=12"></script>
 </body>
 </html>

@@ -20,6 +20,9 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
     SESSION_AUTH_KEY,
+    SESSION_GUILD_ID_KEY,
+    SESSION_ROLE_KEY,
+    SESSION_USERNAME_KEY,
     extract_bearer_token,
     get_api_auth,
     is_authenticated,
@@ -74,6 +77,12 @@ class TruncateSchemaRequest(BaseModel):
 class SessionLoginRequest(BaseModel):
     username: str
     password: str
+    guild_id: str | int | None = None
+
+
+class SessionRegisterRequest(BaseModel):
+    username: str
+    guild_id: str | int
 
 
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
@@ -101,6 +110,102 @@ def _require_api_auth(request: Request) -> dict[str, Any]:
         secret_key=settings.session_secret,
         max_age_seconds=settings.api_token_ttl_seconds,
     )
+
+
+def _is_admin_auth(auth: dict[str, Any] | None) -> bool:
+    if not auth:
+        return False
+    return str(auth.get("role") or "admin").lower() == "admin" and not auth.get("guild_id")
+
+
+def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
+    if _is_admin_auth(auth):
+        return None
+    guild_id = auth.get("guild_id") if auth else None
+    return str(guild_id) if guild_id not in (None, "") else None
+
+
+def _require_admin_auth(request: Request) -> dict[str, Any]:
+    auth = _require_api_auth(request)
+    if not _is_admin_auth(auth):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return auth
+
+
+def _require_guild_scope(auth: dict[str, Any], guild_id: str | int | None) -> None:
+    scoped = _scoped_guild_id(auth)
+    if scoped and str(guild_id) != scoped:
+        raise HTTPException(status_code=403, detail="This account can only control its registered guild")
+
+
+def _set_admin_session(request: Request, username: str) -> None:
+    request.session[SESSION_AUTH_KEY] = True
+    request.session[SESSION_USERNAME_KEY] = username
+    request.session[SESSION_ROLE_KEY] = "admin"
+    request.session.pop(SESSION_GUILD_ID_KEY, None)
+
+
+def _set_account_session(request: Request, username: str, guild_id: str | int) -> None:
+    request.session[SESSION_AUTH_KEY] = True
+    request.session[SESSION_USERNAME_KEY] = username
+    request.session[SESSION_ROLE_KEY] = "account"
+    request.session[SESSION_GUILD_ID_KEY] = str(guild_id)
+
+
+async def _authenticate_login(username: str, password: str = "", guild_id: str | int | None = None) -> dict[str, Any] | None:
+    if verify_credentials(username, password, settings.admin_username, settings.admin_password):
+        return {"username": username, "role": "admin", "guild_id": None}
+
+    account_guild_id = guild_id if guild_id not in (None, "") else password
+    if account_guild_id in (None, ""):
+        return None
+    try:
+        account = await db.authenticate_account_login(username, account_guild_id)
+    except ValueError:
+        return None
+    if not account:
+        return None
+    return {"username": account["username"], "role": "account", "guild_id": account["guild_id"]}
+
+
+async def _bot_has_registered_guild(bot_key: str, guild_id: str | int) -> bool:
+    bot = BOT_INDEX.get(bot_key)
+    if not bot or bot.kind != "music":
+        return False
+
+    try:
+        known_guilds = await db.get_known_guild_ids(bot_key)
+        if int(guild_id) in known_guilds:
+            return True
+    except Exception:
+        pass
+
+    token = settings.bot_tokens.get(bot_key, "").strip()
+    if not token:
+        return False
+    try:
+        guilds = await discord_service.fetch_guilds(token)
+        return any(str(guild.get("id")) == str(guild_id) for guild in guilds)
+    except Exception:
+        return False
+
+
+async def _visible_music_bots_for_auth(auth: dict[str, Any]) -> list:
+    scoped = _scoped_guild_id(auth)
+    if not scoped:
+        return list(MUSIC_BOTS)
+    checks = await asyncio.gather(
+        *(_bot_has_registered_guild(bot.key, scoped) for bot in MUSIC_BOTS),
+        return_exceptions=True,
+    )
+    return [bot for bot, ok in zip(MUSIC_BOTS, checks) if ok is True]
+
+
+async def _require_bot_guild_access(auth: dict[str, Any], bot_key: str, guild_id: str | int) -> None:
+    _require_guild_scope(auth, guild_id)
+    scoped = _scoped_guild_id(auth)
+    if scoped and not await _bot_has_registered_guild(bot_key, scoped):
+        raise HTTPException(status_code=403, detail="This bot is not registered with your guild")
 
 
 def _coerce_control_int(value: Any, field_name: str) -> int:
@@ -240,20 +345,52 @@ def _redirect_login() -> RedirectResponse:
 async def login_page(request: Request):
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"error": None})
+    return templates.TemplateResponse(request, "login.html", {"error": None, "register_error": None})
 
 
 @app.post("/login")
-async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
-    if verify_credentials(username, password, settings.admin_username, settings.admin_password):
-        request.session[SESSION_AUTH_KEY] = True
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(""),
+    guild_id: str = Form(""),
+):
+    auth = await _authenticate_login(username, password, guild_id)
+    if auth:
+        if auth["role"] == "admin":
+            _set_admin_session(request, auth["username"])
+        else:
+            _set_account_session(request, auth["username"], auth["guild_id"])
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"error": "Invalid username or password"},
+        {"error": "Invalid username or guild ID", "register_error": None},
         status_code=401,
     )
+
+
+@app.post("/register")
+async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...)):
+    try:
+        account = await db.register_account_login(username, guild_id)
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": str(exc)},
+            status_code=400,
+        )
+    except Exception as exc:
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": f"Registration failed: {exc}"},
+            status_code=503,
+        )
+
+    _set_account_session(request, account["username"], account["guild_id"])
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/logout")
@@ -266,7 +403,11 @@ async def logout(request: Request):
 async def index(request: Request):
     if not is_authenticated(request):
         return _redirect_login()
-    return templates.TemplateResponse(request, "index.html", {})
+    return templates.TemplateResponse(request, "index.html", {
+        "session_username": request.session.get(SESSION_USERNAME_KEY) or settings.admin_username,
+        "session_role": request.session.get(SESSION_ROLE_KEY) or "admin",
+        "session_guild_id": request.session.get(SESSION_GUILD_ID_KEY),
+    })
 
 
 @app.get("/api/session")
@@ -276,11 +417,15 @@ async def api_session_status(request: Request):
         return {"authenticated": False, "pages_public_url": settings.pages_public_url}
 
     username = auth.get("username") or settings.admin_username
+    role = auth.get("role") or "admin"
+    guild_id = auth.get("guild_id")
     return {
         "authenticated": True,
         "mode": auth.get("mode") or "token",
         "username": username,
-        "token": issue_api_token(settings.session_secret, username),
+        "role": role,
+        "guild_id": str(guild_id) if guild_id else None,
+        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=guild_id),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -288,15 +433,51 @@ async def api_session_status(request: Request):
 
 @app.post("/api/session/login")
 async def api_session_login(request: Request, payload: SessionLoginRequest):
-    if not verify_credentials(payload.username, payload.password, settings.admin_username, settings.admin_password):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
+    auth = await _authenticate_login(payload.username, payload.password, payload.guild_id)
+    if not auth:
+        raise HTTPException(status_code=401, detail="Invalid username, password, or guild ID")
 
-    request.session[SESSION_AUTH_KEY] = True
-    token = issue_api_token(settings.session_secret, payload.username)
+    if auth["role"] == "admin":
+        _set_admin_session(request, auth["username"])
+    else:
+        _set_account_session(request, auth["username"], auth["guild_id"])
+    token = issue_api_token(
+        settings.session_secret,
+        auth["username"],
+        role=auth["role"],
+        guild_id=auth.get("guild_id"),
+    )
     return {
         "ok": True,
         "token": token,
-        "username": payload.username,
+        "username": auth["username"],
+        "role": auth["role"],
+        "guild_id": auth.get("guild_id"),
+        "pages_public_url": settings.pages_public_url,
+        "expires_in": settings.api_token_ttl_seconds,
+    }
+
+
+@app.post("/api/session/register")
+async def api_session_register(request: Request, payload: SessionRegisterRequest):
+    try:
+        account = await db.register_account_login(payload.username, payload.guild_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    _set_account_session(request, account["username"], account["guild_id"])
+    token = issue_api_token(
+        settings.session_secret,
+        account["username"],
+        role="account",
+        guild_id=account["guild_id"],
+    )
+    return {
+        "ok": True,
+        "token": token,
+        "username": account["username"],
+        "role": "account",
+        "guild_id": account["guild_id"],
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -316,7 +497,11 @@ async def api_health(request: Request):
 
 @app.get("/api/bots")
 async def list_bots(request: Request):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
+    visible_music_bots = await _visible_music_bots_for_auth(auth)
+    visible_bots = [*visible_music_bots]
+    if _is_admin_auth(auth):
+        visible_bots.append(BOT_INDEX["aria"])
     return {
         "bots": [
             {
@@ -327,14 +512,15 @@ async def list_bots(request: Request):
                 "schema": bot.db_schema,
                 "token_configured": bool(settings.bot_tokens.get(bot.key)),
             }
-            for bot in ALL_BOTS
+            for bot in visible_bots
         ]
     }
 
 
 @app.get("/api/dashboard")
 async def dashboard_data(request: Request):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
     try:
         data = await db.get_dashboard_data()
     except Exception as exc:
@@ -357,6 +543,23 @@ async def dashboard_data(request: Request):
                 for bot in ALL_BOTS
             ],
         }
+
+    if scoped_guild_id:
+        visible_bot_keys = {bot.key for bot in await _visible_music_bots_for_auth(auth)}
+        scoped_bots = []
+        for bot in data.get("bots", []):
+            if bot.get("kind") != "music" or bot.get("key") not in visible_bot_keys:
+                continue
+            sessions = [
+                session for session in bot.get("sessions", [])
+                if str(session.get("guild_id")) == scoped_guild_id
+            ]
+            bot["sessions"] = sessions
+            bot["known_guild_count"] = 1
+            bot["guild_count"] = 1
+            bot["active_playing_count"] = sum(1 for session in sessions if session.get("is_playing"))
+            scoped_bots.append(bot)
+        data["bots"] = scoped_bots
 
     flattened_sessions: list[dict[str, Any]] = []
     seen_session_keys: set[tuple[str, str]] = set()
@@ -410,13 +613,13 @@ async def dashboard_data(request: Request):
         except Exception as exc:
             bot["discord"]["name_resolution_error"] = str(exc)
 
-    data.setdefault("sessions", flattened_sessions)
+    data["sessions"] = flattened_sessions
     return data
 
 
 @app.get("/api/system-diagnostics")
 async def system_diagnostics(request: Request, force: bool = False):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     try:
         return await diagnostics_service.get_snapshot(force=force)
     except Exception as exc:
@@ -426,10 +629,13 @@ async def system_diagnostics(request: Request, force: bool = False):
 
 @app.get("/api/bots/{bot_key}/inventory")
 async def bot_inventory(request: Request, bot_key: str, include_channels: bool = True):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
     bot = BOT_INDEX.get(bot_key)
     if not bot:
         raise HTTPException(status_code=404, detail="Unknown bot key")
+    scoped_guild_id = _scoped_guild_id(auth)
+    if scoped_guild_id:
+        await _require_bot_guild_access(auth, bot_key, scoped_guild_id)
 
     token = settings.bot_tokens.get(bot_key, "")
     if not token:
@@ -444,8 +650,13 @@ async def bot_inventory(request: Request, bot_key: str, include_channels: bool =
     inventory = await discord_service.fetch_inventory(
         token,
         include_channels=include_channels,
-        guild_hints=guild_hints,
+        guild_hints=[scoped_guild_id] if scoped_guild_id else guild_hints,
     )
+    if scoped_guild_id:
+        inventory["guilds"] = [
+            guild for guild in inventory.get("guilds", [])
+            if str(guild.get("id")) == scoped_guild_id
+        ]
     return {
         "bot": {"key": bot.key, "display_name": bot.display_name, "kind": bot.kind},
         **inventory,
@@ -557,7 +768,8 @@ async def _enrich_control_state_with_discord(control_state: dict[str, Any]) -> d
 
 @app.get("/api/bots/{bot_key}/control-state")
 async def bot_control_state(request: Request, bot_key: str, guild_id: str):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
+    await _require_bot_guild_access(auth, bot_key, guild_id)
     bot = BOT_INDEX.get(bot_key)
     if not bot or bot.kind != "music":
         raise HTTPException(status_code=404, detail="Unknown music bot key")
@@ -574,7 +786,9 @@ async def bot_control_state(request: Request, bot_key: str, guild_id: str):
 
 @app.get("/api/guilds/{guild_id}/control-matrix")
 async def guild_control_matrix(request: Request, guild_id: str):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
+    _require_guild_scope(auth, guild_id)
+    visible_bots = await _visible_music_bots_for_auth(auth)
 
     async def collect(bot) -> dict[str, Any]:
         try:
@@ -584,7 +798,7 @@ async def guild_control_matrix(request: Request, guild_id: str):
             action_logger.warning("Failed control matrix snapshot bot=%s guild=%s: %s", bot.key, guild_id, exc)
             return _control_state_error_payload(bot.key, bot.display_name, guild_id, str(exc))
 
-    bots = await asyncio.gather(*(collect(bot) for bot in MUSIC_BOTS))
+    bots = await asyncio.gather(*(collect(bot) for bot in visible_bots))
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "guild_id": str(guild_id),
@@ -594,7 +808,7 @@ async def guild_control_matrix(request: Request, guild_id: str):
 
 @app.get("/api/databases")
 async def databases(request: Request, include_tables: bool = False):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     try:
         schemas = await db.list_schemas()
     except Exception as exc:
@@ -610,7 +824,7 @@ async def databases(request: Request, include_tables: bool = False):
 
 @app.get("/api/databases/{schema}/tables")
 async def tables(request: Request, schema: str):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     try:
         return {"schema": schema, "tables": await db.list_tables(schema)}
     except Exception as exc:
@@ -619,7 +833,7 @@ async def tables(request: Request, schema: str):
 
 @app.post("/api/database/truncate-table")
 async def truncate_table(request: Request, payload: TruncateTableRequest):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     expected_confirmation = f"TRUNCATE {payload.schema_name}.{payload.table_name}"
     if payload.confirm_text.strip() != expected_confirmation:
         raise HTTPException(
@@ -636,7 +850,7 @@ async def truncate_table(request: Request, payload: TruncateTableRequest):
 
 @app.post("/api/database/truncate-schema")
 async def truncate_schema(request: Request, payload: TruncateSchemaRequest):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     expected_confirmation = f"TRUNCATE ALL {payload.schema_name}"
     if payload.confirm_text.strip() != expected_confirmation:
         raise HTTPException(
@@ -662,7 +876,7 @@ async def get_table_data(
     table_name: str, 
     limit: int = 100
 ):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     try:
         data = await db.get_table_data(schema_name, table_name, limit)
         return {"ok": True, "data": data}
@@ -695,8 +909,12 @@ class BotControlRequest(BaseModel):
 
 @app.post("/api/bots/control")
 async def api_bot_control(request: Request, req: BotControlRequest):
-    _require_api_auth(request)
+    auth = _require_api_auth(request)
     try:
+        action_name = _normalize_control_action(req.action or req.command or "")
+        if _scoped_guild_id(auth) and action_name == "RESTART":
+            raise HTTPException(status_code=403, detail="Restart is admin-only because it affects the whole bot node")
+        await _require_bot_guild_access(auth, req.bot_key, req.guild_id)
         action, guild_id, payload = await _normalize_bot_control_request(req)
         result = await db.control_bot(req.bot_key, guild_id, action, payload)
         result.setdefault("command", action)
@@ -711,6 +929,8 @@ async def api_bot_control(request: Request, req: BotControlRequest):
     except ValueError as e:
         await push_feed_event("warning", "Invalid Bot Control", str(e), source="api")
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         await push_feed_event("error", "Bot Control Failed", str(e), source="api")
         raise HTTPException(status_code=500, detail=str(e))
@@ -785,7 +1005,7 @@ async def push_feed_event(
 
 @app.get("/api/metrics")
 async def metrics_data(request: Request):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     try:
         return await db.get_metrics_snapshot()
     except Exception as exc:
@@ -803,7 +1023,7 @@ async def metrics_data(request: Request):
 
 @app.get("/api/events")
 async def list_events(request: Request, limit: int = 50):
-    _require_api_auth(request)
+    _require_admin_auth(request)
     bounded_limit = max(1, min(int(limit), 100))
     events = list(recent_feed_events)
     try:

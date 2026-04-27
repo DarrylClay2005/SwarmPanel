@@ -15,6 +15,9 @@ from .config import Settings
 
 logger = logging.getLogger("swarm_panel")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
+ACCOUNT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
+ACCOUNT_LOGIN_SCHEMA = "accountlogins"
+ACCOUNT_LOGIN_TABLE = "users"
 SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
 YOUTUBE_HOSTS = {
     "youtube.com",
@@ -55,6 +58,13 @@ def _coerce_int(value: Any, field_name: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise ValueError(f"Invalid {field_name}: {value!r}") from None
+
+
+def _normalize_account_username(value: Any) -> str:
+    username = str(value or "").strip()
+    if not ACCOUNT_USERNAME_RE.fullmatch(username):
+        raise ValueError("Username must be 2-80 characters using letters, numbers, dots, dashes, or underscores.")
+    return username
 
 
 def _normalize_loop_mode(value: Any) -> str:
@@ -202,7 +212,7 @@ class PanelDatabase:
     async def connect(self) -> None:
         if not self.pool:
             # Create every schema the dashboard can read before the pool opens.
-            startup_schemas = {self.settings.db_default_schema, "discord_aria"}
+            startup_schemas = {self.settings.db_default_schema, "discord_aria", ACCOUNT_LOGIN_SCHEMA}
             startup_schemas.update(bot.db_schema for bot in MUSIC_BOTS if bot.db_schema)
             for schema in sorted(startup_schemas):
                 await self._ensure_schema_exists(schema)
@@ -250,6 +260,21 @@ class PanelDatabase:
                     ), timeout=15)
                 except Exception as exc:
                     logger.warning("Could not ensure discord_aria.aria_interactions: %s", exc)
+                try:
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (
+                            id INT AUTO_INCREMENT PRIMARY KEY,
+                            username VARCHAR(80) NOT NULL UNIQUE,
+                            guild_id BIGINT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            last_login_at TIMESTAMP NULL DEFAULT NULL,
+                            INDEX idx_accountlogins_guild_id (guild_id)
+                        )
+                        """
+                    ), timeout=15)
+                except Exception as exc:
+                    logger.warning("Could not ensure accountlogins.users: %s", exc)
 
     async def close(self) -> None:
         if self.pool:
@@ -303,6 +328,49 @@ class PanelDatabase:
                 ), timeout=15)
             except Exception:
                 pass
+
+    async def register_account_login(self, username: str, guild_id: str | int) -> dict[str, Any]:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        await self._ensure_connected()
+        try:
+            await self._execute(
+                f"""
+                INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (username, guild_id)
+                VALUES (%s, %s)
+                """,
+                (username, gid),
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            if "duplicate" in message or "1062" in message:
+                raise ValueError("That username is already registered.") from exc
+            raise
+        return {"username": username, "guild_id": str(gid)}
+
+    async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        row = await self._fetchone(
+            f"""
+            SELECT username, guild_id
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE username = %s AND guild_id = %s
+            LIMIT 1
+            """,
+            (username, gid),
+        )
+        if not row:
+            return None
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET last_login_at = CURRENT_TIMESTAMP
+            WHERE username = %s AND guild_id = %s
+            """,
+            (username, gid),
+        )
+        return {"username": row["username"], "guild_id": str(row["guild_id"])}
 
     async def _resolve_soundcloud_thumbnail(self, video_url: str | None) -> str | None:
         if not _is_soundcloud_url(video_url):

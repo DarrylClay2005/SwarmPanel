@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=9" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=12" />
 </head>
 <body>
   <header class="topbar">
@@ -29,7 +29,7 @@
         <div class="login-logo-icon">S</div>
         <h1>SwarmPanel Remote</h1>
       </div>
-      <p class="login-subtitle">Connect this GitHub Pages front-end to your live SwarmPanel backend so you can monitor and control the swarm from your phone.</p>
+      <p class="login-subtitle">Connect this GitHub Pages front-end to your live SwarmPanel backend. Use an admin password or a registered account's guild ID.</p>
       <div id="remote-auth-error" class="login-error" style="display:none"></div>
       <div class="stack">
         <div class="login-field">
@@ -38,11 +38,11 @@
         </div>
         <div class="login-field">
           <label for="remote-username">Username</label>
-          <input id="remote-username" type="text" autocomplete="username" placeholder="SwarmPanel admin username" />
+          <input id="remote-username" type="text" autocomplete="username" placeholder="SwarmPanel username" />
         </div>
         <div class="login-field">
-          <label for="remote-password">Password</label>
-          <input id="remote-password" type="password" autocomplete="current-password" placeholder="SwarmPanel admin password" />
+          <label for="remote-password">Password / Guild ID</label>
+          <input id="remote-password" type="password" autocomplete="current-password" placeholder="Admin password or guild ID" />
         </div>
         <button id="remote-login-button" class="login-submit" type="button">Connect To Live Panel</button>
       </div>
@@ -53,9 +53,9 @@
   <main class="container">
   <nav class="swarm-tabs" aria-label="Swarm sections">
     <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
-    <button class="swarm-tab" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
+    <button class="swarm-tab admin-only" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
-    <button class="swarm-tab" data-tab-target="intel-tab" type="button">Intel + Errors</button>
+    <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
   <div class="swarm-tab-panel active" id="overview-tab">
@@ -228,7 +228,7 @@
             <button class="control-action-btn" data-panel-action="LEAVE" type="button">Leave Voice</button>
             <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
             <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
-            <button class="control-action-btn" data-panel-action="RESTART" type="button">Restart Bot</button>
+            <button class="control-action-btn admin-only" data-panel-action="RESTART" type="button">Restart Bot</button>
           </div>
 
           <div id="control-status" class="status"></div>
@@ -298,7 +298,7 @@
       <div id="inventory-output" class="inventory-browser"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel admin-only">
       <h2>Database Controls</h2>
       <p class="muted">Danger zone: clear one table or clear an entire schema.</p>
       <div class="row">
@@ -359,6 +359,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=11"></script>
+  <script src="./app/static/final_app.js?v=12"></script>
 </body>
 </html>

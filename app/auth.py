@@ -5,6 +5,9 @@ from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 
 SESSION_AUTH_KEY = "swarm_panel_authenticated"
+SESSION_USERNAME_KEY = "swarm_panel_username"
+SESSION_ROLE_KEY = "swarm_panel_role"
+SESSION_GUILD_ID_KEY = "swarm_panel_guild_id"
 API_TOKEN_SALT = "swarm_panel_api_token"
 
 
@@ -20,9 +23,12 @@ def extract_bearer_token(authorization_header: str | None) -> str | None:
     return token or None
 
 
-def issue_api_token(secret_key: str, username: str) -> str:
+def issue_api_token(secret_key: str, username: str, *, role: str = "admin", guild_id: str | None = None) -> str:
     serializer = URLSafeTimedSerializer(secret_key, salt=API_TOKEN_SALT)
-    return serializer.dumps({"username": username})
+    payload = {"username": username, "role": role}
+    if guild_id:
+        payload["guild_id"] = str(guild_id)
+    return serializer.dumps(payload)
 
 
 def verify_api_token(token: str | None, secret_key: str, max_age_seconds: int) -> dict | None:
@@ -34,8 +40,9 @@ def verify_api_token(token: str | None, secret_key: str, max_age_seconds: int) -
     except (BadSignature, SignatureExpired):
         return None
     if isinstance(data, dict):
+        data.setdefault("role", "account" if data.get("guild_id") else "admin")
         return data
-    return {"username": str(data)}
+    return {"username": str(data), "role": "admin"}
 
 
 def get_api_auth(
@@ -45,7 +52,16 @@ def get_api_auth(
     max_age_seconds: int,
 ) -> dict | None:
     if is_authenticated(request):
-        return {"mode": "session"}
+        role = request.session.get(SESSION_ROLE_KEY) or "admin"
+        auth = {
+            "mode": "session",
+            "username": request.session.get(SESSION_USERNAME_KEY),
+            "role": role,
+        }
+        guild_id = request.session.get(SESSION_GUILD_ID_KEY)
+        if guild_id:
+            auth["guild_id"] = str(guild_id)
+        return auth
 
     token = extract_bearer_token(request.headers.get("authorization"))
     data = verify_api_token(token, secret_key, max_age_seconds)

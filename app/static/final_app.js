@@ -38,6 +38,7 @@ const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
+let currentPanelSession = { role: 'admin', guild_id: null, username: '' };
 let panelAppStarted = false;
 let panelSessionChecked = false;
 let livePositionTickerStarted = false;
@@ -263,6 +264,19 @@ function setRemoteUsername(value, persist = true) {
         writeStoredValue(REMOTE_USERNAME_KEY, remotePanelUsername);
     }
     return remotePanelUsername;
+}
+
+function setPanelSessionContext(data = {}) {
+    currentPanelSession = {
+        role: data.role || 'admin',
+        guild_id: data.guild_id || null,
+        username: data.username || remotePanelUsername || '',
+    };
+    document.body.classList.toggle('guild-scoped-session', currentPanelSession.role !== 'admin' && Boolean(currentPanelSession.guild_id));
+}
+
+function isAdminSession() {
+    return currentPanelSession.role === 'admin';
 }
 
 function resolveApiUrl(input) {
@@ -535,6 +549,7 @@ async function syncPanelSession() {
         if (data.username) {
             setRemoteUsername(data.username);
         }
+        setPanelSessionContext(data);
         panelSessionChecked = true;
         updateRemoteConnectionStatus(
             REMOTE_MODE
@@ -589,6 +604,7 @@ async function loginRemotePanel() {
         }
 
         setRemoteToken(data.token);
+        setPanelSessionContext(data);
         panelSessionChecked = true;
         updateRemoteConnectionStatus(`Connected to ${remotePanelOrigin}`, 'online');
         hideRemoteAuthShell();
@@ -637,21 +653,29 @@ async function startPanelApplication() {
 
     if (panelAppStarted) {
         fetchDashboard();
-        fetchDiagnostics();
+        if (isAdminSession()) {
+            fetchDiagnostics();
+        }
         loadBotSelect();
-        loadDbSchemas();
-        loadEventFeedHistory();
-        connectEventFeed();
+        if (isAdminSession()) {
+            loadDbSchemas();
+            loadEventFeedHistory();
+            connectEventFeed();
+        }
         return true;
     }
 
     panelAppStarted = true;
     fetchDashboard();
-    fetchDiagnostics();
+    if (isAdminSession()) {
+        fetchDiagnostics();
+    }
     loadBotSelect();
-    loadDbSchemas();
-    loadEventFeedHistory();
-    connectEventFeed();
+    if (isAdminSession()) {
+        loadDbSchemas();
+        loadEventFeedHistory();
+        connectEventFeed();
+    }
     return true;
 }
 
@@ -1530,7 +1554,7 @@ function renderBots(bots) {
             </div>` : ''}
             ${bot.kind !== 'orchestrator' ? `
             <div class="bot-actions">
-                <button class="bot-action-btn bot-btn-restart"
+                <button class="bot-action-btn bot-btn-restart admin-only"
                     data-action="RESTART" data-bot="${bot.key}" data-guild="0">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
                     Restart Node
@@ -3237,12 +3261,12 @@ async function dashboardRefreshLoop() {
 }
 
 async function diagnosticsRefreshLoop() {
-    if (panelAppStarted) await fetchDiagnostics();
+    if (panelAppStarted && isAdminSession()) await fetchDiagnostics();
     diagnosticsRefreshTimer = setTimeout(diagnosticsRefreshLoop, 60000);
 }
 
 async function metricsRefreshLoop() {
-    if (panelAppStarted) await fetchMetrics();
+    if (panelAppStarted && isAdminSession()) await fetchMetrics();
     metricsRefreshTimer = setTimeout(metricsRefreshLoop, 15000);
 }
 

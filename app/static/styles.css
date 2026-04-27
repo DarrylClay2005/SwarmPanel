@@ -95,6 +95,10 @@ body {
   color: var(--text-muted);
 }
 
+.guild-scoped-session .admin-only {
+  display: none !important;
+}
+
 /* ── LAYOUT ── */
 .container {
   max-width: none;
@@ -1441,6 +1445,36 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
 }
 
 .login-submit:active { transform: translateY(0); }
+
+.login-submit-secondary {
+  background: rgba(148,226,213,0.08);
+  border-color: rgba(148,226,213,0.28);
+}
+
+.login-submit-secondary:hover {
+  background: rgba(148,226,213,0.14);
+  border-color: rgba(148,226,213,0.48);
+  box-shadow: 0 8px 24px rgba(148,226,213,0.12);
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px 0 16px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-light);
+}
 
 /* ── ANIMATIONS ── */
 @keyframes pulseGlow {

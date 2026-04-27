@@ -20,7 +20,7 @@
       <div class="login-logo-icon">🎵</div>
       <h1>SwarmPanel</h1>
     </div>
-    <p class="login-subtitle">Sign in to access bot telemetry and controls.</p>
+    <p class="login-subtitle">Sign in with your username and guild ID, or use the admin password.</p>
 
     {% if error %}
     <div class="login-error">
@@ -34,13 +34,40 @@
     <form method="post" action="/login" class="stack">
       <div class="login-field">
         <label for="username">Username</label>
-        <input type="text" id="username" name="username" autocomplete="username" required placeholder="admin" />
+        <input type="text" id="username" name="username" autocomplete="username" required placeholder="your-name" />
       </div>
       <div class="login-field">
-        <label for="password">Password</label>
-        <input type="password" id="password" name="password" autocomplete="current-password" required placeholder="••••••••" />
+        <label for="guild_id">Guild ID</label>
+        <input type="text" id="guild_id" name="guild_id" inputmode="numeric" autocomplete="off" placeholder="123456789012345678" />
+      </div>
+      <div class="login-field">
+        <label for="password">Admin Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" placeholder="admin only" />
       </div>
       <button type="submit" class="login-submit">Sign in</button>
+    </form>
+
+    <div class="login-divider"><span>New guild account</span></div>
+
+    {% if register_error %}
+    <div class="login-error">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ register_error }}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/register" class="stack">
+      <div class="login-field">
+        <label for="register_username">Username</label>
+        <input type="text" id="register_username" name="username" autocomplete="username" required placeholder="your-name" />
+      </div>
+      <div class="login-field">
+        <label for="register_guild_id">Guild ID</label>
+        <input type="text" id="register_guild_id" name="guild_id" inputmode="numeric" autocomplete="off" required placeholder="123456789012345678" />
+      </div>
+      <button type="submit" class="login-submit login-submit-secondary">Register</button>
     </form>
   </main>
 </body>
