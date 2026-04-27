@@ -19,6 +19,7 @@ IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 ACCOUNT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
 ACCOUNT_LOGIN_SCHEMA = "accountlogins"
 ACCOUNT_LOGIN_TABLE = "users"
+ACCOUNT_GUILD_LOCK_TABLE = "guild_locks"
 ACCOUNT_PROFILE_COLUMNS = (
     ("display_name", "VARCHAR(80) NULL"),
     ("avatar_url", "TEXT NULL"),
@@ -291,6 +292,26 @@ class PanelDatabase:
                 except Exception as exc:
                     logger.warning("Could not ensure accountlogins.users: %s", exc)
                 try:
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (
+                            guild_id BIGINT NOT NULL PRIMARY KEY,
+                            username VARCHAR(80) NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    ), timeout=15)
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        INSERT IGNORE INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (guild_id, username)
+                        SELECT guild_id, MIN(username)
+                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                        GROUP BY guild_id
+                        """
+                    ), timeout=15)
+                except Exception as exc:
+                    logger.warning("Could not ensure accountlogins.guild_locks: %s", exc)
+                try:
                     await self._ensure_account_profile_schema(cur)
                 except Exception as exc:
                     logger.warning("Could not ensure account profile columns: %s", exc)
@@ -374,19 +395,51 @@ class PanelDatabase:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
         await self._ensure_connected()
-        try:
-            await self._execute(
-                f"""
-                INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (username, guild_id)
-                VALUES (%s, %s)
-                """,
-                (username, gid),
-            )
-        except Exception as exc:
-            message = str(exc).lower()
-            if "duplicate" in message or "1062" in message:
-                raise ValueError("That username is already registered.") from exc
-            raise
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await asyncio.wait_for(conn.begin(), timeout=15)
+                try:
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        SELECT username, guild_id
+                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                        WHERE username = %s OR guild_id = %s
+                        LIMIT 1
+                        """,
+                        (username, gid),
+                    ), timeout=15)
+                    existing = await asyncio.wait_for(cur.fetchone(), timeout=15)
+                    if existing:
+                        if existing.get("username") == username:
+                            raise ValueError("That username is already registered.")
+                        raise ValueError("That guild ID is already registered to another account.")
+
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (guild_id, username)
+                        VALUES (%s, %s)
+                        """,
+                        (gid, username),
+                    ), timeout=15)
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (username, guild_id)
+                        VALUES (%s, %s)
+                        """,
+                        (username, gid),
+                    ), timeout=15)
+                    await asyncio.wait_for(conn.commit(), timeout=15)
+                except ValueError:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    raise
+                except Exception as exc:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    message = str(exc).lower()
+                    if "duplicate" in message or "1062" in message:
+                        if "guild_locks" in message or str(gid) in message:
+                            raise ValueError("That guild ID is already registered to another account.") from exc
+                        raise ValueError("That username is already registered.") from exc
+                    raise
         return {"username": username, "guild_id": str(gid)}
 
     async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
