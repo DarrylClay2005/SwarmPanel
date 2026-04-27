@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=15" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=17" />
 </head>
 <body>
   <header class="topbar">
@@ -69,6 +69,7 @@
     <button class="swarm-tab admin-only" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
     <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
+    <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
@@ -83,6 +84,163 @@
       </div>
       <div id="invite-lockout-message" class="invite-lockout-message" hidden></div>
       <div id="invite-bot-grid" class="invite-bot-grid"></div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="users-tab">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>User Profile</h2>
+          <p class="muted">Build a public server card for the swarm directory.</p>
+        </div>
+        <button id="refresh-user-directory" type="button">Refresh Users</button>
+      </div>
+      <div class="user-profile-shell">
+        <aside class="user-profile-preview">
+          <div id="user-avatar-preview" class="user-avatar-preview">S</div>
+          <div>
+            <h3 id="user-profile-preview-name">Swarm User</h3>
+            <p id="user-profile-preview-server" class="muted">No server card yet.</p>
+          </div>
+          <div id="user-profile-preview-chips" class="user-chip-row"></div>
+        </aside>
+        <div class="user-profile-editor">
+          <div id="user-profile-locked" class="invite-lockout-message" hidden></div>
+          <div class="user-profile-grid">
+            <label class="control-field">
+              <span>Display Name</span>
+              <input id="profile-display-name" type="text" maxlength="80" placeholder="Your public display name" />
+            </label>
+            <label class="control-field">
+              <span>Avatar URL</span>
+              <input id="profile-avatar-url" type="url" placeholder="https://..." />
+            </label>
+            <label class="control-field">
+              <span>Server Name</span>
+              <input id="profile-server-name" type="text" maxlength="120" placeholder="Your Discord server" />
+            </label>
+            <label class="control-field">
+              <span>Server Icon URL</span>
+              <input id="profile-server-icon-url" type="url" placeholder="https://..." />
+            </label>
+            <label class="control-field">
+              <span>Server Invite</span>
+              <input id="profile-server-invite-url" type="url" placeholder="https://discord.gg/..." />
+            </label>
+            <label class="control-field">
+              <span>Favorite Bot</span>
+              <select id="profile-favorite-bot"></select>
+            </label>
+            <label class="control-field">
+              <span>Accent</span>
+              <input id="profile-theme-accent" type="color" value="#89b4fa" />
+            </label>
+            <label class="control-field user-public-toggle">
+              <span>Public Profile</span>
+              <input id="profile-public-profile" type="checkbox" checked />
+            </label>
+          </div>
+          <label class="control-field control-field-wide">
+            <span>Bio</span>
+            <textarea id="profile-bio" maxlength="280" rows="3" placeholder="Short server vibe, music taste, or community note"></textarea>
+          </label>
+          <div class="row">
+            <button id="save-user-profile" type="button">Save Profile</button>
+            <span id="user-profile-status" class="status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Panel Appearance</h2>
+          <p class="muted">Account-specific look and layout preferences.</p>
+        </div>
+        <button id="reset-panel-preferences" type="button">Reset Look</button>
+      </div>
+      <div class="appearance-grid">
+        <label class="control-field">
+          <span>Accent Color</span>
+          <input id="panel-accent-color" type="color" value="#89b4fa" />
+        </label>
+        <label class="control-field">
+          <span>Background</span>
+          <select id="panel-background-mode">
+            <option value="default">Default</option>
+            <option value="midnight">Midnight</option>
+            <option value="aurora">Aurora</option>
+            <option value="ember">Ember</option>
+            <option value="custom_color">Custom Color</option>
+            <option value="custom_image">Custom Image</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Background Color</span>
+          <input id="panel-background-color" type="color" value="#0b0e18" />
+        </label>
+        <label class="control-field">
+          <span>Background Image URL</span>
+          <input id="panel-background-image-url" type="url" placeholder="https://..." />
+        </label>
+        <label class="control-field">
+          <span>Layout Width</span>
+          <select id="panel-layout-mode">
+            <option value="standard">Standard</option>
+            <option value="focused">Focused</option>
+            <option value="wide">Wide</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Density</span>
+          <select id="panel-density">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Card Shape</span>
+          <select id="panel-card-shape">
+            <option value="soft">Soft</option>
+            <option value="crisp">Crisp</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Font Scale</span>
+          <select id="panel-font-scale">
+            <option value="normal">Normal</option>
+            <option value="large">Large</option>
+            <option value="dense">Dense</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Motion</span>
+          <select id="panel-motion">
+            <option value="standard">Standard</option>
+            <option value="reduced">Reduced</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button id="save-panel-preferences" type="button">Save Look</button>
+        <span id="panel-preferences-status" class="status"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>User Search</h2>
+          <p class="muted">Find public swarm users, server cards, and music activity.</p>
+        </div>
+      </div>
+      <div class="row user-search-row">
+        <input id="user-search-input" type="search" placeholder="Search users, servers, or favorite bots..." />
+        <button id="user-search-button" type="button">Search</button>
+      </div>
+      <div id="user-directory-grid" class="user-directory-grid"></div>
     </section>
   </div>
 
@@ -387,6 +545,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=15"></script>
+  <script src="./app/static/final_app.js?v=17"></script>
 </body>
 </html>

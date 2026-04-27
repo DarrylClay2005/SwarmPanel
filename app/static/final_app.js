@@ -13,6 +13,10 @@ let controlCooldown = false;
 let dashboardBotsState = [];
 let botCatalogState = [];
 let inviteCatalogState = [];
+let userProfileState = { profile: null, editable: false, favoriteBotOptions: [] };
+let userDirectoryState = [];
+let userDirectoryRequestId = 0;
+let panelPreferencesState = {};
 let controlInventoryState = null;
 let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
 let selectedControlState = { botKey: null, guildId: null, loaded: false, data: null };
@@ -49,6 +53,17 @@ const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const centralTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const RUNTIME_SESSION_STATES = new Set(['playing', 'paused', 'queued']);
+const DEFAULT_PANEL_PREFERENCES = {
+    accent_color: '#89b4fa',
+    background_mode: 'default',
+    background_color: '#0b0e18',
+    background_image_url: '',
+    layout_mode: 'standard',
+    density: 'comfortable',
+    card_shape: 'soft',
+    font_scale: 'normal',
+    motion: 'standard',
+};
 
 
 function getSessionRuntimeKey(session) {
@@ -423,6 +438,22 @@ function escapeHtml(value) {
         .replaceAll("'", '&#39;');
 }
 
+function safePublicUrl(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+        const url = new URL(raw);
+        return ['http:', 'https:'].includes(url.protocol) ? url.toString() : '';
+    } catch (_err) {
+        return '';
+    }
+}
+
+function safeHexColor(value, fallback = '#89b4fa') {
+    const raw = String(value || '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
+}
+
 function formatCentralTimestamp(value, withDate = false) {
     if (!value) return '--';
     const date = new Date(value);
@@ -731,6 +762,9 @@ async function startPanelApplication() {
             fetchDiagnostics();
         }
         loadBotSelect();
+        loadUserProfile();
+        loadPanelPreferences();
+        loadUserDirectory();
         if (isAdminSession()) {
             loadDbSchemas();
             loadEventFeedHistory();
@@ -745,6 +779,9 @@ async function startPanelApplication() {
         fetchDiagnostics();
     }
     loadBotSelect();
+    loadUserProfile();
+    loadPanelPreferences();
+    loadUserDirectory();
     if (isAdminSession()) {
         loadDbSchemas();
         loadEventFeedHistory();
@@ -1060,6 +1097,393 @@ function renderInviteCatalog() {
             </article>
         `;
     }).join('');
+}
+
+function normalizePanelPreferences(preferences = {}) {
+    const merged = { ...DEFAULT_PANEL_PREFERENCES, ...(preferences || {}) };
+    const pick = (value, allowed, fallback) => allowed.includes(value) ? value : fallback;
+    return {
+        accent_color: safeHexColor(merged.accent_color, DEFAULT_PANEL_PREFERENCES.accent_color),
+        background_mode: pick(String(merged.background_mode || ''), ['default', 'midnight', 'aurora', 'ember', 'custom_color', 'custom_image'], 'default'),
+        background_color: safeHexColor(merged.background_color, DEFAULT_PANEL_PREFERENCES.background_color),
+        background_image_url: safePublicUrl(merged.background_image_url),
+        layout_mode: pick(String(merged.layout_mode || ''), ['standard', 'focused', 'wide'], 'standard'),
+        density: pick(String(merged.density || ''), ['comfortable', 'compact'], 'comfortable'),
+        card_shape: pick(String(merged.card_shape || ''), ['soft', 'crisp'], 'soft'),
+        font_scale: pick(String(merged.font_scale || ''), ['normal', 'large', 'dense'], 'normal'),
+        motion: pick(String(merged.motion || ''), ['standard', 'reduced'], 'standard'),
+    };
+}
+
+function applyPanelPreferences(preferences = panelPreferencesState) {
+    const prefs = normalizePanelPreferences(preferences);
+    panelPreferencesState = prefs;
+    const root = document.documentElement;
+    root.style.setProperty('--user-panel-accent', prefs.accent_color);
+    root.style.setProperty('--purple', prefs.accent_color);
+    root.style.setProperty('--custom-bg-color', prefs.background_color);
+    root.style.setProperty('--custom-bg-image', prefs.background_image_url ? `url("${prefs.background_image_url.replaceAll('"', '%22')}")` : 'none');
+
+    const body = document.body;
+    const managedClasses = [
+        'panel-bg-default', 'panel-bg-midnight', 'panel-bg-aurora', 'panel-bg-ember', 'panel-bg-custom-color', 'panel-bg-custom-image',
+        'panel-layout-standard', 'panel-layout-focused', 'panel-layout-wide',
+        'panel-density-comfortable', 'panel-density-compact',
+        'panel-shape-soft', 'panel-shape-crisp',
+        'panel-font-normal', 'panel-font-large', 'panel-font-dense',
+        'panel-motion-standard', 'panel-motion-reduced',
+    ];
+    body.classList.remove(...managedClasses);
+    body.classList.add(
+        `panel-bg-${prefs.background_mode.replaceAll('_', '-')}`,
+        `panel-layout-${prefs.layout_mode}`,
+        `panel-density-${prefs.density}`,
+        `panel-shape-${prefs.card_shape}`,
+        `panel-font-${prefs.font_scale}`,
+        `panel-motion-${prefs.motion}`,
+    );
+    return prefs;
+}
+
+function renderPanelPreferenceInputs(preferences = panelPreferencesState) {
+    const prefs = applyPanelPreferences(preferences);
+    const values = {
+        'panel-accent-color': prefs.accent_color,
+        'panel-background-mode': prefs.background_mode,
+        'panel-background-color': prefs.background_color,
+        'panel-background-image-url': prefs.background_image_url || '',
+        'panel-layout-mode': prefs.layout_mode,
+        'panel-density': prefs.density,
+        'panel-card-shape': prefs.card_shape,
+        'panel-font-scale': prefs.font_scale,
+        'panel-motion': prefs.motion,
+    };
+    Object.entries(values).forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element) element.value = value;
+    });
+}
+
+function getPanelPreferencesFromInputs() {
+    return normalizePanelPreferences({
+        accent_color: document.getElementById('panel-accent-color')?.value,
+        background_mode: document.getElementById('panel-background-mode')?.value,
+        background_color: document.getElementById('panel-background-color')?.value,
+        background_image_url: document.getElementById('panel-background-image-url')?.value,
+        layout_mode: document.getElementById('panel-layout-mode')?.value,
+        density: document.getElementById('panel-density')?.value,
+        card_shape: document.getElementById('panel-card-shape')?.value,
+        font_scale: document.getElementById('panel-font-scale')?.value,
+        motion: document.getElementById('panel-motion')?.value,
+    });
+}
+
+function setPanelPreferencesStatus(message = '', isError = false) {
+    const status = document.getElementById('panel-preferences-status');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('error', Boolean(isError));
+}
+
+function setPanelPreferenceControlsDisabled(disabled) {
+    [
+        'panel-accent-color',
+        'panel-background-mode',
+        'panel-background-color',
+        'panel-background-image-url',
+        'panel-layout-mode',
+        'panel-density',
+        'panel-card-shape',
+        'panel-font-scale',
+        'panel-motion',
+        'save-panel-preferences',
+        'reset-panel-preferences',
+    ].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = disabled;
+    });
+}
+
+async function loadPanelPreferences() {
+    try {
+        const res = await fetch(`${API_BASE}/users/preferences`);
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'Preference request failed');
+        }
+        setPanelPreferenceControlsDisabled(!data.editable);
+        renderPanelPreferenceInputs(data.preferences || DEFAULT_PANEL_PREFERENCES);
+    } catch (err) {
+        setPanelPreferencesStatus(err instanceof Error ? err.message : String(err), true);
+        renderPanelPreferenceInputs(panelPreferencesState || DEFAULT_PANEL_PREFERENCES);
+    }
+}
+
+async function savePanelPreferences(preferences = getPanelPreferencesFromInputs()) {
+    setPanelPreferencesStatus('Saving...');
+    renderPanelPreferenceInputs(preferences);
+    const button = document.getElementById('save-panel-preferences');
+    if (button) button.disabled = true;
+    try {
+        const res = await fetch(`${API_BASE}/users/preferences`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(preferences),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'Preference save failed');
+        }
+        renderPanelPreferenceInputs(data.preferences || preferences);
+        setPanelPreferencesStatus('Look saved.');
+    } catch (err) {
+        setPanelPreferencesStatus(err instanceof Error ? err.message : String(err), true);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function resetPanelPreferences() {
+    renderPanelPreferenceInputs(DEFAULT_PANEL_PREFERENCES);
+    setPanelPreferencesStatus('Default look restored locally. Save to keep it.');
+}
+
+function userInitial(profile = {}) {
+    return String(profile.display_name || profile.username || 'S').trim().slice(0, 1).toUpperCase() || 'S';
+}
+
+function renderCircularAvatar(profile = {}, className = 'user-card-avatar') {
+    const avatarUrl = safePublicUrl(profile.avatar_url);
+    const label = escapeHtml(profile.display_name || profile.username || 'User');
+    if (avatarUrl) {
+        return `<img class="${className}" src="${escapeHtml(avatarUrl)}" alt="${label} avatar" loading="lazy" />`;
+    }
+    return `<div class="${className} user-card-avatar-fallback">${escapeHtml(userInitial(profile))}</div>`;
+}
+
+function setUserProfileStatus(message = '', isError = false) {
+    const status = document.getElementById('user-profile-status');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('error', Boolean(isError));
+}
+
+function populateFavoriteBotSelect(options = [], selected = '') {
+    const select = document.getElementById('profile-favorite-bot');
+    if (!select) return;
+    const items = Array.isArray(options) ? options : [];
+    select.innerHTML = [
+        '<option value="">No favorite selected</option>',
+        ...items.map(bot => `<option value="${escapeHtml(bot.key)}">${escapeHtml(bot.display_name || bot.key)}</option>`),
+    ].join('');
+    select.value = selected || '';
+}
+
+function setUserProfileInputsDisabled(disabled) {
+    [
+        'profile-display-name',
+        'profile-avatar-url',
+        'profile-server-name',
+        'profile-server-icon-url',
+        'profile-server-invite-url',
+        'profile-favorite-bot',
+        'profile-theme-accent',
+        'profile-public-profile',
+        'profile-bio',
+        'save-user-profile',
+    ].forEach(id => {
+        const element = document.getElementById(id);
+        if (element) element.disabled = disabled;
+    });
+}
+
+function renderUserProfile(data = userProfileState) {
+    const profile = data.profile || {};
+    const editable = Boolean(data.editable);
+    const preview = document.getElementById('user-avatar-preview');
+    const previewName = document.getElementById('user-profile-preview-name');
+    const previewServer = document.getElementById('user-profile-preview-server');
+    const previewChips = document.getElementById('user-profile-preview-chips');
+    const locked = document.getElementById('user-profile-locked');
+
+    populateFavoriteBotSelect(data.favoriteBotOptions, profile.favorite_bot || '');
+
+    const fieldValues = {
+        'profile-display-name': profile.display_name || '',
+        'profile-avatar-url': profile.avatar_url || '',
+        'profile-server-name': profile.server_name || '',
+        'profile-server-icon-url': profile.server_icon_url || '',
+        'profile-server-invite-url': profile.server_invite_url || '',
+        'profile-theme-accent': profile.theme_accent || '#89b4fa',
+        'profile-bio': profile.bio || '',
+    };
+    Object.entries(fieldValues).forEach(([id, value]) => {
+        const element = document.getElementById(id);
+        if (element) element.value = value;
+    });
+    const publicInput = document.getElementById('profile-public-profile');
+    if (publicInput) publicInput.checked = profile.public_profile !== false;
+
+    const avatarUrl = safePublicUrl(profile.avatar_url);
+    if (preview) {
+        preview.style.setProperty('--user-accent', profile.theme_accent || '#89b4fa');
+        preview.innerHTML = avatarUrl
+            ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(profile.display_name || profile.username || 'User')} avatar" />`
+            : `<span>${escapeHtml(userInitial(profile))}</span>`;
+    }
+    if (previewName) previewName.textContent = profile.display_name || profile.username || 'Swarm User';
+    if (previewServer) previewServer.textContent = profile.server_name || (profile.guild_id ? `Guild ${profile.guild_id}` : 'No server card yet.');
+    if (previewChips) {
+        const chips = [];
+        if (profile.favorite_bot) chips.push(`Favorite: ${profile.favorite_bot}`);
+        chips.push(profile.public_profile === false ? 'Private' : 'Public');
+        if (profile.server_invite_url) chips.push('Invite linked');
+        previewChips.innerHTML = chips.map(chip => `<span>${escapeHtml(chip)}</span>`).join('');
+    }
+    if (locked) {
+        locked.hidden = editable;
+        locked.textContent = editable ? '' : 'Admin sessions can browse users, but only guild accounts can edit a public profile.';
+    }
+    setUserProfileInputsDisabled(!editable);
+}
+
+async function loadUserProfile() {
+    if (!panelAppStarted && !panelSessionChecked) return;
+    try {
+        const res = await fetch(`${API_BASE}/users/me`);
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'Profile request failed');
+        }
+        userProfileState = {
+            profile: data.profile || null,
+            editable: Boolean(data.editable),
+            favoriteBotOptions: Array.isArray(data.favorite_bot_options) ? data.favorite_bot_options : [],
+        };
+        if (data.profile?.panel_preferences) {
+            renderPanelPreferenceInputs(data.profile.panel_preferences);
+        }
+        renderUserProfile(userProfileState);
+    } catch (err) {
+        setUserProfileStatus(String(err), true);
+    }
+}
+
+async function saveUserProfile() {
+    if (!userProfileState.editable) return;
+    const button = document.getElementById('save-user-profile');
+    if (button) button.disabled = true;
+    setUserProfileStatus('Saving...');
+    const payload = {
+        display_name: document.getElementById('profile-display-name')?.value || null,
+        avatar_url: document.getElementById('profile-avatar-url')?.value || null,
+        server_name: document.getElementById('profile-server-name')?.value || null,
+        server_icon_url: document.getElementById('profile-server-icon-url')?.value || null,
+        server_invite_url: document.getElementById('profile-server-invite-url')?.value || null,
+        favorite_bot: document.getElementById('profile-favorite-bot')?.value || null,
+        theme_accent: document.getElementById('profile-theme-accent')?.value || '#89b4fa',
+        public_profile: Boolean(document.getElementById('profile-public-profile')?.checked),
+        bio: document.getElementById('profile-bio')?.value || null,
+    };
+
+    try {
+        const res = await fetch(`${API_BASE}/users/me`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'Profile save failed');
+        }
+        userProfileState.profile = data.profile || userProfileState.profile;
+        renderUserProfile(userProfileState);
+        setUserProfileStatus('Profile saved.');
+        loadUserDirectory();
+    } catch (err) {
+        setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function renderUserDirectory(users = userDirectoryState) {
+    const grid = document.getElementById('user-directory-grid');
+    if (!grid) return;
+    if (!users.length) {
+        grid.innerHTML = '<div class="control-context-empty">No public users found yet.</div>';
+        return;
+    }
+
+    grid.innerHTML = users.map(profile => {
+        const activity = profile.activity || {};
+        const topTracks = Array.isArray(activity.top_tracks) ? activity.top_tracks : [];
+        const topBots = Array.isArray(activity.top_bots) ? activity.top_bots : [];
+        const activeSessions = Array.isArray(activity.active_sessions) ? activity.active_sessions : [];
+        const serverIcon = safePublicUrl(profile.server_icon_url);
+        const inviteUrl = safePublicUrl(profile.server_invite_url);
+        const accent = profile.theme_accent || '#89b4fa';
+        const serverName = profile.server_name || (profile.guild_id ? `Guild ${profile.guild_id}` : 'Linked server');
+        return `
+            <article class="user-card" style="--user-accent: ${escapeHtml(accent)};">
+                <div class="user-card-head">
+                    ${renderCircularAvatar(profile)}
+                    <div class="user-card-title">
+                        <h3>${escapeHtml(profile.display_name || profile.username)}</h3>
+                        <span>@${escapeHtml(profile.username)}</span>
+                    </div>
+                    ${inviteUrl ? `<a class="user-invite-link" href="${escapeHtml(inviteUrl)}" target="_blank" rel="noopener noreferrer">Invite</a>` : ''}
+                </div>
+                <div class="user-server-row">
+                    ${serverIcon ? `<img src="${escapeHtml(serverIcon)}" alt="${escapeHtml(serverName)} icon" loading="lazy" />` : `<span>${escapeHtml(serverName.slice(0, 1).toUpperCase())}</span>`}
+                    <div>
+                        <strong>${escapeHtml(serverName)}</strong>
+                        <small>${escapeHtml(profile.bio || 'No public bio yet.')}</small>
+                    </div>
+                </div>
+                <div class="user-chip-row">
+                    ${profile.favorite_bot ? `<span>Favorite ${escapeHtml(profile.favorite_bot)}</span>` : ''}
+                    <span>${Number(activity.total_plays || 0)} plays tracked</span>
+                    ${activeSessions.length ? '<span>Listening now</span>' : ''}
+                </div>
+                <div class="user-activity-block">
+                    <div class="user-activity-title">Most Played</div>
+                    ${topTracks.length ? topTracks.map(track => `<div class="user-activity-row"><span>${escapeHtml(track.title)}</span><strong>${Number(track.plays || 0)}</strong></div>`).join('') : '<div class="user-empty-line">No track history yet.</div>'}
+                </div>
+                <div class="user-activity-block">
+                    <div class="user-activity-title">Top Bots</div>
+                    ${topBots.length ? topBots.map(bot => `<div class="user-activity-row"><span>${escapeHtml(bot.bot_display || bot.bot_key)}</span><strong>${Number(bot.plays || 0)}</strong></div>`).join('') : '<div class="user-empty-line">No bot plays yet.</div>'}
+                </div>
+                ${activeSessions.length ? `<div class="user-activity-block"><div class="user-activity-title">Now</div>${activeSessions.map(session => `<div class="user-activity-row"><span>${escapeHtml(session.bot_display || session.bot_key)}: ${escapeHtml(session.title || 'Unknown Track')}</span><strong>${session.is_paused ? 'Paused' : 'Live'}</strong></div>`).join('')}</div>` : ''}
+            </article>
+        `;
+    }).join('');
+}
+
+async function loadUserDirectory(query = null) {
+    const requestId = ++userDirectoryRequestId;
+    const searchValue = query ?? document.getElementById('user-search-input')?.value ?? '';
+    const grid = document.getElementById('user-directory-grid');
+    if (grid) grid.innerHTML = '<div class="control-context-empty">Loading public users...</div>';
+    try {
+        const params = new URLSearchParams();
+        if (String(searchValue || '').trim()) params.set('q', String(searchValue).trim());
+        const res = await fetch(`${API_BASE}/users/search${params.toString() ? `?${params.toString()}` : ''}`);
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'User search failed');
+        }
+        if (requestId !== userDirectoryRequestId) return;
+        userDirectoryState = Array.isArray(data.users) ? data.users : [];
+        renderUserDirectory(userDirectoryState);
+    } catch (err) {
+        if (grid) grid.innerHTML = `<div class="control-context-empty">User directory failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</div>`;
+    }
 }
 
 // ================================
@@ -3331,6 +3755,75 @@ document.addEventListener('DOMContentLoaded', () => {
             loadBotSelect();
             fetchDashboard();
         });
+
+    document.getElementById('refresh-user-directory')
+        ?.addEventListener('click', () => {
+            loadUserProfile();
+            loadUserDirectory();
+        });
+
+    document.getElementById('save-user-profile')
+        ?.addEventListener('click', saveUserProfile);
+
+    document.getElementById('save-panel-preferences')
+        ?.addEventListener('click', () => savePanelPreferences());
+
+    document.getElementById('reset-panel-preferences')
+        ?.addEventListener('click', resetPanelPreferences);
+
+    document.getElementById('user-search-button')
+        ?.addEventListener('click', () => loadUserDirectory());
+
+    document.getElementById('user-search-input')
+        ?.addEventListener('keydown', event => {
+            if (event.key === 'Enter') loadUserDirectory();
+        });
+
+    [
+        'profile-display-name',
+        'profile-avatar-url',
+        'profile-server-name',
+        'profile-server-icon-url',
+        'profile-server-invite-url',
+        'profile-favorite-bot',
+        'profile-theme-accent',
+        'profile-public-profile',
+        'profile-bio',
+    ].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', () => {
+            const profile = {
+                ...(userProfileState.profile || {}),
+                display_name: document.getElementById('profile-display-name')?.value || '',
+                avatar_url: document.getElementById('profile-avatar-url')?.value || '',
+                server_name: document.getElementById('profile-server-name')?.value || '',
+                server_icon_url: document.getElementById('profile-server-icon-url')?.value || '',
+                server_invite_url: document.getElementById('profile-server-invite-url')?.value || '',
+                favorite_bot: document.getElementById('profile-favorite-bot')?.value || '',
+                theme_accent: document.getElementById('profile-theme-accent')?.value || '#89b4fa',
+                public_profile: Boolean(document.getElementById('profile-public-profile')?.checked),
+                bio: document.getElementById('profile-bio')?.value || '',
+            };
+            renderUserProfile({ ...userProfileState, profile });
+        });
+    });
+
+    [
+        'panel-accent-color',
+        'panel-background-mode',
+        'panel-background-color',
+        'panel-background-image-url',
+        'panel-layout-mode',
+        'panel-density',
+        'panel-card-shape',
+        'panel-font-scale',
+        'panel-motion',
+    ].forEach(id => {
+        const eventName = id === 'panel-background-image-url' ? 'input' : 'change';
+        document.getElementById(id)?.addEventListener(eventName, () => {
+            renderPanelPreferenceInputs(getPanelPreferencesFromInputs());
+            setPanelPreferencesStatus('Previewing changes. Save to keep them.');
+        });
+    });
 
     document.getElementById('refresh-diagnostics')
         ?.addEventListener('click', () => fetchDiagnostics(true));

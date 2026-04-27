@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 import time
@@ -18,6 +19,20 @@ IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 ACCOUNT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
 ACCOUNT_LOGIN_SCHEMA = "accountlogins"
 ACCOUNT_LOGIN_TABLE = "users"
+ACCOUNT_PROFILE_COLUMNS = (
+    ("display_name", "VARCHAR(80) NULL"),
+    ("avatar_url", "TEXT NULL"),
+    ("bio", "VARCHAR(280) NULL"),
+    ("favorite_bot", "VARCHAR(50) NULL"),
+    ("theme_accent", "VARCHAR(20) NULL"),
+    ("public_profile", "TINYINT(1) NOT NULL DEFAULT 1"),
+    ("server_invite_url", "TEXT NULL"),
+    ("server_name", "VARCHAR(120) NULL"),
+    ("server_icon_url", "TEXT NULL"),
+    ("panel_preferences", "JSON NULL"),
+    ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+)
+ACCOUNT_PROFILE_FIELDS = {name for name, _definition in ACCOUNT_PROFILE_COLUMNS}
 SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
 YOUTUBE_HOSTS = {
     "youtube.com",
@@ -275,6 +290,10 @@ class PanelDatabase:
                     ), timeout=15)
                 except Exception as exc:
                     logger.warning("Could not ensure accountlogins.users: %s", exc)
+                try:
+                    await self._ensure_account_profile_schema(cur)
+                except Exception as exc:
+                    logger.warning("Could not ensure account profile columns: %s", exc)
 
     async def close(self) -> None:
         if self.pool:
@@ -329,6 +348,28 @@ class PanelDatabase:
             except Exception:
                 pass
 
+    async def _ensure_account_profile_schema(self, cur) -> None:
+        for column_name, definition in ACCOUNT_PROFILE_COLUMNS:
+            try:
+                safe_column = _validate_identifier(column_name, "account profile column")
+                await asyncio.wait_for(cur.execute(
+                    f"ALTER TABLE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` "
+                    f"ADD COLUMN `{safe_column}` {definition}"
+                ), timeout=15)
+            except Exception:
+                pass
+        for index_name, columns in (
+            ("idx_accountlogins_public_username", "`public_profile`, `username`"),
+            ("idx_accountlogins_server_name", "`server_name`"),
+        ):
+            try:
+                safe_index = _validate_identifier(index_name, "account profile index")
+                await asyncio.wait_for(cur.execute(
+                    f"CREATE INDEX `{safe_index}` ON `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` ({columns})"
+                ), timeout=15)
+            except Exception:
+                pass
+
     async def register_account_login(self, username: str, guild_id: str | int) -> dict[str, Any]:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
@@ -371,6 +412,212 @@ class PanelDatabase:
             (username, gid),
         )
         return {"username": row["username"], "guild_id": str(row["guild_id"])}
+
+    def _serialize_account_profile(self, row: dict[str, Any]) -> dict[str, Any]:
+        profile = dict(row)
+        if profile.get("guild_id") is not None:
+            profile["guild_id"] = str(profile["guild_id"])
+        profile["display_name"] = profile.get("display_name") or profile.get("username")
+        profile["public_profile"] = bool(profile.get("public_profile"))
+        preferences = profile.get("panel_preferences")
+        if isinstance(preferences, str):
+            try:
+                preferences = json.loads(preferences)
+            except Exception:
+                preferences = {}
+        elif not isinstance(preferences, dict):
+            preferences = {}
+        profile["panel_preferences"] = preferences
+        for key in ("created_at", "last_login_at", "updated_at"):
+            value = profile.get(key)
+            if hasattr(value, "isoformat"):
+                profile[key] = value.isoformat()
+        return profile
+
+    async def get_account_profile(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        row = await self._fetchone(
+            f"""
+            SELECT username, guild_id, display_name, avatar_url, bio, favorite_bot, theme_accent,
+                   public_profile, server_invite_url, server_name, server_icon_url,
+                   panel_preferences, created_at, last_login_at, updated_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE username = %s AND guild_id = %s
+            LIMIT 1
+            """,
+            (username, gid),
+        )
+        return self._serialize_account_profile(row) if row else None
+
+    async def update_account_profile(self, username: str, guild_id: str | int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        safe_updates = {
+            key: value
+            for key, value in updates.items()
+            if key in ACCOUNT_PROFILE_FIELDS and key != "updated_at"
+        }
+        if safe_updates:
+            assignments = ", ".join(f"`{_validate_identifier(key, 'account profile column')}` = %s" for key in safe_updates)
+            await self._execute(
+                f"""
+                UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                SET {assignments}
+                WHERE username = %s AND guild_id = %s
+                """,
+                (*safe_updates.values(), username, gid),
+            )
+        return await self.get_account_profile(username, gid)
+
+    async def update_account_panel_preferences(
+        self,
+        username: str,
+        guild_id: str | int,
+        preferences: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET panel_preferences = %s
+            WHERE username = %s AND guild_id = %s
+            """,
+            (json.dumps(preferences, separators=(",", ":")), username, gid),
+        )
+        return await self.get_account_profile(username, gid)
+
+    async def search_account_profiles(self, query: str = "", limit: int = 24) -> list[dict[str, Any]]:
+        normalized_query = str(query or "").strip()
+        safe_limit = max(1, min(50, int(limit or 24)))
+        like = f"%{normalized_query}%"
+        rows = await self._fetchall(
+            f"""
+            SELECT username, guild_id, display_name, avatar_url, bio, favorite_bot, theme_accent,
+                   public_profile, server_invite_url, server_name, server_icon_url,
+                   created_at, last_login_at, updated_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE public_profile = 1
+              AND (
+                  %s = ''
+                  OR username LIKE %s
+                  OR COALESCE(display_name, '') LIKE %s
+                  OR COALESCE(server_name, '') LIKE %s
+                  OR COALESCE(favorite_bot, '') LIKE %s
+              )
+            ORDER BY COALESCE(updated_at, created_at) DESC, username ASC
+            LIMIT %s
+            """,
+            (normalized_query, like, like, like, like, safe_limit),
+        )
+        profiles = [self._serialize_account_profile(row) for row in rows]
+        summaries = await self.get_music_activity_summary_for_guilds([profile["guild_id"] for profile in profiles])
+        for profile in profiles:
+            profile["activity"] = summaries.get(profile["guild_id"], self._empty_music_activity_summary())
+        return profiles
+
+    def _empty_music_activity_summary(self) -> dict[str, Any]:
+        return {"top_tracks": [], "top_bots": [], "active_sessions": [], "total_plays": 0}
+
+    async def get_music_activity_summary_for_guilds(self, guild_ids: list[str | int]) -> dict[str, dict[str, Any]]:
+        normalized_guilds = sorted({_coerce_int(guild_id, "guild_id") for guild_id in guild_ids if guild_id not in (None, "")})
+        summaries = {str(guild_id): self._empty_music_activity_summary() for guild_id in normalized_guilds}
+        if not normalized_guilds:
+            return summaries
+
+        placeholders = ", ".join(["%s"] * len(normalized_guilds))
+        per_guild_tracks: dict[int, dict[str, dict[str, Any]]] = {guild_id: {} for guild_id in normalized_guilds}
+        per_guild_bots: dict[int, dict[str, int]] = {guild_id: {} for guild_id in normalized_guilds}
+        per_guild_active: dict[int, list[dict[str, Any]]] = {guild_id: [] for guild_id in normalized_guilds}
+
+        for bot in MUSIC_BOTS:
+            if not bot.db_schema or not bot.table_prefix:
+                continue
+            schema = _validate_identifier(bot.db_schema, "schema")
+            prefix = _validate_identifier(bot.table_prefix, "table prefix")
+            history_table = f"{prefix}_history"
+            playback_table = f"{prefix}_playback_state"
+
+            if await self._table_exists(schema, history_table):
+                try:
+                    rows = await self._fetchall(
+                        f"""
+                        SELECT guild_id, title, video_url, COUNT(*) AS plays, MAX(played_at) AS last_played_at
+                        FROM `{schema}`.`{history_table}`
+                        WHERE guild_id IN ({placeholders}) AND title IS NOT NULL AND title != ''
+                        GROUP BY guild_id, title, video_url
+                        ORDER BY plays DESC, last_played_at DESC
+                        LIMIT 300
+                        """,
+                        tuple(normalized_guilds),
+                    )
+                    for row in rows:
+                        guild_id = int(row["guild_id"])
+                        title = str(row.get("title") or "Unknown Track").strip()
+                        play_count = int(row.get("plays") or 0)
+                        key = title.lower()
+                        existing = per_guild_tracks[guild_id].setdefault(key, {
+                            "title": title,
+                            "video_url": row.get("video_url"),
+                            "plays": 0,
+                        })
+                        existing["plays"] += play_count
+                        per_guild_bots[guild_id][bot.key] = per_guild_bots[guild_id].get(bot.key, 0) + play_count
+                    for guild_id in normalized_guilds:
+                        summaries[str(guild_id)]["total_plays"] += per_guild_bots[guild_id].get(bot.key, 0)
+                except Exception as exc:
+                    logger.debug("Could not read %s.%s for user directory: %s", schema, history_table, exc)
+
+            if await self._table_exists(schema, playback_table):
+                try:
+                    rows = await self._fetchall(
+                        f"""
+                        SELECT guild_id, title, video_url, is_playing, is_paused
+                        FROM `{schema}`.`{playback_table}`
+                        WHERE guild_id IN ({placeholders}) AND (is_playing = 1 OR is_paused = 1)
+                        """,
+                        tuple(normalized_guilds),
+                    )
+                except Exception:
+                    try:
+                        rows = await self._fetchall(
+                            f"""
+                            SELECT guild_id, title, video_url, is_playing
+                            FROM `{schema}`.`{playback_table}`
+                            WHERE guild_id IN ({placeholders}) AND is_playing = 1
+                            """,
+                            tuple(normalized_guilds),
+                        )
+                    except Exception as exc:
+                        logger.debug("Could not read %s.%s active state for user directory: %s", schema, playback_table, exc)
+                        rows = []
+                for row in rows:
+                    guild_id = int(row["guild_id"])
+                    per_guild_active[guild_id].append({
+                        "bot_key": bot.key,
+                        "bot_display": bot.display_name,
+                        "title": row.get("title") or "Unknown Track",
+                        "video_url": row.get("video_url"),
+                        "is_playing": bool(row.get("is_playing")),
+                        "is_paused": bool(row.get("is_paused")),
+                    })
+
+        for guild_id in normalized_guilds:
+            tracks = sorted(per_guild_tracks[guild_id].values(), key=lambda item: (-int(item["plays"]), item["title"].lower()))
+            bots = sorted(per_guild_bots[guild_id].items(), key=lambda item: (-item[1], item[0]))
+            summaries[str(guild_id)]["top_tracks"] = tracks[:3]
+            summaries[str(guild_id)]["top_bots"] = [
+                {
+                    "bot_key": bot_key,
+                    "bot_display": BOT_INDEX.get(bot_key).display_name if BOT_INDEX.get(bot_key) else bot_key,
+                    "plays": plays,
+                }
+                for bot_key, plays in bots[:3]
+            ]
+            summaries[str(guild_id)]["active_sessions"] = per_guild_active[guild_id][:4]
+
+        return summaries
 
     async def _resolve_soundcloud_thumbnail(self, video_url: str | None) -> str | None:
         if not _is_soundcloud_url(video_url):

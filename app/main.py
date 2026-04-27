@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import re
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -58,6 +59,21 @@ background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
 VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER"}
+PROFILE_ACCENT_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+PANEL_BACKGROUND_MODES = {"default", "midnight", "aurora", "ember", "custom_color", "custom_image"}
+PANEL_LAYOUT_MODES = {"standard", "focused", "wide"}
+PANEL_DENSITY_MODES = {"comfortable", "compact"}
+PANEL_SHAPE_MODES = {"soft", "crisp"}
+PANEL_FONT_MODES = {"normal", "large", "dense"}
+PANEL_MOTION_MODES = {"standard", "reduced"}
+DISCORD_INVITE_HOSTS = {
+    "discord.gg",
+    "www.discord.gg",
+    "discord.com",
+    "www.discord.com",
+    "discordapp.com",
+    "www.discordapp.com",
+}
 
 
 def _validate_discord_webhook_url(value: Any) -> str:
@@ -70,6 +86,65 @@ def _validate_discord_webhook_url(value: Any) -> str:
     if len(parts) < 4 or parts[0] != "api" or parts[1] != "webhooks":
         raise ValueError("Invalid Discord webhook URL")
     return url
+
+
+def _normalize_optional_text(value: Any, field_name: str, max_length: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > max_length:
+        raise ValueError(f"{field_name} must be {max_length} characters or fewer")
+    return text
+
+
+def _normalize_public_url(value: Any, field_name: str, max_length: int = 600) -> str | None:
+    url = _normalize_optional_text(value, field_name, max_length)
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{field_name} must be a public http or https URL")
+    return url
+
+
+def _normalize_server_invite_url(value: Any) -> str | None:
+    url = _normalize_optional_text(value, "Server invite URL", 600)
+    if not url:
+        return None
+    if url.startswith("discord.gg/"):
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    parts = [part for part in parsed.path.split("/") if part]
+    valid_discord_invite = (
+        parsed.scheme == "https"
+        and host in DISCORD_INVITE_HOSTS
+        and (
+            host.endswith("discord.gg")
+            or (len(parts) >= 2 and parts[0] == "invite")
+        )
+    )
+    if not valid_discord_invite:
+        raise ValueError("Server invite URL must be a Discord invite link")
+    return url
+
+
+def _normalize_profile_accent(value: Any) -> str | None:
+    accent = _normalize_optional_text(value, "Theme accent", 20)
+    if not accent:
+        return None
+    if not PROFILE_ACCENT_RE.fullmatch(accent):
+        raise ValueError("Theme accent must be a hex color like #89b4fa")
+    return accent.lower()
+
+
+def _normalize_choice(value: Any, field_name: str, allowed: set[str], default: str) -> str:
+    choice = str(value or default).strip().lower()
+    if choice not in allowed:
+        raise ValueError(f"{field_name} must be one of: {', '.join(sorted(allowed))}")
+    return choice
 
 class TruncateTableRequest(BaseModel):
     schema_name: str
@@ -91,6 +166,30 @@ class SessionLoginRequest(BaseModel):
 class SessionRegisterRequest(BaseModel):
     username: str
     guild_id: str | int
+
+
+class UserProfileUpdateRequest(BaseModel):
+    display_name: str | None = None
+    avatar_url: str | None = None
+    bio: str | None = None
+    favorite_bot: str | None = None
+    theme_accent: str | None = None
+    public_profile: bool | None = None
+    server_invite_url: str | None = None
+    server_name: str | None = None
+    server_icon_url: str | None = None
+
+
+class PanelPreferencesUpdateRequest(BaseModel):
+    accent_color: str | None = None
+    background_mode: str | None = None
+    background_color: str | None = None
+    background_image_url: str | None = None
+    layout_mode: str | None = None
+    density: str | None = None
+    card_shape: str | None = None
+    font_scale: str | None = None
+    motion: str | None = None
 
 
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
@@ -225,6 +324,68 @@ async def _ensure_registerable_guild(guild_id: str | int) -> str:
     except (TypeError, ValueError):
         raise ValueError("Guild ID must be a Discord server ID number.") from None
     return guild_id_text
+
+
+def _clean_profile_updates(payload: UserProfileUpdateRequest) -> dict[str, Any]:
+    raw_updates = payload.model_dump(exclude_unset=True)
+    updates: dict[str, Any] = {}
+    for key, value in raw_updates.items():
+        if key == "display_name":
+            updates[key] = _normalize_optional_text(value, "Display name", 80)
+        elif key == "avatar_url":
+            updates[key] = _normalize_public_url(value, "Avatar URL")
+        elif key == "bio":
+            updates[key] = _normalize_optional_text(value, "Bio", 280)
+        elif key == "favorite_bot":
+            favorite = _normalize_optional_text(value, "Favorite bot", 50)
+            if favorite and favorite not in BOT_INDEX:
+                raise ValueError("Favorite bot must be one of the known swarm bots")
+            updates[key] = favorite
+        elif key == "theme_accent":
+            updates[key] = _normalize_profile_accent(value)
+        elif key == "public_profile":
+            updates[key] = bool(value)
+        elif key == "server_invite_url":
+            updates[key] = _normalize_server_invite_url(value)
+        elif key == "server_name":
+            updates[key] = _normalize_optional_text(value, "Server name", 120)
+        elif key == "server_icon_url":
+            updates[key] = _normalize_public_url(value, "Server icon URL")
+    return updates
+
+
+def _clean_panel_preferences(payload: PanelPreferencesUpdateRequest) -> dict[str, Any]:
+    raw = payload.model_dump(exclude_unset=True)
+    preferences = {
+        "accent_color": "#89b4fa",
+        "background_mode": "default",
+        "background_color": "#0b0e18",
+        "background_image_url": None,
+        "layout_mode": "standard",
+        "density": "comfortable",
+        "card_shape": "soft",
+        "font_scale": "normal",
+        "motion": "standard",
+    }
+    if "accent_color" in raw:
+        preferences["accent_color"] = _normalize_profile_accent(raw.get("accent_color")) or "#89b4fa"
+    if "background_mode" in raw:
+        preferences["background_mode"] = _normalize_choice(raw.get("background_mode"), "Background mode", PANEL_BACKGROUND_MODES, "default")
+    if "background_color" in raw:
+        preferences["background_color"] = _normalize_profile_accent(raw.get("background_color")) or "#0b0e18"
+    if "background_image_url" in raw:
+        preferences["background_image_url"] = _normalize_public_url(raw.get("background_image_url"), "Background image URL")
+    if "layout_mode" in raw:
+        preferences["layout_mode"] = _normalize_choice(raw.get("layout_mode"), "Layout mode", PANEL_LAYOUT_MODES, "standard")
+    if "density" in raw:
+        preferences["density"] = _normalize_choice(raw.get("density"), "Density", PANEL_DENSITY_MODES, "comfortable")
+    if "card_shape" in raw:
+        preferences["card_shape"] = _normalize_choice(raw.get("card_shape"), "Card shape", PANEL_SHAPE_MODES, "soft")
+    if "font_scale" in raw:
+        preferences["font_scale"] = _normalize_choice(raw.get("font_scale"), "Font scale", PANEL_FONT_MODES, "normal")
+    if "motion" in raw:
+        preferences["motion"] = _normalize_choice(raw.get("motion"), "Motion", PANEL_MOTION_MODES, "standard")
+    return preferences
 
 
 async def _require_bot_guild_access(auth: dict[str, Any], bot_key: str, guild_id: str | int) -> None:
@@ -515,6 +676,119 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
 async def api_session_logout(request: Request):
     request.session.clear()
     return {"ok": True}
+
+
+@app.get("/api/users/me")
+async def api_user_profile_me(request: Request):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or settings.admin_username)
+    if not scoped_guild_id:
+        return {
+            "editable": False,
+            "profile": {
+                "username": username,
+                "display_name": username,
+                "guild_id": None,
+                "public_profile": False,
+                "panel_preferences": _clean_panel_preferences(PanelPreferencesUpdateRequest()),
+                "bio": "Admin sessions can browse the user directory; guild accounts own public profiles.",
+            },
+            "favorite_bot_options": [
+                {"key": bot.key, "display_name": bot.display_name, "kind": bot.kind}
+                for bot in ALL_BOTS
+            ],
+        }
+
+    profile = await db.get_account_profile(username, scoped_guild_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    profile["activity"] = (
+        await db.get_music_activity_summary_for_guilds([scoped_guild_id])
+    ).get(str(scoped_guild_id), db._empty_music_activity_summary())
+    return {
+        "editable": True,
+        "profile": profile,
+        "favorite_bot_options": [
+            {"key": bot.key, "display_name": bot.display_name, "kind": bot.kind}
+            for bot in ALL_BOTS
+        ],
+    }
+
+
+@app.post("/api/users/me")
+async def api_update_user_profile(request: Request, payload: UserProfileUpdateRequest):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required to edit a public profile")
+    try:
+        updates = _clean_profile_updates(payload)
+        profile = await db.update_account_profile(username, scoped_guild_id, updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    profile["activity"] = (
+        await db.get_music_activity_summary_for_guilds([scoped_guild_id])
+    ).get(str(scoped_guild_id), db._empty_music_activity_summary())
+    return {"ok": True, "profile": profile}
+
+
+@app.get("/api/users/preferences")
+async def api_user_panel_preferences(request: Request):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    defaults = _clean_panel_preferences(PanelPreferencesUpdateRequest())
+    if not scoped_guild_id or not username:
+        return {"editable": False, "preferences": defaults}
+
+    profile = await db.get_account_profile(username, scoped_guild_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    return {
+        "editable": True,
+        "preferences": {**defaults, **(profile.get("panel_preferences") or {})},
+    }
+
+
+@app.post("/api/users/preferences")
+async def api_update_user_panel_preferences(request: Request, payload: PanelPreferencesUpdateRequest):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required to save panel preferences")
+    try:
+        preferences = _clean_panel_preferences(payload)
+        profile = await db.update_account_panel_preferences(username, scoped_guild_id, preferences)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    return {"ok": True, "preferences": profile.get("panel_preferences") or preferences}
+
+
+@app.get("/api/users/search")
+async def api_search_users(request: Request):
+    _require_api_auth(request)
+    query = str(request.query_params.get("q") or "").strip()
+    try:
+        limit = int(request.query_params.get("limit") or 24)
+    except ValueError:
+        limit = 24
+    users = await db.search_account_profiles(query, limit)
+    return {"ok": True, "query": query, "users": users}
+
+
+@app.get("/api/users/directory")
+async def api_user_directory(request: Request):
+    _require_api_auth(request)
+    query = str(request.query_params.get("q") or "").strip()
+    users = await db.search_account_profiles(query, 24)
+    return {"ok": True, "query": query, "users": users}
 
 
 @app.get("/api/health")
