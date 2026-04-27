@@ -915,7 +915,6 @@ class PanelDatabase:
                 )
 
         total_active = sum(int(bot.get("active_playing_count") or 0) for bot in bots)
-        aria_status = "online" if await self.ping() else "error"
         aria_recent_interactions: list[dict[str, Any]] = []
         aria_recent_interaction_count = 0
         aria_medic_summary: dict[str, Any] = {

@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -23,7 +22,6 @@ from .auth import (
     SESSION_GUILD_ID_KEY,
     SESSION_ROLE_KEY,
     SESSION_USERNAME_KEY,
-    extract_bearer_token,
     get_api_auth,
     is_authenticated,
     issue_api_token,
@@ -297,7 +295,7 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
 async def lifespan(_: FastAPI):
     try:
         await db.connect()
-    except Exception as exc:
+    except Exception:
         logging.getLogger("swarm_panel").exception("Initial DB connection failed at startup; endpoints will retry lazily.")
     await discord_service.connect()
     await diagnostics_service.connect()
