@@ -40,6 +40,13 @@ class Settings:
     cors_allowed_origins: list[str]
     api_token_ttl_seconds: int
     pages_public_url: str
+    image_gallery_schema: str
+    smtp_host: str
+    smtp_port: int
+    smtp_username: str
+    smtp_password: str
+    smtp_from_email: str
+    smtp_use_tls: bool
 
 
 def load_settings() -> Settings:
@@ -59,6 +66,13 @@ def load_settings() -> Settings:
         cors_allowed_origins=_env_csv("PANEL_CORS_ALLOWED_ORIGINS"),
         api_token_ttl_seconds=int(_env("PANEL_API_TOKEN_TTL_SECONDS", "43200")),
         pages_public_url=_env("PANEL_PAGES_PUBLIC_URL", "https://darrylclay2005.github.io/SwarmPanel/"),
+        image_gallery_schema=_env("IMAGE_GALLERY_DB_SCHEMA") or _env("GALLERY_DB_SCHEMA", "image_gallery"),
+        smtp_host=_env("PANEL_SMTP_HOST") or _env("SMTP_HOST"),
+        smtp_port=int(_env("PANEL_SMTP_PORT") or _env("SMTP_PORT") or "587"),
+        smtp_username=_env("PANEL_SMTP_USERNAME") or _env("SMTP_USERNAME"),
+        smtp_password=_env("PANEL_SMTP_PASSWORD") or _env("SMTP_PASSWORD"),
+        smtp_from_email=_env("PANEL_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("PANEL_SMTP_USERNAME") or _env("SMTP_USERNAME"),
+        smtp_use_tls=(_env("PANEL_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
     )
     validate_settings(settings)
     return settings

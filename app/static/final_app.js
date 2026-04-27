@@ -670,12 +670,14 @@ async function registerRemotePanel() {
     const originInput = document.getElementById('remote-api-origin');
     const usernameInput = document.getElementById('remote-register-username');
     const guildInput = document.getElementById('remote-register-guild-id');
+    const emailInput = document.getElementById('remote-register-email');
     const submitButton = document.getElementById('remote-register-button');
 
     const configuredOrigin = await loadRemotePanelConfig();
     const nextOrigin = normalizeRemoteOrigin(configuredOrigin || originInput?.value);
     const username = String(usernameInput?.value || '').trim();
     const guildId = String(guildInput?.value || '').trim();
+    const email = String(emailInput?.value || '').trim();
 
     if (!nextOrigin) {
         showRemoteAuthShell('The live panel is still syncing. Try again after the panel finishes starting.');
@@ -697,7 +699,7 @@ async function registerRemotePanel() {
         const res = await rawFetch(registerUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, guild_id: guildId }),
+            body: JSON.stringify({ username, guild_id: guildId, email: email || null }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.token) {
@@ -3636,6 +3638,93 @@ async function sendPanelAction(action) {
 // ================================
 let dbSchemas = [];
 
+function galleryFormatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+    if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${value} B`;
+}
+
+async function loadImageGalleryAdmin() {
+    const status = document.getElementById('image-gallery-admin-status');
+    const summary = document.getElementById('image-gallery-summary');
+    const usersBody = document.getElementById('image-gallery-users-body');
+    const commentsBody = document.getElementById('image-gallery-comments-body');
+    const mediaBody = document.getElementById('image-gallery-media-body');
+    if (!usersBody || !commentsBody || !mediaBody) return;
+    if (status) status.textContent = 'Loading Image Gallery data...';
+    try {
+        const res = await fetch(`${API_BASE}/image-gallery/admin?limit=100`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Image Gallery request failed');
+        const payload = data.data || {};
+        const users = payload.users || [];
+        const comments = payload.comments || [];
+        const media = payload.media || [];
+        if (summary) {
+            summary.innerHTML = [
+                ['Schema', payload.schema || 'image_gallery'],
+                ['Users', users.length],
+                ['Recent Comments', comments.length],
+                ['Recent Media', media.length],
+            ].map(([label, value]) => `<div class="diagnostic-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
+        }
+        usersBody.innerHTML = users.length ? users.map(user => `
+            <tr>
+                <td>${escapeHtml(user.id)}</td>
+                <td>${escapeHtml(user.display_name || user.username)}<div class="muted">@${escapeHtml(user.username)}</div></td>
+                <td>${escapeHtml(user.email || 'No email')}${user.email_verified_at ? '<div class="muted">verified</div>' : ''}</td>
+                <td>${escapeHtml(user.media_count || 0)}</td>
+                <td>${escapeHtml(user.comment_count || 0)}</td>
+                <td>${escapeHtml(user.last_login_at || 'Never')}</td>
+                <td>
+                    <button class="tbl-btn" data-gallery-reset-password="${escapeHtml(user.id)}">Reset Password</button>
+                    <button class="tbl-btn tbl-btn-stop" data-gallery-delete-user="${escapeHtml(user.id)}">Delete User</button>
+                </td>
+            </tr>
+        `).join('') : '<tr><td colspan="7">No Image Gallery users found.</td></tr>';
+        commentsBody.innerHTML = comments.length ? comments.map(comment => `
+            <tr>
+                <td>${escapeHtml(comment.id)}</td>
+                <td>${escapeHtml(comment.display_name || comment.username)}</td>
+                <td>${escapeHtml(comment.media_title || `Media ${comment.media_id}`)}</td>
+                <td>${escapeHtml(comment.body || '')}</td>
+                <td>${escapeHtml(comment.created_at || '')}</td>
+                <td><button class="tbl-btn tbl-btn-stop" data-gallery-delete-comment="${escapeHtml(comment.id)}">Delete Comment</button></td>
+            </tr>
+        `).join('') : '<tr><td colspan="6">No Image Gallery comments found.</td></tr>';
+        mediaBody.innerHTML = media.length ? media.map(item => `
+            <tr>
+                <td>${escapeHtml(item.id)}</td>
+                <td>${escapeHtml(item.username || item.user_id)}</td>
+                <td>${escapeHtml(item.title || '')}</td>
+                <td>${escapeHtml(item.media_kind || '')}</td>
+                <td>${galleryFormatBytes(item.file_size)}</td>
+                <td>${escapeHtml(item.views || 0)}</td>
+                <td>${escapeHtml(item.created_at || '')}</td>
+            </tr>
+        `).join('') : '<tr><td colspan="7">No Image Gallery media found.</td></tr>';
+        if (status) status.textContent = 'Image Gallery data loaded.';
+    } catch (err) {
+        if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+}
+
+async function postImageGalleryAdminAction(path, payload) {
+    const res = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (handle401(res)) return false;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || 'Image Gallery action failed');
+    await loadImageGalleryAdmin();
+    return true;
+}
+
 async function loadDbSchemas() {
     const schemaSel = document.getElementById('schema-select');
     const status = document.getElementById('db-status');
@@ -3906,6 +3995,40 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('refresh-db')
         ?.addEventListener('click', loadDbSchemas);
+
+    document.getElementById('refresh-image-gallery-admin')
+        ?.addEventListener('click', loadImageGalleryAdmin);
+
+    document.getElementById('image-gallery-tab')
+        ?.addEventListener('click', async (event) => {
+            const deleteUser = event.target.closest('[data-gallery-delete-user]');
+            const deleteComment = event.target.closest('[data-gallery-delete-comment]');
+            const resetPassword = event.target.closest('[data-gallery-reset-password]');
+            try {
+                if (deleteUser) {
+                    const userId = deleteUser.dataset.galleryDeleteUser;
+                    if (confirm(`Delete Image Gallery user ${userId}? This removes their media, comments, likes, and collections.`)) {
+                        await postImageGalleryAdminAction('/image-gallery/users/delete', { user_id: Number(userId) });
+                    }
+                }
+                if (deleteComment) {
+                    const commentId = deleteComment.dataset.galleryDeleteComment;
+                    if (confirm(`Delete Image Gallery comment ${commentId}?`)) {
+                        await postImageGalleryAdminAction('/image-gallery/comments/delete', { comment_id: Number(commentId) });
+                    }
+                }
+                if (resetPassword) {
+                    const userId = resetPassword.dataset.galleryResetPassword;
+                    const password = prompt(`Enter a new Image Gallery password for user ${userId}. Minimum 8 characters.`);
+                    if (password) {
+                        await postImageGalleryAdminAction('/image-gallery/users/reset-password', { user_id: Number(userId), new_password: password });
+                    }
+                }
+            } catch (err) {
+                const status = document.getElementById('image-gallery-admin-status');
+                if (status) status.textContent = err instanceof Error ? err.message : String(err);
+            }
+        });
 
     document.getElementById('view-table-data')
         ?.addEventListener('click', viewTableData);

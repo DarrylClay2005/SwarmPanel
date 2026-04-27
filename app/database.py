@@ -1,7 +1,10 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import re
+import secrets
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -17,10 +20,15 @@ from .config import Settings
 logger = logging.getLogger("swarm_panel")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_]+$")
 ACCOUNT_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,80}$")
+ACCOUNT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 ACCOUNT_LOGIN_SCHEMA = "accountlogins"
 ACCOUNT_LOGIN_TABLE = "users"
 ACCOUNT_GUILD_LOCK_TABLE = "guild_locks"
 ACCOUNT_PROFILE_COLUMNS = (
+    ("email", "VARCHAR(255) NULL"),
+    ("email_verified_at", "TIMESTAMP NULL DEFAULT NULL"),
+    ("email_verification_token_hash", "CHAR(64) NULL"),
+    ("email_verification_sent_at", "TIMESTAMP NULL DEFAULT NULL"),
     ("display_name", "VARCHAR(80) NULL"),
     ("avatar_url", "TEXT NULL"),
     ("bio", "VARCHAR(280) NULL"),
@@ -81,6 +89,26 @@ def _normalize_account_username(value: Any) -> str:
     if not ACCOUNT_USERNAME_RE.fullmatch(username):
         raise ValueError("Username must be 2-80 characters using letters, numbers, dots, dashes, or underscores.")
     return username
+
+
+def _normalize_email(value: Any) -> str | None:
+    email = str(value or "").strip().lower()
+    if not email:
+        return None
+    if len(email) > 255 or not ACCOUNT_EMAIL_RE.fullmatch(email):
+        raise ValueError("Enter a valid email address.")
+    return email
+
+
+def _verification_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def _gallery_password_hash(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    iterations = 260_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
 
 
 def _normalize_loop_mode(value: Any) -> str:
@@ -390,10 +418,24 @@ class PanelDatabase:
                 ), timeout=15)
             except Exception:
                 pass
+        try:
+            await asyncio.wait_for(cur.execute(
+                f"CREATE UNIQUE INDEX `uniq_accountlogins_email` ON `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (`email`)"
+            ), timeout=15)
+        except Exception:
+            pass
 
-    async def register_account_login(self, username: str, guild_id: str | int) -> dict[str, Any]:
+    async def register_account_login(
+        self,
+        username: str,
+        guild_id: str | int,
+        email: str | None = None,
+        email_verification_token: str | None = None,
+    ) -> dict[str, Any]:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
+        email = _normalize_email(email)
+        token_hash = _verification_token_hash(email_verification_token) if email and email_verification_token else None
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -401,17 +443,19 @@ class PanelDatabase:
                 try:
                     await asyncio.wait_for(cur.execute(
                         f"""
-                        SELECT username, guild_id
+                        SELECT username, guild_id, email
                         FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
-                        WHERE username = %s OR guild_id = %s
+                        WHERE username = %s OR guild_id = %s OR (%s IS NOT NULL AND email = %s)
                         LIMIT 1
                         """,
-                        (username, gid),
+                        (username, gid, email, email),
                     ), timeout=15)
                     existing = await asyncio.wait_for(cur.fetchone(), timeout=15)
                     if existing:
                         if existing.get("username") == username:
                             raise ValueError("That username is already registered.")
+                        if email and existing.get("email") == email:
+                            raise ValueError("That email is already registered.")
                         raise ValueError("That guild ID is already registered to another account.")
 
                     await asyncio.wait_for(cur.execute(
@@ -423,10 +467,12 @@ class PanelDatabase:
                     ), timeout=15)
                     await asyncio.wait_for(cur.execute(
                         f"""
-                        INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (username, guild_id)
-                        VALUES (%s, %s)
+                        INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (
+                            username, guild_id, email, email_verification_token_hash, email_verification_sent_at
+                        )
+                        VALUES (%s, %s, %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
                         """,
-                        (username, gid),
+                        (username, gid, email, token_hash, token_hash),
                     ), timeout=15)
                     await asyncio.wait_for(conn.commit(), timeout=15)
                 except ValueError:
@@ -438,16 +484,41 @@ class PanelDatabase:
                     if "duplicate" in message or "1062" in message:
                         if "guild_locks" in message or str(gid) in message:
                             raise ValueError("That guild ID is already registered to another account.") from exc
+                        if email and "email" in message:
+                            raise ValueError("That email is already registered.") from exc
                         raise ValueError("That username is already registered.") from exc
                     raise
-        return {"username": username, "guild_id": str(gid)}
+        return {"username": username, "guild_id": str(gid), "email": email}
+
+    async def verify_account_email_by_token(self, token: str) -> dict[str, Any] | None:
+        token_hash = _verification_token_hash(token)
+        row = await self._fetchone(
+            f"""
+            SELECT username, guild_id
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE email_verification_token_hash = %s
+            LIMIT 1
+            """,
+            (token_hash,),
+        )
+        if not row:
+            return None
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email_verified_at = CURRENT_TIMESTAMP, email_verification_token_hash = NULL
+            WHERE username = %s AND guild_id = %s
+            """,
+            (row["username"], row["guild_id"]),
+        )
+        return {"username": row["username"], "guild_id": str(row["guild_id"])}
 
     async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
         row = await self._fetchone(
             f"""
-            SELECT username, guild_id
+            SELECT username, guild_id, email, email_verified_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
             WHERE username = %s AND guild_id = %s
             LIMIT 1
@@ -464,7 +535,7 @@ class PanelDatabase:
             """,
             (username, gid),
         )
-        return {"username": row["username"], "guild_id": str(row["guild_id"])}
+        return {"username": row["username"], "guild_id": str(row["guild_id"]), "email": row.get("email"), "email_verified": bool(row.get("email_verified_at"))}
 
     def _serialize_account_profile(self, row: dict[str, Any]) -> dict[str, Any]:
         profile = dict(row)
@@ -472,6 +543,7 @@ class PanelDatabase:
             profile["guild_id"] = str(profile["guild_id"])
         profile["display_name"] = profile.get("display_name") or profile.get("username")
         profile["public_profile"] = bool(profile.get("public_profile"))
+        profile["email_verified"] = bool(profile.get("email_verified_at"))
         preferences = profile.get("panel_preferences")
         if isinstance(preferences, str):
             try:
@@ -492,7 +564,7 @@ class PanelDatabase:
         gid = _coerce_int(guild_id, "guild_id")
         row = await self._fetchone(
             f"""
-            SELECT username, guild_id, display_name, avatar_url, bio, favorite_bot, theme_accent,
+            SELECT username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
                    public_profile, server_invite_url, server_name, server_icon_url,
                    panel_preferences, created_at, last_login_at, updated_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
@@ -547,7 +619,7 @@ class PanelDatabase:
         like = f"%{normalized_query}%"
         rows = await self._fetchall(
             f"""
-            SELECT username, guild_id, display_name, avatar_url, bio, favorite_bot, theme_accent,
+            SELECT username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
                    public_profile, server_invite_url, server_name, server_icon_url,
                    created_at, last_login_at, updated_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
@@ -1616,6 +1688,86 @@ class PanelDatabase:
                     "count": len(processed_rows),
                     "rows": processed_rows
                 }
+
+    def _json_value(self, value: Any) -> Any:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        if isinstance(value, bytes):
+            return "<binary data>"
+        return value
+
+    def _json_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {key: self._json_value(value) for key, value in row.items()}
+
+    async def get_image_gallery_admin_data(self, limit: int = 50) -> dict[str, Any]:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        safe_limit = max(1, min(int(limit or 50), 200))
+        await self._ensure_connected()
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    f"""
+                    SELECT u.id, u.username, u.display_name, u.email, u.email_verified_at,
+                           u.created_at, u.last_login_at,
+                           COUNT(DISTINCT m.id) AS media_count,
+                           COUNT(DISTINCT c.id) AS comment_count
+                    FROM `{schema}`.`users` u
+                    LEFT JOIN `{schema}`.`media_items` m ON m.user_id = u.id
+                    LEFT JOIN `{schema}`.`media_comments` c ON c.user_id = u.id
+                    GROUP BY u.id
+                    ORDER BY u.created_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+                users = [self._json_row(row) for row in await cur.fetchall()]
+
+                await cur.execute(
+                    f"""
+                    SELECT c.id, c.media_id, c.user_id, c.body, c.created_at,
+                           u.username, u.display_name,
+                           m.title AS media_title
+                    FROM `{schema}`.`media_comments` c
+                    JOIN `{schema}`.`users` u ON u.id = c.user_id
+                    JOIN `{schema}`.`media_items` m ON m.id = c.media_id
+                    ORDER BY c.created_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+                comments = [self._json_row(row) for row in await cur.fetchall()]
+
+                await cur.execute(
+                    f"""
+                    SELECT m.id, m.user_id, m.title, m.media_kind, m.file_size, m.views, m.downloads,
+                           m.created_at, u.username
+                    FROM `{schema}`.`media_items` m
+                    JOIN `{schema}`.`users` u ON u.id = m.user_id
+                    ORDER BY m.created_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+                media = [self._json_row(row) for row in await cur.fetchall()]
+        return {"schema": schema, "users": users, "comments": comments, "media": media}
+
+    async def delete_image_gallery_user(self, user_id: int) -> None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        await self._execute(f"DELETE FROM `{schema}`.`users` WHERE id = %s", (_coerce_int(user_id, "user_id"),))
+
+    async def delete_image_gallery_comment(self, comment_id: int) -> None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        await self._execute(f"DELETE FROM `{schema}`.`media_comments` WHERE id = %s", (_coerce_int(comment_id, "comment_id"),))
+
+    async def reset_image_gallery_user_password(self, user_id: int, new_password: str) -> None:
+        if len(str(new_password or "")) < 8:
+            raise ValueError("Password must be at least 8 characters.")
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        password_hash = _gallery_password_hash(new_password)
+        await self._execute(
+            f"UPDATE `{schema}`.`users` SET password_hash = %s WHERE id = %s",
+            (password_hash, _coerce_int(user_id, "user_id")),
+        )
 
     async def _clear_pending_orders(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> None:
         overrides_table = f"{prefix}_swarm_overrides"

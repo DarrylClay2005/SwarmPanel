@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -45,6 +46,7 @@ from .config import load_settings
 from .database import PanelDatabase
 from .diagnostics import RuntimeDiagnosticsService
 from .discord_api import DiscordInventoryService
+from .emailer import send_verification_email
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -146,6 +148,11 @@ def _normalize_choice(value: Any, field_name: str, allowed: set[str], default: s
         raise ValueError(f"{field_name} must be one of: {', '.join(sorted(allowed))}")
     return choice
 
+
+def _verification_url(request: Request, token: str) -> str:
+    base = str(request.url_for("api_verify_session_email"))
+    return base.replace("http://", "https://") + f"?token={token}"
+
 class TruncateTableRequest(BaseModel):
     schema_name: str
     table_name: str
@@ -166,6 +173,20 @@ class SessionLoginRequest(BaseModel):
 class SessionRegisterRequest(BaseModel):
     username: str
     guild_id: str | int
+    email: str | None = None
+
+
+class GalleryUserDeleteRequest(BaseModel):
+    user_id: int
+
+
+class GalleryCommentDeleteRequest(BaseModel):
+    comment_id: int
+
+
+class GalleryPasswordResetRequest(BaseModel):
+    user_id: int
+    new_password: str
 
 
 class UserProfileUpdateRequest(BaseModel):
@@ -558,10 +579,11 @@ async def login_submit(
 
 
 @app.post("/register")
-async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...)):
+async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...), email: str = Form("")):
+    email_token = secrets.token_urlsafe(32) if email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
-        account = await db.register_account_login(username, registerable_guild_id)
+        account = await db.register_account_login(username, registerable_guild_id, email, email_token)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -577,6 +599,8 @@ async def register_submit(request: Request, username: str = Form(...), guild_id:
             status_code=503,
         )
 
+    if account.get("email") and email_token:
+        send_verification_email(settings, account["email"], _verification_url(request, email_token))
     _set_account_session(request, account["username"], account["guild_id"])
     return RedirectResponse(url="/", status_code=303)
 
@@ -648,11 +672,16 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
 
 @app.post("/api/session/register")
 async def api_session_register(request: Request, payload: SessionRegisterRequest):
+    email_token = secrets.token_urlsafe(32) if payload.email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(payload.guild_id)
-        account = await db.register_account_login(payload.username, registerable_guild_id)
+        account = await db.register_account_login(payload.username, registerable_guild_id, payload.email, email_token)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    verification_sent = False
+    if account.get("email") and email_token:
+        verification_sent = send_verification_email(settings, account["email"], _verification_url(request, email_token))
 
     _set_account_session(request, account["username"], account["guild_id"])
     token = issue_api_token(
@@ -667,9 +696,18 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         "username": account["username"],
         "role": "account",
         "guild_id": account["guild_id"],
+        "email_verification_sent": verification_sent,
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
+
+
+@app.get("/api/session/verify-email", name="api_verify_session_email")
+async def api_verify_session_email(token: str):
+    account = await db.verify_account_email_by_token(token)
+    if not account:
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
+    return {"ok": True, "account": account}
 
 
 @app.post("/api/session/logout")
@@ -1225,6 +1263,43 @@ async def get_table_data(
     except Exception as exc:
         action_logger.error("Failed to fetch table data schema=%s table=%s: %s", schema_name, table_name, exc)
         raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}")
+
+
+@app.get("/api/image-gallery/admin")
+async def image_gallery_admin(request: Request, limit: int = 50):
+    _require_admin_auth(request)
+    try:
+        return {"ok": True, "data": await db.get_image_gallery_admin_data(limit)}
+    except Exception as exc:
+        action_logger.error("Failed to fetch image gallery admin data: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Image Gallery database unavailable: {exc}")
+
+
+@app.post("/api/image-gallery/users/delete")
+async def image_gallery_delete_user(request: Request, payload: GalleryUserDeleteRequest):
+    _require_admin_auth(request)
+    await db.delete_image_gallery_user(payload.user_id)
+    action_logger.warning("image_gallery_delete_user user_id=%s", payload.user_id)
+    return {"ok": True}
+
+
+@app.post("/api/image-gallery/comments/delete")
+async def image_gallery_delete_comment(request: Request, payload: GalleryCommentDeleteRequest):
+    _require_admin_auth(request)
+    await db.delete_image_gallery_comment(payload.comment_id)
+    action_logger.warning("image_gallery_delete_comment comment_id=%s", payload.comment_id)
+    return {"ok": True}
+
+
+@app.post("/api/image-gallery/users/reset-password")
+async def image_gallery_reset_password(request: Request, payload: GalleryPasswordResetRequest):
+    _require_admin_auth(request)
+    try:
+        await db.reset_image_gallery_user_password(payload.user_id, payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    action_logger.warning("image_gallery_reset_password user_id=%s", payload.user_id)
+    return {"ok": True}
 
 class BotControlRequest(BaseModel):
     bot_key: str
