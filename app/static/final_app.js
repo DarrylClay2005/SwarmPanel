@@ -290,6 +290,7 @@ function setPanelSessionContext(data = {}) {
         username: data.username || remotePanelUsername || '',
     };
     document.body.classList.toggle('guild-scoped-session', currentPanelSession.role !== 'admin' && Boolean(currentPanelSession.guild_id));
+    updateTopbarAccount();
 }
 
 function isAdminSession() {
@@ -566,12 +567,7 @@ function showRemoteAuthShell(message = '') {
     if (usernameInput && remotePanelUsername) usernameInput.value = remotePanelUsername;
     setRemoteAuthError(message);
     shell.classList.add('visible');
-    updateRemoteConnectionStatus(
-        remotePanelOrigin
-            ? `Sign in to ${remotePanelOrigin}`
-            : 'Phone site waiting for a live panel URL',
-        remotePanelOrigin ? 'idle' : 'offline',
-    );
+    updateRemoteConnectionStatus(remotePanelOrigin ? 'Ready to sign in' : 'Waiting for live panel sync', remotePanelOrigin ? 'idle' : 'offline');
 }
 
 function hideRemoteAuthShell() {
@@ -603,7 +599,7 @@ async function syncPanelSession() {
         panelSessionChecked = true;
         updateRemoteConnectionStatus(
             REMOTE_MODE
-                ? `Connected to ${remotePanelOrigin}`
+                ? 'Connected'
                 : 'Connected to local SwarmPanel',
             'online',
         );
@@ -626,7 +622,7 @@ async function loginRemotePanel() {
     const password = String(passwordInput?.value || '');
 
     if (!nextOrigin) {
-        showRemoteAuthShell('Enter the live SwarmPanel URL first.');
+        showRemoteAuthShell('The live panel is still syncing. Try again after the panel finishes starting.');
         return;
     }
     if (!username || !password) {
@@ -656,14 +652,14 @@ async function loginRemotePanel() {
         setRemoteToken(data.token);
         setPanelSessionContext(data);
         panelSessionChecked = true;
-        updateRemoteConnectionStatus(`Connected to ${remotePanelOrigin}`, 'online');
+        updateRemoteConnectionStatus('Connected', 'online');
         hideRemoteAuthShell();
         if (passwordInput) passwordInput.value = '';
         await startPanelApplication();
     } catch (err) {
         const message = err instanceof Error
-            ? `${err.message}. Verify the live panel URL is public and reachable from this device.`
-            : 'Connection failed. Verify the live panel URL is public and reachable from this device.';
+            ? `${err.message}. Verify the live panel is public and reachable from this device.`
+            : 'Connection failed. Verify the live panel is public and reachable from this device.';
         showRemoteAuthShell(message);
     } finally {
         if (submitButton) submitButton.disabled = false;
@@ -682,7 +678,7 @@ async function registerRemotePanel() {
     const guildId = String(guildInput?.value || '').trim();
 
     if (!nextOrigin) {
-        showRemoteAuthShell('Enter the live SwarmPanel URL first.');
+        showRemoteAuthShell('The live panel is still syncing. Try again after the panel finishes starting.');
         return;
     }
     if (!username || !guildId) {
@@ -712,13 +708,13 @@ async function registerRemotePanel() {
         setRemoteToken(data.token);
         setPanelSessionContext(data);
         panelSessionChecked = true;
-        updateRemoteConnectionStatus(`Connected to ${remotePanelOrigin}`, 'online');
+        updateRemoteConnectionStatus('Connected', 'online');
         hideRemoteAuthShell();
         await startPanelApplication();
     } catch (err) {
         const message = err instanceof Error
-            ? `${err.message}. Verify the live panel URL is public and reachable from this device.`
-            : 'Connection failed. Verify the live panel URL is public and reachable from this device.';
+            ? `${err.message}. Verify the live panel is public and reachable from this device.`
+            : 'Connection failed. Verify the live panel is public and reachable from this device.';
         showRemoteAuthShell(message);
     } finally {
         if (submitButton) submitButton.disabled = false;
@@ -808,7 +804,7 @@ async function bootstrapPanelApplication() {
         }
 
         if (!remotePanelOrigin) {
-            showRemoteAuthShell('Paste the live SwarmPanel URL to connect this GitHub Pages view.');
+            showRemoteAuthShell('The live panel is still syncing. Try again after the panel finishes starting.');
             return false;
         }
 
@@ -1263,6 +1259,40 @@ function renderCircularAvatar(profile = {}, className = 'user-card-avatar') {
     return `<div class="${className} user-card-avatar-fallback">${escapeHtml(userInitial(profile))}</div>`;
 }
 
+function getCurrentAccountProfile(profile = userProfileState.profile || {}) {
+    return {
+        ...(profile || {}),
+        username: profile?.username || currentPanelSession.username || remotePanelUsername || '',
+    };
+}
+
+function updateTopbarAccount(profile = userProfileState.profile || {}) {
+    const account = getCurrentAccountProfile(profile);
+    const name = account.display_name || account.username || 'Swarm User';
+    const nameNode = document.getElementById('topbar-user-name');
+    const avatarNode = document.getElementById('topbar-profile-avatar');
+    if (nameNode) nameNode.textContent = name;
+    if (!avatarNode) return;
+
+    const avatarUrl = safePublicUrl(account.avatar_url);
+    avatarNode.innerHTML = avatarUrl
+        ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(name)} avatar" />`
+        : escapeHtml(userInitial(account));
+}
+
+function setAccountDropdownOpen(open) {
+    const dropdown = document.getElementById('account-dropdown');
+    const button = document.getElementById('topbar-profile-button');
+    if (!dropdown || !button) return;
+    dropdown.hidden = !open;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function toggleAccountDropdown() {
+    const dropdown = document.getElementById('account-dropdown');
+    setAccountDropdownOpen(Boolean(dropdown?.hidden));
+}
+
 function setUserProfileStatus(message = '', isError = false) {
     const status = document.getElementById('user-profile-status');
     if (!status) return;
@@ -1347,6 +1377,7 @@ function renderUserProfile(data = userProfileState) {
         locked.textContent = editable ? '' : 'Admin sessions can browse users, but only guild accounts can edit a public profile.';
     }
     setUserProfileInputsDisabled(!editable);
+    updateTopbarAccount(profile);
 }
 
 async function loadUserProfile() {
@@ -3757,10 +3788,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
     document.getElementById('refresh-user-directory')
-        ?.addEventListener('click', () => {
-            loadUserProfile();
-            loadUserDirectory();
-        });
+        ?.addEventListener('click', () => loadUserDirectory());
 
     document.getElementById('save-user-profile')
         ?.addEventListener('click', saveUserProfile);
@@ -3894,8 +3922,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('table-select')
         ?.addEventListener('change', updateConfirmText);
 
-    document.getElementById('remote-settings-button')
-        ?.addEventListener('click', () => showRemoteAuthShell());
+    document.getElementById('topbar-profile-button')
+        ?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleAccountDropdown();
+        });
+
+    document.querySelectorAll('[data-account-tab]')
+        .forEach(button => button.addEventListener('click', () => {
+            activateSwarmTab(button.dataset.accountTab);
+            setAccountDropdownOpen(false);
+        }));
+
+    document.addEventListener('click', (event) => {
+        const menu = document.getElementById('account-menu');
+        if (menu && !menu.contains(event.target)) setAccountDropdownOpen(false);
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') setAccountDropdownOpen(false);
+    });
 
     document.getElementById('remote-login-button')
         ?.addEventListener('click', loginRemotePanel);
@@ -3906,6 +3952,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('logout-button')
         ?.addEventListener('click', logoutPanel);
 
+    updateTopbarAccount();
     ensureLivePositionTicker();
     bootstrapPanelApplication();
 });

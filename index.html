@@ -6,14 +6,22 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=17" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=18" />
 </head>
 <body>
   <header class="topbar">
     <h1>SwarmPanel Live</h1>
     <div class="topbar-actions">
-      <span id="remote-connection-status" class="muted deck-timestamp topbar-status" data-tone="idle">GitHub Pages remote mode</span>
-      <button id="remote-settings-button" type="button">Connection</button>
+      <div id="account-menu" class="account-menu">
+        <span id="topbar-user-name" class="topbar-user-name">Swarm User</span>
+        <button id="topbar-profile-button" class="topbar-profile-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Open profile menu">
+          <span id="topbar-profile-avatar" class="topbar-profile-avatar">S</span>
+        </button>
+        <div id="account-dropdown" class="account-dropdown" role="menu" hidden>
+          <button type="button" role="menuitem" data-account-tab="appearance-tab">Panel Appearance</button>
+          <button type="button" role="menuitem" data-account-tab="profile-tab">Profile Settings</button>
+        </div>
+      </div>
       <button id="logout-button" type="button">Logout</button>
     </div>
   </header>
@@ -29,13 +37,10 @@
         <div class="login-logo-icon">S</div>
         <h1>SwarmPanel Remote</h1>
       </div>
-      <p class="login-subtitle">Connect this GitHub Pages front-end to your live SwarmPanel backend. Use an admin password or a registered account's guild ID.</p>
+      <p class="login-subtitle">Sign in to SwarmPanel with an admin password or a registered account's guild ID.</p>
       <div id="remote-auth-error" class="login-error" style="display:none"></div>
       <div class="stack">
-        <div class="login-field">
-          <label for="remote-api-origin">Live Panel URL</label>
-          <input id="remote-api-origin" type="url" inputmode="url" placeholder="https://your-public-panel-url.example.com" />
-        </div>
+        <input id="remote-api-origin" type="hidden" />
         <div class="login-field">
           <label for="remote-username">Username</label>
           <input id="remote-username" type="text" autocomplete="username" placeholder="SwarmPanel username" />
@@ -44,7 +49,7 @@
           <label for="remote-password">Password / Guild ID</label>
           <input id="remote-password" type="password" autocomplete="current-password" placeholder="Admin password or guild ID" />
         </div>
-        <button id="remote-login-button" class="login-submit" type="button">Connect To Live Panel</button>
+        <button id="remote-login-button" class="login-submit" type="button">Sign In</button>
       </div>
 
       <div class="login-divider"><span>Create guild account</span></div>
@@ -87,14 +92,13 @@
     </section>
   </div>
 
-  <div class="swarm-tab-panel" id="users-tab">
+  <div class="swarm-tab-panel" id="profile-tab">
     <section class="panel deck-panel">
       <div class="section-title-row">
         <div>
-          <h2>User Profile</h2>
+          <h2>Profile Settings</h2>
           <p class="muted">Build a public server card for the swarm directory.</p>
         </div>
-        <button id="refresh-user-directory" type="button">Refresh Users</button>
       </div>
       <div class="user-profile-shell">
         <aside class="user-profile-preview">
@@ -152,7 +156,9 @@
         </div>
       </div>
     </section>
+  </div>
 
+  <div class="swarm-tab-panel" id="appearance-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
@@ -228,13 +234,16 @@
         <span id="panel-preferences-status" class="status"></span>
       </div>
     </section>
+  </div>
 
+  <div class="swarm-tab-panel" id="users-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
           <h2>User Search</h2>
           <p class="muted">Find public swarm users, server cards, and music activity.</p>
         </div>
+        <button id="refresh-user-directory" type="button">Refresh Users</button>
       </div>
       <div class="row user-search-row">
         <input id="user-search-input" type="search" placeholder="Search users, servers, or favorite bots..." />
@@ -545,6 +554,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=17"></script>
+  <script src="./app/static/final_app.js?v=18"></script>
 </body>
 </html>

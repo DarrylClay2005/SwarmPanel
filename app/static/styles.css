@@ -111,7 +111,26 @@ body.panel-font-dense { font-size: 13px; }
   flex-wrap: wrap;
 }
 
+.account-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-user-name {
+  max-width: 180px;
+  color: var(--text);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .topbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px 14px;
   font-size: 0.82rem;
   border-radius: 6px;
@@ -126,6 +145,73 @@ body.panel-font-dense { font-size: 13px; }
 .topbar button:hover {
   border-color: var(--red);
   color: var(--red);
+}
+
+.topbar .topbar-profile-button {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  border-color: color-mix(in srgb, var(--user-panel-accent) 48%, var(--border-light));
+  background: rgba(255,255,255,0.04);
+  color: var(--user-panel-accent);
+}
+
+.topbar .topbar-profile-button:hover,
+.topbar .topbar-profile-button[aria-expanded="true"] {
+  border-color: var(--user-panel-accent);
+  color: var(--user-panel-accent);
+}
+
+.topbar-profile-avatar {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--user-panel-accent) 18%, rgba(255,255,255,0.05));
+  font-weight: 800;
+}
+
+.topbar-profile-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.account-dropdown {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 150;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 18px 42px rgba(0,0,0,0.32);
+}
+
+.account-dropdown[hidden] {
+  display: none;
+}
+
+.topbar .account-dropdown button {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  border-color: transparent;
+  color: var(--text);
+}
+
+.topbar .account-dropdown button:hover {
+  border-color: var(--border-light);
+  color: var(--user-panel-accent);
+  background: rgba(255,255,255,0.04);
 }
 
 .topbar-status[data-tone="online"] {
@@ -2033,6 +2119,16 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
   .topbar-actions {
     width: 100%;
     justify-content: stretch;
+  }
+
+  .account-menu {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+
+  .topbar-user-name {
+    max-width: min(42vw, 180px);
   }
 
   .topbar-status {
