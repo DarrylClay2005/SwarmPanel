@@ -14,8 +14,10 @@ class BotDefinition:
 
 
 DISCORD_PERMISSION_BITS = {
+    "Kick Members": 1,
     "Ban Members": 2,
     "Manage Channels": 4,
+    "Manage Server": 5,
     "View Channels": 10,
     "Send Messages": 11,
     "Manage Messages": 13,
@@ -25,6 +27,7 @@ DISCORD_PERMISSION_BITS = {
     "Connect": 20,
     "Speak": 21,
     "Use Voice Activity": 25,
+    "Manage Nicknames": 27,
     "Manage Roles": 28,
     "Use Application Commands": 31,
     "Request To Speak": 32,
@@ -52,9 +55,12 @@ ARIA_BOT_PERMISSIONS = [
     "Attach Files",
     "Read Message History",
     "Use Application Commands",
+    "Kick Members",
     "Manage Messages",
     "Manage Channels",
+    "Manage Server",
     "Manage Roles",
+    "Manage Nicknames",
     "Ban Members",
     "Timeout Members",
 ]
@@ -73,7 +79,7 @@ BOT_ACCENTS = {
 
 BOT_CAPABILITY_SUMMARIES = {
     "music": "Music worker node: slash commands, queue controls, voice/stage playback, feedback messages, embeds, buttons, and channel status/topic updates.",
-    "orchestrator": "Aria orchestrator: slash commands, swarm routing, AI/game/economy tools, scheduled messages, moderation actions, roles, channel locks, and server utilities.",
+    "orchestrator": "Aria orchestrator: slash commands, swarm routing, AI/game/economy tools, scheduled messages, moderation, roles, nicknames, slowmode, channel locks, and server utilities.",
 }
 
 
