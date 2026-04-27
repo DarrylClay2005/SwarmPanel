@@ -620,6 +620,61 @@ async function loginRemotePanel() {
     }
 }
 
+async function registerRemotePanel() {
+    const originInput = document.getElementById('remote-api-origin');
+    const usernameInput = document.getElementById('remote-register-username');
+    const guildInput = document.getElementById('remote-register-guild-id');
+    const submitButton = document.getElementById('remote-register-button');
+
+    const configuredOrigin = await loadRemotePanelConfig();
+    const nextOrigin = normalizeRemoteOrigin(configuredOrigin || originInput?.value);
+    const username = String(usernameInput?.value || '').trim();
+    const guildId = String(guildInput?.value || '').trim();
+
+    if (!nextOrigin) {
+        showRemoteAuthShell('Enter the live SwarmPanel URL first.');
+        return;
+    }
+    if (!username || !guildId) {
+        showRemoteAuthShell('Choose a username and enter your Discord guild ID.');
+        return;
+    }
+
+    setRemoteOrigin(nextOrigin);
+    if (originInput) originInput.value = remotePanelOrigin;
+    setRemoteUsername(username);
+    setRemoteAuthError('');
+    if (submitButton) submitButton.disabled = true;
+
+    try {
+        const registerUrl = new URL('/api/session/register', `${remotePanelOrigin}/`).toString();
+        const res = await rawFetch(registerUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, guild_id: guildId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.token) {
+            showRemoteAuthShell(data.detail || 'Unable to create that guild account.');
+            return;
+        }
+
+        setRemoteToken(data.token);
+        setPanelSessionContext(data);
+        panelSessionChecked = true;
+        updateRemoteConnectionStatus(`Connected to ${remotePanelOrigin}`, 'online');
+        hideRemoteAuthShell();
+        await startPanelApplication();
+    } catch (err) {
+        const message = err instanceof Error
+            ? `${err.message}. Verify the live panel URL is public and reachable from this device.`
+            : 'Connection failed. Verify the live panel URL is public and reachable from this device.';
+        showRemoteAuthShell(message);
+    } finally {
+        if (submitButton) submitButton.disabled = false;
+    }
+}
+
 async function logoutPanel() {
     try {
         if (REMOTE_MODE && remotePanelOrigin && remotePanelToken) {
@@ -3244,6 +3299,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('remote-login-button')
         ?.addEventListener('click', loginRemotePanel);
+
+    document.getElementById('remote-register-button')
+        ?.addEventListener('click', registerRemotePanel);
 
     document.getElementById('logout-button')
         ?.addEventListener('click', logoutPanel);

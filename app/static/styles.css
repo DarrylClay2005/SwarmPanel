@@ -1135,8 +1135,10 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
   place-items: center;
   min-height: 100vh;
   background: var(--bg-base);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   position: relative;
+  padding: 24px 0;
 }
 
 .remote-auth-shell {

@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#111622" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
-  <link rel="stylesheet" href="./app/static/styles.css?v=12" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=13" />
 </head>
 <body>
   <header class="topbar">
@@ -46,7 +46,20 @@
         </div>
         <button id="remote-login-button" class="login-submit" type="button">Connect To Live Panel</button>
       </div>
-      <p class="muted" style="margin-top:16px;">Tip: this front-end needs a public SwarmPanel backend URL. A tunnel or reverse proxy works great when you want phone access without using your local IP directly.</p>
+
+      <div class="login-divider"><span>Create guild account</span></div>
+
+      <div class="stack">
+        <div class="login-field">
+          <label for="remote-register-username">Username</label>
+          <input id="remote-register-username" type="text" autocomplete="username" placeholder="your-name" />
+        </div>
+        <div class="login-field">
+          <label for="remote-register-guild-id">Guild ID</label>
+          <input id="remote-register-guild-id" type="text" inputmode="numeric" autocomplete="off" placeholder="123456789012345678" />
+        </div>
+        <button id="remote-register-button" class="login-submit login-submit-secondary" type="button">Create Guild Account</button>
+      </div>
     </div>
   </div>
 
@@ -359,6 +372,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=12"></script>
+  <script src="./app/static/final_app.js?v=13"></script>
 </body>
 </html>

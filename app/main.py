@@ -199,6 +199,20 @@ async def _visible_music_bots_for_auth(auth: dict[str, Any]) -> list:
     return [bot for bot, ok in zip(MUSIC_BOTS, checks) if ok is True]
 
 
+async def _ensure_registerable_guild(guild_id: str | int) -> str:
+    try:
+        guild_id_text = str(int(str(guild_id).strip()))
+    except (TypeError, ValueError):
+        raise ValueError("Guild ID must be a Discord server ID number.") from None
+    checks = await asyncio.gather(
+        *(_bot_has_registered_guild(bot.key, guild_id_text) for bot in MUSIC_BOTS),
+        return_exceptions=True,
+    )
+    if not any(ok is True for ok in checks):
+        raise ValueError("No configured music bot is currently in that guild. Check the guild ID or invite a swarm bot first.")
+    return guild_id_text
+
+
 async def _require_bot_guild_access(auth: dict[str, Any], bot_key: str, guild_id: str | int) -> None:
     _require_guild_scope(auth, guild_id)
     scoped = _scoped_guild_id(auth)
@@ -371,7 +385,8 @@ async def login_submit(
 @app.post("/register")
 async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...)):
     try:
-        account = await db.register_account_login(username, guild_id)
+        registerable_guild_id = await _ensure_registerable_guild(guild_id)
+        account = await db.register_account_login(username, registerable_guild_id)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -459,7 +474,8 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
 @app.post("/api/session/register")
 async def api_session_register(request: Request, payload: SessionRegisterRequest):
     try:
-        account = await db.register_account_login(payload.username, payload.guild_id)
+        registerable_guild_id = await _ensure_registerable_guild(payload.guild_id)
+        account = await db.register_account_login(payload.username, registerable_guild_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
