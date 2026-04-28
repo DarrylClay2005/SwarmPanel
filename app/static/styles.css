@@ -231,6 +231,15 @@ body.panel-font-dense { font-size: 13px; }
 .guild-scoped-session .admin-only {
   display: none !important;
 }
+.gallery-owner-only {
+  display: none !important;
+}
+.image-gallery-owner-session .swarm-tab.gallery-owner-only {
+  display: inline-flex !important;
+}
+.image-gallery-owner-session .swarm-tab-panel.gallery-owner-only.active {
+  display: block !important;
+}
 
 /* ── LAYOUT ── */
 .container {

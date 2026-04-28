@@ -43,7 +43,7 @@ const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
-let currentPanelSession = { role: 'admin', guild_id: null, username: '' };
+let currentPanelSession = { role: 'admin', guild_id: null, username: '', image_gallery_owner: false };
 let inviteOnlyMode = false;
 let panelAppStarted = false;
 let panelSessionChecked = false;
@@ -288,8 +288,10 @@ function setPanelSessionContext(data = {}) {
         role: data.role || 'admin',
         guild_id: data.guild_id || null,
         username: data.username || remotePanelUsername || '',
+        image_gallery_owner: Boolean(data.image_gallery_owner),
     };
     document.body.classList.toggle('guild-scoped-session', currentPanelSession.role !== 'admin' && Boolean(currentPanelSession.guild_id));
+    document.body.classList.toggle('image-gallery-owner-session', Boolean(currentPanelSession.image_gallery_owner));
     updateTopbarAccount();
 }
 
@@ -299,6 +301,10 @@ function isAdminSession() {
 
 function isGuildScopedSession() {
     return !isAdminSession() && Boolean(currentPanelSession.guild_id);
+}
+
+function isImageGalleryOwnerSession() {
+    return Boolean(currentPanelSession.image_gallery_owner);
 }
 
 function resolveApiUrl(input) {
@@ -3724,6 +3730,7 @@ async function sendPanelAction(action) {
 // 🗄️ DATABASE CONTROLS
 // ================================
 let dbSchemas = [];
+let imageGalleryTables = [];
 
 function galleryFormatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -3734,6 +3741,7 @@ function galleryFormatBytes(bytes) {
 }
 
 async function loadImageGalleryAdmin() {
+    if (!isImageGalleryOwnerSession()) return;
     const status = document.getElementById('image-gallery-admin-status');
     const summary = document.getElementById('image-gallery-summary');
     const usersBody = document.getElementById('image-gallery-users-body');
@@ -3782,6 +3790,8 @@ async function loadImageGalleryAdmin() {
                 <td>${escapeHtml(user.last_login_at || 'Never')}</td>
                 <td>
                     <button class="tbl-btn" data-gallery-reset-password="${escapeHtml(user.id)}">Reset Password</button>
+                    <button class="tbl-btn" data-gallery-edit-username="${escapeHtml(user.id)}" data-gallery-current-username="${escapeHtml(user.username || '')}">Edit Username</button>
+                    <button class="tbl-btn" data-gallery-edit-display="${escapeHtml(user.id)}" data-gallery-current-display="${escapeHtml(user.display_name || '')}">Edit Display</button>
                     <button class="tbl-btn" data-gallery-edit-email="${escapeHtml(user.id)}" data-gallery-current-email="${escapeHtml(user.email || '')}">Edit Email</button>
                     <button class="tbl-btn" data-gallery-resend-email="${escapeHtml(user.id)}" ${user.email && !user.email_verified_at ? '' : 'disabled'}>Resend Email</button>
                     <button class="tbl-btn" data-gallery-email-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.email_verified_at ? '0' : '1'}">${user.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
@@ -3856,12 +3866,70 @@ async function loadImageGalleryAdmin() {
             taxonomyBody.innerHTML = [...categoryRows, ...collectionRows].join('') || '<tr><td colspan="5">No categories or collections found.</td></tr>';
         }
         if (status) status.textContent = 'Image Gallery data loaded.';
+        await loadImageGalleryTables();
     } catch (err) {
         if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
     }
 }
 
+async function loadImageGalleryTables() {
+    if (!isImageGalleryOwnerSession()) return;
+    const tableSelect = document.getElementById('image-gallery-table-select');
+    const status = document.getElementById('image-gallery-table-status');
+    if (!tableSelect) return;
+    if (status) status.textContent = 'Loading Image Gallery tables...';
+    try {
+        const res = await fetch(`${API_BASE}/image-gallery/tables`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Image Gallery table request failed');
+        imageGalleryTables = data.tables || [];
+        tableSelect.innerHTML = imageGalleryTables.length
+            ? imageGalleryTables.map(table => `<option value="${escapeHtml(table.table_name)}">${escapeHtml(table.table_name)} (~${escapeHtml(table.estimated_rows ?? 0)} rows)</option>`).join('')
+            : '<option value="">No tables found</option>';
+        if (status) status.textContent = `${imageGalleryTables.length} Image Gallery tables loaded from ${data.schema || 'image_gallery'}.`;
+    } catch (err) {
+        if (status) status.textContent = `Image Gallery Tables Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+}
+
+async function viewImageGalleryTableData() {
+    if (!isImageGalleryOwnerSession()) return;
+    const tableName = document.getElementById('image-gallery-table-select')?.value;
+    const viewer = document.getElementById('image-gallery-table-viewer');
+    const title = document.getElementById('image-gallery-table-title');
+    const head = document.getElementById('image-gallery-table-head');
+    const body = document.getElementById('image-gallery-table-body');
+    const status = document.getElementById('image-gallery-table-status');
+    if (!tableName) return;
+    if (status) status.textContent = `Loading ${tableName} rows...`;
+    try {
+        const res = await fetch(`${API_BASE}/image-gallery/table-data?table_name=${encodeURIComponent(tableName)}&limit=100`);
+        if (handle401(res)) return;
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Image Gallery table data request failed');
+        const rows = data.data?.rows || [];
+        if (viewer) viewer.hidden = false;
+        if (title) title.textContent = `${data.data?.schema || 'image_gallery'}.${tableName} - ${rows.length} rows`;
+        if (!rows.length) {
+            if (head) head.innerHTML = '';
+            if (body) body.innerHTML = '<tr><td colspan="99">No rows found.</td></tr>';
+            if (status) status.textContent = 'Table loaded with no rows.';
+            return;
+        }
+        const columns = Object.keys(rows[0]);
+        if (head) head.innerHTML = `<tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`;
+        if (body) {
+            body.innerHTML = rows.map(row => `<tr>${columns.map(column => `<td>${escapeHtml(row[column] ?? '')}</td>`).join('')}</tr>`).join('');
+        }
+        if (status) status.textContent = `Loaded ${rows.length} rows from ${tableName}.`;
+    } catch (err) {
+        if (status) status.textContent = `Image Gallery Table Error: ${err instanceof Error ? err.message : String(err)}`;
+    }
+}
+
 async function postImageGalleryAdminAction(path, payload) {
+    if (!isImageGalleryOwnerSession()) return false;
     const res = await fetch(`${API_BASE}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4153,12 +4221,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('refresh-image-gallery-admin')
         ?.addEventListener('click', loadImageGalleryAdmin);
+    document.getElementById('refresh-image-gallery-tables')
+        ?.addEventListener('click', loadImageGalleryTables);
+    document.getElementById('view-image-gallery-table')
+        ?.addEventListener('click', viewImageGalleryTableData);
 
     document.getElementById('image-gallery-tab')
         ?.addEventListener('click', async (event) => {
+            if (!isImageGalleryOwnerSession()) return;
             const deleteUser = event.target.closest('[data-gallery-delete-user]');
             const deleteComment = event.target.closest('[data-gallery-delete-comment]');
             const resetPassword = event.target.closest('[data-gallery-reset-password]');
+            const editUsername = event.target.closest('[data-gallery-edit-username]');
+            const editDisplay = event.target.closest('[data-gallery-edit-display]');
             const editEmail = event.target.closest('[data-gallery-edit-email]');
             const resendEmail = event.target.closest('[data-gallery-resend-email]');
             const emailVerified = event.target.closest('[data-gallery-email-verified]');
@@ -4186,6 +4261,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     const password = prompt(`Enter a new Image Gallery password for user ${userId}. Minimum 8 characters.`);
                     if (password) {
                         await postImageGalleryAdminAction('/image-gallery/users/reset-password', { user_id: Number(userId), new_password: password });
+                    }
+                }
+                if (editUsername) {
+                    const userId = editUsername.dataset.galleryEditUsername;
+                    const current = editUsername.dataset.galleryCurrentUsername || '';
+                    const username = prompt(`Set Image Gallery username for user ${userId}.`, current);
+                    if (username) {
+                        await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), username: username.trim() });
+                    }
+                }
+                if (editDisplay) {
+                    const userId = editDisplay.dataset.galleryEditDisplay;
+                    const current = editDisplay.dataset.galleryCurrentDisplay || '';
+                    const displayName = prompt(`Set Image Gallery display name for user ${userId}. Leave blank to clear it.`, current);
+                    if (displayName !== null) {
+                        await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), display_name: displayName.trim() || null });
                     }
                 }
                 if (editEmail) {

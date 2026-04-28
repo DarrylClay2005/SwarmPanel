@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import html
+import hmac
 import json
 import logging
 import os
@@ -330,6 +331,16 @@ def _is_admin_auth(auth: dict[str, Any] | None) -> bool:
     return str(auth.get("role") or "admin").lower() == "admin" and not auth.get("guild_id")
 
 
+def _is_image_gallery_owner_username(username: Any) -> bool:
+    normalized = str(username or "").strip().lower()
+    owners = {str(name or "").strip().lower() for name in settings.image_gallery_owner_usernames if str(name or "").strip()}
+    return bool(normalized and normalized in owners)
+
+
+def _is_image_gallery_owner_auth(auth: dict[str, Any] | None) -> bool:
+    return _is_admin_auth(auth) and _is_image_gallery_owner_username(auth.get("username"))
+
+
 def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
     if _is_admin_auth(auth):
         return None
@@ -354,6 +365,13 @@ def _require_admin_auth(request: Request) -> dict[str, Any]:
     return auth
 
 
+def _require_image_gallery_owner_auth(request: Request) -> dict[str, Any]:
+    auth = _require_api_auth(request)
+    if not _is_image_gallery_owner_auth(auth):
+        raise HTTPException(status_code=403, detail="Image Gallery owner access required")
+    return auth
+
+
 def _require_guild_scope(auth: dict[str, Any], guild_id: str | int | None) -> None:
     scoped = _scoped_guild_id(auth)
     if scoped and str(guild_id) != scoped:
@@ -375,6 +393,8 @@ def _set_account_session(request: Request, username: str, guild_id: str | int) -
 
 
 async def _authenticate_login(username: str, password: str = "", guild_id: str | int | None = None) -> dict[str, Any] | None:
+    if _is_image_gallery_owner_username(username) and hmac.compare_digest(str(password or ""), settings.admin_password):
+        return {"username": str(username).strip(), "role": "admin", "guild_id": None}
     if verify_credentials(username, password, settings.admin_username, settings.admin_password):
         return {"username": username, "role": "admin", "guild_id": None}
 
@@ -699,10 +719,18 @@ async def logout(request: Request):
 async def index(request: Request):
     if not is_authenticated(request):
         return _redirect_login()
+    session_username = request.session.get(SESSION_USERNAME_KEY) or settings.admin_username
+    session_role = request.session.get(SESSION_ROLE_KEY) or "admin"
+    session_guild_id = request.session.get(SESSION_GUILD_ID_KEY)
     return templates.TemplateResponse(request, "index.html", {
-        "session_username": request.session.get(SESSION_USERNAME_KEY) or settings.admin_username,
-        "session_role": request.session.get(SESSION_ROLE_KEY) or "admin",
-        "session_guild_id": request.session.get(SESSION_GUILD_ID_KEY),
+        "session_username": session_username,
+        "session_role": session_role,
+        "session_guild_id": session_guild_id,
+        "session_image_gallery_owner": _is_image_gallery_owner_auth({
+            "username": session_username,
+            "role": session_role,
+            "guild_id": session_guild_id,
+        }),
     })
 
 
@@ -721,6 +749,7 @@ async def api_session_status(request: Request):
         "username": username,
         "role": role,
         "guild_id": str(guild_id) if guild_id else None,
+        "image_gallery_owner": _is_image_gallery_owner_auth(auth),
         "token": issue_api_token(settings.session_secret, username, role=role, guild_id=guild_id),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
@@ -749,6 +778,7 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         "username": auth["username"],
         "role": auth["role"],
         "guild_id": auth.get("guild_id"),
+        "image_gallery_owner": _is_image_gallery_owner_auth(auth),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -1410,7 +1440,7 @@ async def get_table_data(
 
 @app.get("/api/image-gallery/admin")
 async def image_gallery_admin(request: Request, limit: int = 50):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     try:
         return {"ok": True, "data": await db.get_image_gallery_admin_data(limit)}
     except Exception as exc:
@@ -1418,9 +1448,35 @@ async def image_gallery_admin(request: Request, limit: int = 50):
         raise HTTPException(status_code=503, detail=f"Image Gallery database unavailable: {exc}")
 
 
+@app.get("/api/image-gallery/tables")
+async def image_gallery_tables(request: Request):
+    _require_image_gallery_owner_auth(request)
+    try:
+        schema = settings.image_gallery_schema
+        return {"ok": True, "schema": schema, "tables": await db.list_tables(schema)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        action_logger.error("Failed to fetch image gallery tables: %s", exc)
+        raise HTTPException(status_code=503, detail=f"Image Gallery database unavailable: {exc}")
+
+
+@app.get("/api/image-gallery/table-data")
+async def image_gallery_table_data(request: Request, table_name: str, limit: int = 100):
+    _require_image_gallery_owner_auth(request)
+    try:
+        data = await db.get_table_data(settings.image_gallery_schema, table_name, limit)
+        return {"ok": True, "data": data}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        action_logger.error("Failed to fetch image gallery table data table=%s: %s", table_name, exc)
+        raise HTTPException(status_code=503, detail=f"Image Gallery database unavailable: {exc}")
+
+
 @app.post("/api/image-gallery/users/delete")
 async def image_gallery_delete_user(request: Request, payload: GalleryUserDeleteRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     await db.delete_image_gallery_user(payload.user_id)
     action_logger.warning("image_gallery_delete_user user_id=%s", payload.user_id)
     return {"ok": True}
@@ -1428,7 +1484,7 @@ async def image_gallery_delete_user(request: Request, payload: GalleryUserDelete
 
 @app.post("/api/image-gallery/comments/delete")
 async def image_gallery_delete_comment(request: Request, payload: GalleryCommentDeleteRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     await db.delete_image_gallery_comment(payload.comment_id)
     action_logger.warning("image_gallery_delete_comment comment_id=%s", payload.comment_id)
     return {"ok": True}
@@ -1436,7 +1492,7 @@ async def image_gallery_delete_comment(request: Request, payload: GalleryComment
 
 @app.post("/api/image-gallery/users/reset-password")
 async def image_gallery_reset_password(request: Request, payload: GalleryPasswordResetRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     try:
         await db.reset_image_gallery_user_password(payload.user_id, payload.new_password)
     except ValueError as exc:
@@ -1447,7 +1503,7 @@ async def image_gallery_reset_password(request: Request, payload: GalleryPasswor
 
 @app.post("/api/image-gallery/users/update")
 async def image_gallery_update_user(request: Request, payload: GalleryUserUpdateRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     updates = payload.model_dump(exclude={"user_id"}, exclude_none=True)
     try:
         user = await db.update_image_gallery_user(payload.user_id, updates)
@@ -1459,7 +1515,7 @@ async def image_gallery_update_user(request: Request, payload: GalleryUserUpdate
 
 @app.post("/api/image-gallery/users/email-verified")
 async def image_gallery_set_email_verified(request: Request, payload: GalleryUserFlagRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     user = await db.set_image_gallery_email_verified(payload.user_id, payload.verified)
     action_logger.warning("image_gallery_email_verified user_id=%s verified=%s", payload.user_id, payload.verified)
     return {"ok": True, "user": user}
@@ -1467,7 +1523,7 @@ async def image_gallery_set_email_verified(request: Request, payload: GalleryUse
 
 @app.post("/api/image-gallery/users/age-verified")
 async def image_gallery_set_age_verified(request: Request, payload: GalleryUserFlagRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     user = await db.set_image_gallery_age_verified(payload.user_id, payload.verified)
     action_logger.warning("image_gallery_age_verified user_id=%s verified=%s", payload.user_id, payload.verified)
     return {"ok": True, "user": user}
@@ -1475,7 +1531,7 @@ async def image_gallery_set_age_verified(request: Request, payload: GalleryUserF
 
 @app.post("/api/image-gallery/users/resend-verification")
 async def image_gallery_resend_verification(request: Request, payload: GalleryUserDeleteRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     user = await db.get_image_gallery_user_admin(payload.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="Image Gallery user not found")
@@ -1492,7 +1548,7 @@ async def image_gallery_resend_verification(request: Request, payload: GalleryUs
 
 @app.post("/api/image-gallery/media/update")
 async def image_gallery_update_media(request: Request, payload: GalleryMediaUpdateRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     updates = payload.model_dump(exclude={"media_id"}, exclude_none=True)
     try:
         media = await db.update_image_gallery_media(payload.media_id, updates)
@@ -1504,7 +1560,7 @@ async def image_gallery_update_media(request: Request, payload: GalleryMediaUpda
 
 @app.post("/api/image-gallery/media/delete")
 async def image_gallery_delete_media(request: Request, payload: GalleryMediaDeleteRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     await db.delete_image_gallery_media(payload.media_id)
     action_logger.warning("image_gallery_delete_media media_id=%s", payload.media_id)
     return {"ok": True}
@@ -1512,7 +1568,7 @@ async def image_gallery_delete_media(request: Request, payload: GalleryMediaDele
 
 @app.post("/api/image-gallery/reports/status")
 async def image_gallery_update_report_status(request: Request, payload: GalleryReportStatusRequest):
-    _require_admin_auth(request)
+    _require_image_gallery_owner_auth(request)
     try:
         await db.update_image_gallery_report_status(payload.report_id, payload.status)
     except ValueError as exc:

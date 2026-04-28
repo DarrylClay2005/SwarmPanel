@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=17" />
+  <link rel="stylesheet" href="/static/styles.css?v=18-gallery-owner" />
 </head>
-<body class="{% if session_role != 'admin' and session_guild_id %}guild-scoped-session{% endif %}">
+<body class="{% if session_role != 'admin' and session_guild_id %}guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
     <div class="topbar-actions">
@@ -27,7 +27,7 @@
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
     <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
     <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
-    <button class="swarm-tab admin-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
+    <button class="swarm-tab admin-only gallery-owner-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
@@ -480,7 +480,7 @@
     </section>
   
   </div>
-  <div class="swarm-tab-panel" id="image-gallery-tab">
+  <div class="swarm-tab-panel gallery-owner-only" id="image-gallery-tab">
     <section class="panel admin-only">
       <div class="section-title-row">
         <div>
@@ -491,6 +491,20 @@
       </div>
       <div id="image-gallery-admin-status" class="status"></div>
       <div class="diagnostic-grid" id="image-gallery-summary"></div>
+      <h3>Database Tables</h3>
+      <div class="row">
+        <select id="image-gallery-table-select"></select>
+        <button id="refresh-image-gallery-tables" type="button">Refresh Tables</button>
+        <button id="view-image-gallery-table" type="button">View Table Rows</button>
+      </div>
+      <div id="image-gallery-table-status" class="status"></div>
+      <div id="image-gallery-table-viewer" class="table-wrap gallery-table-viewer" hidden>
+        <h4 id="image-gallery-table-title">Table Rows</h4>
+        <table class="sessions-table">
+          <thead id="image-gallery-table-head"></thead>
+          <tbody id="image-gallery-table-body"></tbody>
+        </table>
+      </div>
       <h3>Users</h3>
       <div class="table-wrap">
         <table class="sessions-table">
@@ -558,6 +572,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=19"></script>
+  <script src="/static/final_app.js?v=20-gallery-owner"></script>
 </body>
 </html>
