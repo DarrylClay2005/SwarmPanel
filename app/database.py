@@ -590,6 +590,19 @@ class PanelDatabase:
         )
         return {"username": row["username"], "guild_id": str(row["guild_id"]), "email": row.get("email"), "email_verified": bool(row.get("email_verified_at"))}
 
+    async def get_account_guild_id_for_username(self, username: str) -> str | None:
+        username = _normalize_account_username(username)
+        row = await self._fetchone(
+            f"""
+            SELECT guild_id
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE username = %s
+            LIMIT 1
+            """,
+            (username,),
+        )
+        return str(row["guild_id"]) if row and row.get("guild_id") is not None else None
+
     def _serialize_account_profile(self, row: dict[str, Any]) -> dict[str, Any]:
         profile = dict(row)
         if profile.get("guild_id") is not None:

@@ -44,6 +44,7 @@ let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let currentPanelSession = { role: 'admin', guild_id: null, account_guild_id: null, username: '', image_gallery_owner: false, admin_mode: true };
+let adminModeSwitching = false;
 let inviteOnlyMode = false;
 let panelAppStarted = false;
 let panelSessionChecked = false;
@@ -333,17 +334,18 @@ function updateAdminModeToggle() {
     const toggle = document.getElementById('admin-mode-toggle');
     const status = document.getElementById('admin-mode-status');
     const linkedGuildId = getLinkedGuildId();
+    const canTryModeSwitch = Boolean(linkedGuildId || isAdminSession());
 
     if (wrap) wrap.hidden = !linkedGuildId;
     if (toggle) {
         toggle.checked = isAdminSession();
-        toggle.disabled = !linkedGuildId;
+        toggle.disabled = adminModeSwitching || !canTryModeSwitch;
     }
     if (!status) return;
-    status.classList.toggle('topbar-status-clickable', Boolean(linkedGuildId));
-    status.setAttribute('aria-disabled', linkedGuildId ? 'false' : 'true');
+    status.classList.toggle('topbar-status-clickable', canTryModeSwitch);
+    status.setAttribute('aria-disabled', canTryModeSwitch ? 'false' : 'true');
     status.setAttribute('aria-pressed', isAdminSession() ? 'true' : 'false');
-    status.title = linkedGuildId
+    status.title = canTryModeSwitch
         ? (isAdminSession() ? 'Switch to guild mode' : 'Switch to admin mode')
         : '';
 
@@ -360,8 +362,7 @@ function updateAdminModeToggle() {
 }
 
 function toggleAdminModeFromStatus() {
-    if (!getLinkedGuildId()) return;
-    if (document.getElementById('admin-mode-toggle')?.disabled) return;
+    if (adminModeSwitching || (!getLinkedGuildId() && !isAdminSession())) return;
     setAdminMode(!isAdminSession());
 }
 
@@ -399,10 +400,7 @@ async function refreshPanelAfterModeSwitch() {
 async function setAdminMode(enabled) {
     const toggle = document.getElementById('admin-mode-toggle');
     const desired = Boolean(enabled);
-    if (!getLinkedGuildId()) {
-        updateAdminModeToggle();
-        return;
-    }
+    adminModeSwitching = true;
     if (toggle) toggle.disabled = true;
     updateRemoteConnectionStatus(desired ? 'Switching to admin mode...' : 'Switching to guild mode...', 'idle');
     try {
@@ -424,7 +422,8 @@ async function setAdminMode(enabled) {
         if (toggle) toggle.checked = isAdminSession();
         updateRemoteConnectionStatus(err instanceof Error ? err.message : String(err), 'offline');
     } finally {
-        if (toggle) toggle.disabled = !getLinkedGuildId();
+        adminModeSwitching = false;
+        if (toggle) toggle.disabled = !getLinkedGuildId() && !isAdminSession();
         updateAdminModeToggle();
     }
 }

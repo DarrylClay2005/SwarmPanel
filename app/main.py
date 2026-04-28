@@ -360,6 +360,20 @@ def _account_guild_id(auth: dict[str, Any] | None) -> str | None:
     return str(guild_id) if guild_id not in (None, "") else None
 
 
+async def _resolve_account_guild_id(auth: dict[str, Any] | None, username: str | None = None) -> str | None:
+    linked_guild_id = _account_guild_id(auth)
+    if linked_guild_id:
+        return linked_guild_id
+    lookup_username = str(username or (auth or {}).get("username") or "").strip()
+    if not lookup_username:
+        return None
+    try:
+        return await db.get_account_guild_id_for_username(lookup_username)
+    except Exception as exc:
+        action_logger.warning("Failed to resolve account guild for %s: %s", lookup_username, exc)
+        return None
+
+
 def _client_id_from_token(token: str) -> str | None:
     token_head = str(token or "").split(".", 1)[0].strip()
     if not token_head:
@@ -763,16 +777,17 @@ async def api_session_status(request: Request):
     role = auth.get("role") or "admin"
     guild_id = auth.get("guild_id")
     admin_mode = _is_admin_auth(auth)
+    account_guild_id = await _resolve_account_guild_id(auth, username)
     return {
         "authenticated": True,
         "mode": auth.get("mode") or "token",
         "username": username,
         "role": role,
-        "guild_id": str(guild_id) if guild_id else None,
-        "account_guild_id": _account_guild_id(auth),
+        "guild_id": str(guild_id or account_guild_id) if (guild_id or account_guild_id) else None,
+        "account_guild_id": account_guild_id,
         "admin_mode": admin_mode,
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
-        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=guild_id, admin_mode=admin_mode),
+        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=account_guild_id or guild_id, admin_mode=admin_mode),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -788,11 +803,12 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         _set_admin_session(request, auth["username"])
     else:
         _set_account_session(request, auth["username"], auth["guild_id"])
+    linked_guild_id = auth.get("guild_id") or (await _resolve_account_guild_id(auth, auth["username"]) if auth["role"] == "admin" else None)
     token = issue_api_token(
         settings.session_secret,
         auth["username"],
         role=auth["role"],
-        guild_id=auth.get("guild_id"),
+        guild_id=linked_guild_id,
         admin_mode=_is_admin_auth(auth),
     )
     return {
@@ -800,8 +816,8 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         "token": token,
         "username": auth["username"],
         "role": auth["role"],
-        "guild_id": auth.get("guild_id"),
-        "account_guild_id": auth.get("guild_id"),
+        "guild_id": linked_guild_id,
+        "account_guild_id": linked_guild_id,
         "admin_mode": _is_admin_auth(auth),
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
         "pages_public_url": settings.pages_public_url,
@@ -848,10 +864,13 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
 async def api_session_admin_mode(request: Request, payload: SessionAdminModeRequest):
     auth = _require_api_auth(request)
     username = str(auth.get("username") or settings.admin_username)
-    linked_guild_id = _account_guild_id(auth)
+    linked_guild_id = await _resolve_account_guild_id(auth, username)
     if not linked_guild_id:
-        admin_mode = True
-        request.session[SESSION_ADMIN_MODE_KEY] = True
+        if payload.enabled:
+            admin_mode = True
+            request.session[SESSION_ADMIN_MODE_KEY] = True
+        else:
+            raise HTTPException(status_code=400, detail="This admin account is not linked to a registered guild.")
     else:
         admin_mode = bool(payload.enabled)
         if is_authenticated(request):
