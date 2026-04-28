@@ -36,25 +36,29 @@ def send_email(settings: Settings, to_email: str, subject: str, body: str) -> bo
         return False
 
 
-def send_verification_email(settings: Settings, to_email: str, verify_url: str) -> bool:
+def send_verification_email(settings: Settings, to_email: str, verify_url: str, code: str) -> bool:
     return send_email(
         settings,
         to_email,
         "Verify your SwarmPanel email",
         "Welcome to SwarmPanel.\n\n"
-        "Verify this email address by opening the link below:\n\n"
+        f"Your verification code is:\n\n{code}\n\n"
+        "Enter this code in SwarmPanel to verify your email address.\n\n"
+        "You can also verify by opening the link below:\n\n"
         f"{verify_url}\n\n"
         "If you did not create this account, you can ignore this message.",
     )
 
 
-def send_image_gallery_verification_email(settings: Settings, to_email: str, verify_url: str) -> bool:
+def send_image_gallery_verification_email(settings: Settings, to_email: str, verify_url: str, code: str) -> bool:
     return send_email(
         settings,
         to_email,
         "Verify your Image Gallery email",
         "Welcome to Image Gallery.\n\n"
-        "Verify this email address by opening the link below:\n\n"
+        f"Your verification code is:\n\n{code}\n\n"
+        "Enter this code in Image Gallery to verify your email address.\n\n"
+        "You can also verify by opening the link below:\n\n"
         f"{verify_url}\n\n"
         "If you did not create this account, you can ignore this message.",
     )

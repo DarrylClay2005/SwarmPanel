@@ -71,6 +71,14 @@
               <input id="profile-display-name" type="text" maxlength="80" placeholder="Your public display name" />
             </label>
             <label class="control-field">
+              <span>Email</span>
+              <input id="profile-email" type="email" autocomplete="email" placeholder="you@example.com" />
+            </label>
+            <label class="control-field">
+              <span>Email Code</span>
+              <input id="profile-email-code" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" />
+            </label>
+            <label class="control-field">
               <span>Avatar URL</span>
               <input id="profile-avatar-url" type="url" placeholder="https://..." />
             </label>
@@ -105,6 +113,8 @@
           </label>
           <div class="row">
             <button id="save-user-profile" type="button">Save Profile</button>
+            <button id="save-panel-email" type="button">Save Email + Send Code</button>
+            <button id="verify-panel-email-code" type="button">Verify Email Code</button>
             <button id="resend-panel-email-verification" type="button" hidden>Resend Email Verification</button>
             <span id="user-profile-status" class="status"></span>
           </div>
@@ -548,6 +558,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=18"></script>
+  <script src="/static/final_app.js?v=19"></script>
 </body>
 </html>

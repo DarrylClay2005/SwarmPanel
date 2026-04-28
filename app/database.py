@@ -527,6 +527,45 @@ class PanelDatabase:
         )
         return await self.get_account_profile(username, gid)
 
+    async def update_account_email(self, username: str, guild_id: str | int, email: str | None) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        normalized = _normalize_email(email)
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email = %s, email_verified_at = NULL, email_verification_token_hash = NULL, email_verification_sent_at = NULL
+            WHERE username = %s AND guild_id = %s
+            """,
+            (normalized, username, gid),
+        )
+        return await self.get_account_profile(username, gid)
+
+    async def verify_account_email_code(self, username: str, guild_id: str | int, code: str) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        token_hash = _verification_token_hash(code)
+        row = await self._fetchone(
+            f"""
+            SELECT username, guild_id
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE username = %s AND guild_id = %s AND email IS NOT NULL AND email_verification_token_hash = %s
+            LIMIT 1
+            """,
+            (username, gid, token_hash),
+        )
+        if not row:
+            return None
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email_verified_at = CURRENT_TIMESTAMP, email_verification_token_hash = NULL
+            WHERE username = %s AND guild_id = %s
+            """,
+            (username, gid),
+        )
+        return await self.get_account_profile(username, gid)
+
     async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")

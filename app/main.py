@@ -170,6 +170,10 @@ def _image_gallery_verification_url(request: Request, token: str) -> str:
     return base.replace("http://", "https://").rstrip("/") + f"/api/auth/verify-email?token={token}"
 
 
+def _verification_code() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
 def _wants_json(request: Request) -> bool:
     accept = request.headers.get("accept", "")
     return "application/json" in accept and "text/html" not in accept
@@ -214,6 +218,14 @@ class SessionRegisterRequest(BaseModel):
     username: str
     guild_id: str | int
     email: str | None = None
+
+
+class SessionEmailUpdateRequest(BaseModel):
+    email: str | None = None
+
+
+class SessionEmailCodeRequest(BaseModel):
+    code: str
 
 
 class GalleryUserDeleteRequest(BaseModel):
@@ -652,7 +664,7 @@ async def login_submit(
 
 @app.post("/register")
 async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...), email: str = Form("")):
-    email_token = secrets.token_urlsafe(32) if email else None
+    email_token = _verification_code() if email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
         account = await db.register_account_login(username, registerable_guild_id, email, email_token)
@@ -672,7 +684,7 @@ async def register_submit(request: Request, username: str = Form(...), guild_id:
         )
 
     if account.get("email") and email_token:
-        send_verification_email(settings, account["email"], _verification_url(request, email_token))
+        send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
     _set_account_session(request, account["username"], account["guild_id"])
     return RedirectResponse(url="/", status_code=303)
 
@@ -744,7 +756,7 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
 
 @app.post("/api/session/register")
 async def api_session_register(request: Request, payload: SessionRegisterRequest):
-    email_token = secrets.token_urlsafe(32) if payload.email else None
+    email_token = _verification_code() if payload.email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(payload.guild_id)
         account = await db.register_account_login(payload.username, registerable_guild_id, payload.email, email_token)
@@ -753,7 +765,7 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
 
     verification_sent = False
     if account.get("email") and email_token:
-        verification_sent = send_verification_email(settings, account["email"], _verification_url(request, email_token))
+        verification_sent = send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
 
     _set_account_session(request, account["username"], account["guild_id"])
     token = issue_api_token(
@@ -800,10 +812,45 @@ async def api_resend_session_verification(request: Request):
         raise HTTPException(status_code=400, detail="This account does not have an email address.")
     if profile.get("email_verified"):
         return {"ok": True, "email_verification_sent": False, "already_verified": True}
-    email_token = secrets.token_urlsafe(32)
+    email_token = _verification_code()
     profile = await db.issue_account_email_verification_token(username, scoped_guild_id, email_token)
-    verification_sent = bool(profile and send_verification_email(settings, profile["email"], _verification_url(request, email_token)))
+    verification_sent = bool(profile and send_verification_email(settings, profile["email"], _verification_url(request, email_token), email_token))
     return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
+
+
+@app.post("/api/session/email")
+async def api_update_session_email(request: Request, payload: SessionEmailUpdateRequest):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required")
+    try:
+        profile = await db.update_account_email(username, scoped_guild_id, payload.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    verification_sent = False
+    if profile and profile.get("email"):
+        email_token = _verification_code()
+        profile = await db.issue_account_email_verification_token(username, scoped_guild_id, email_token)
+        verification_sent = bool(profile and send_verification_email(settings, profile["email"], _verification_url(request, email_token), email_token))
+    return {"ok": True, "profile": profile, "email_verification_sent": verification_sent}
+
+
+@app.post("/api/session/email/verify")
+async def api_verify_session_email_code(request: Request, payload: SessionEmailCodeRequest):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required")
+    code = re.sub(r"\D+", "", str(payload.code or ""))[:12]
+    if not code:
+        raise HTTPException(status_code=400, detail="Enter the verification code from your email.")
+    profile = await db.verify_account_email_code(username, scoped_guild_id, code)
+    if not profile:
+        raise HTTPException(status_code=400, detail="Invalid verification code.")
+    return {"ok": True, "profile": profile}
 
 
 @app.post("/api/session/logout")
@@ -1436,9 +1483,9 @@ async def image_gallery_resend_verification(request: Request, payload: GalleryUs
         raise HTTPException(status_code=400, detail="This Image Gallery user does not have an email address.")
     if user.get("email_verified_at"):
         return {"ok": True, "email_verification_sent": False, "already_verified": True}
-    email_token = secrets.token_urlsafe(32)
+    email_token = _verification_code()
     user = await db.issue_image_gallery_email_verification_token(payload.user_id, email_token)
-    verification_sent = bool(user and send_image_gallery_verification_email(settings, user["email"], _image_gallery_verification_url(request, email_token)))
+    verification_sent = bool(user and send_image_gallery_verification_email(settings, user["email"], _image_gallery_verification_url(request, email_token), email_token))
     action_logger.warning("image_gallery_resend_verification user_id=%s sent=%s", payload.user_id, verification_sent)
     return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
 

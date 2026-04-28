@@ -1327,6 +1327,11 @@ function setUserProfileInputsDisabled(disabled) {
         'profile-public-profile',
         'profile-bio',
         'save-user-profile',
+        'profile-email',
+        'profile-email-code',
+        'save-panel-email',
+        'verify-panel-email-code',
+        'resend-panel-email-verification',
     ].forEach(id => {
         const element = document.getElementById(id);
         if (element) element.disabled = disabled;
@@ -1347,6 +1352,8 @@ function renderUserProfile(data = userProfileState) {
 
     const fieldValues = {
         'profile-display-name': profile.display_name || '',
+        'profile-email': profile.email || '',
+        'profile-email-code': '',
         'profile-avatar-url': profile.avatar_url || '',
         'profile-server-name': profile.server_name || '',
         'profile-server-icon-url': profile.server_icon_url || '',
@@ -1412,6 +1419,53 @@ async function loadUserProfile() {
     }
 }
 
+async function savePanelEmailAndSendCode() {
+    if (!userProfileState.editable) return;
+    setUserProfileStatus('Saving email and sending code...');
+    try {
+        const res = await fetch(`${API_BASE}/session/email`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: document.getElementById('profile-email')?.value?.trim() || null }),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Email update failed');
+        userProfileState.profile = data.profile || userProfileState.profile;
+        renderUserProfile(userProfileState);
+        setUserProfileStatus(
+            data.profile?.email
+                ? data.email_verification_sent
+                    ? 'Verification code sent. Enter it in Email Code.'
+                    : 'Email saved, but the verification code could not be sent.'
+                : 'Email removed.',
+            Boolean(data.profile?.email) && !data.email_verification_sent,
+        );
+    } catch (err) {
+        setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
+    }
+}
+
+async function verifyPanelEmailCode() {
+    if (!userProfileState.editable) return;
+    setUserProfileStatus('Verifying email code...');
+    try {
+        const res = await fetch(`${API_BASE}/session/email/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: document.getElementById('profile-email-code')?.value?.trim() || '' }),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Email verification failed');
+        userProfileState.profile = data.profile || userProfileState.profile;
+        renderUserProfile(userProfileState);
+        setUserProfileStatus('Email verified.');
+    } catch (err) {
+        setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
+    }
+}
+
 async function resendPanelEmailVerification() {
     if (!userProfileState.editable) return;
     const button = document.getElementById('resend-panel-email-verification');
@@ -1424,10 +1478,10 @@ async function resendPanelEmailVerification() {
         if (!res.ok) throw new Error(data.detail || 'Verification resend failed');
         setUserProfileStatus(
             data.email_verification_sent
-                ? 'Verification email sent.'
+                ? 'Verification code sent. Enter it in Email Code.'
                 : data.already_verified
                     ? 'Email is already verified.'
-                    : 'Verification email could not be sent.',
+                    : 'Verification code could not be sent.',
             !data.email_verification_sent && !data.already_verified,
         );
         await loadUserProfile();
@@ -3976,6 +4030,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('save-user-profile')
         ?.addEventListener('click', saveUserProfile);
+    document.getElementById('save-panel-email')
+        ?.addEventListener('click', savePanelEmailAndSendCode);
+    document.getElementById('verify-panel-email-code')
+        ?.addEventListener('click', verifyPanelEmailCode);
     document.getElementById('resend-panel-email-verification')
         ?.addEventListener('click', resendPanelEmailVerification);
 
