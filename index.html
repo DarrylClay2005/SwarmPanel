@@ -7,13 +7,13 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="./app/static/styles.css?v=19-admin-mode" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=22-swarm-ux" />
 </head>
 <body>
   <header class="topbar">
     <h1>SwarmPanel Live</h1>
     <div class="topbar-actions">
-      <span id="admin-mode-status" class="topbar-status" data-tone="idle">Connecting</span>
+      <span id="admin-mode-status" class="topbar-status" data-tone="idle" role="button" tabindex="0" aria-pressed="false">Connecting</span>
       <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" hidden>
         <input id="admin-mode-toggle" type="checkbox" />
         <span>Admin Mode</span>
@@ -85,7 +85,7 @@
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
     <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
     <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
-    <button class="swarm-tab admin-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
+    <button class="swarm-tab admin-only gallery-owner-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
@@ -542,7 +542,7 @@
     </section>
 
   </div>
-  <div class="swarm-tab-panel" id="image-gallery-tab">
+  <div class="swarm-tab-panel gallery-owner-only" id="image-gallery-tab">
     <section class="panel admin-only">
       <div class="section-title-row">
         <div>
@@ -553,6 +553,65 @@
       </div>
       <div id="image-gallery-admin-status" class="status"></div>
       <div class="diagnostic-grid" id="image-gallery-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="Image Gallery controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="image-gallery-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="image-gallery-search" type="search" placeholder="users, titles, reports" />
+        </label>
+        <label class="control-field">
+          <span>Scope</span>
+          <select id="image-gallery-scope-select">
+            <option value="all">All</option>
+            <option value="users">Users</option>
+            <option value="media">Media</option>
+            <option value="reports">Reports</option>
+            <option value="comments">Comments</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Media Status</span>
+          <select id="image-gallery-media-status-select">
+            <option value="all">All</option>
+            <option value="clear">Clear</option>
+            <option value="review">Review</option>
+            <option value="blocked">Blocked</option>
+            <option value="adult">18+</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="image-gallery-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="activity">Most Active</option>
+            <option value="reports">Open Reports</option>
+          </select>
+        </label>
+        <button id="image-gallery-clear-filters" type="button">Clear Filters</button>
+      </div>
+      <h3>Database Tables</h3>
+      <div class="row">
+        <select id="image-gallery-table-select"></select>
+        <button id="refresh-image-gallery-tables" type="button">Refresh Tables</button>
+        <button id="view-image-gallery-table" type="button">View Table Rows</button>
+      </div>
+      <div id="image-gallery-table-status" class="status"></div>
+      <div id="image-gallery-table-viewer" class="table-wrap gallery-table-viewer" hidden>
+        <h4 id="image-gallery-table-title">Table Rows</h4>
+        <table class="sessions-table">
+          <thead id="image-gallery-table-head"></thead>
+          <tbody id="image-gallery-table-body"></tbody>
+        </table>
+      </div>
       <h3>Users</h3>
       <div class="table-wrap">
         <table class="sessions-table">
@@ -625,6 +684,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=21-admin-mode"></script>
+  <script src="./app/static/final_app.js?v=22-swarm-ux"></script>
 </body>
 </html>

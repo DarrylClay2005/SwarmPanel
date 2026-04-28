@@ -340,6 +340,12 @@ function updateAdminModeToggle() {
         toggle.disabled = !linkedGuildId;
     }
     if (!status) return;
+    status.classList.toggle('topbar-status-clickable', Boolean(linkedGuildId));
+    status.setAttribute('aria-disabled', linkedGuildId ? 'false' : 'true');
+    status.setAttribute('aria-pressed', isAdminSession() ? 'true' : 'false');
+    status.title = linkedGuildId
+        ? (isAdminSession() ? 'Switch to guild mode' : 'Switch to admin mode')
+        : '';
 
     if (isAdminSession()) {
         status.textContent = linkedGuildId ? `Admin Mode · Guild ${linkedGuildId}` : 'Admin Mode';
@@ -351,6 +357,12 @@ function updateAdminModeToggle() {
         status.textContent = currentPanelSession.username || 'Connected';
         status.dataset.tone = 'idle';
     }
+}
+
+function toggleAdminModeFromStatus() {
+    if (!getLinkedGuildId()) return;
+    if (document.getElementById('admin-mode-toggle')?.disabled) return;
+    setAdminMode(!isAdminSession());
 }
 
 async function refreshPanelAfterModeSwitch() {
@@ -3843,6 +3855,10 @@ async function sendPanelAction(action) {
 // ================================
 let dbSchemas = [];
 let imageGalleryTables = [];
+let imageGalleryAdminState = {
+    payload: null,
+    filters: { query: '', scope: 'all', mediaStatus: 'all', sort: 'newest' },
+};
 
 function galleryFormatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -3852,9 +3868,69 @@ function galleryFormatBytes(bytes) {
     return `${value} B`;
 }
 
-async function loadImageGalleryAdmin() {
-    if (!isImageGalleryOwnerSession()) return;
-    const status = document.getElementById('image-gallery-admin-status');
+function getImageGalleryLimit() {
+    const raw = Number(document.getElementById('image-gallery-limit-select')?.value || 100);
+    return Math.max(1, Math.min(raw || 100, 200));
+}
+
+function gallerySearchText(...values) {
+    return values.map(value => String(value ?? '').toLowerCase()).join(' ');
+}
+
+function imageGalleryDateValue(row) {
+    const value = row?.created_at || row?.last_login_at || row?.email_verified_at || '';
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? time : 0;
+}
+
+function imageGalleryMatchesQuery(row, fields, query) {
+    if (!query) return true;
+    return gallerySearchText(...fields.map(field => row?.[field])).includes(query);
+}
+
+function currentImageGalleryFilters() {
+    return {
+        query: String(document.getElementById('image-gallery-search')?.value || '').trim().toLowerCase(),
+        scope: document.getElementById('image-gallery-scope-select')?.value || 'all',
+        mediaStatus: document.getElementById('image-gallery-media-status-select')?.value || 'all',
+        sort: document.getElementById('image-gallery-sort-select')?.value || 'newest',
+    };
+}
+
+function setImageGalleryLoading(isLoading) {
+    const tab = document.getElementById('image-gallery-tab');
+    const refresh = document.getElementById('refresh-image-gallery-admin');
+    if (tab) tab.classList.toggle('gallery-admin-loading', Boolean(isLoading));
+    if (refresh) refresh.disabled = Boolean(isLoading);
+}
+
+function sortImageGalleryRows(rows, sort, kind) {
+    const sorted = [...rows];
+    if (sort === 'oldest') {
+        sorted.sort((a, b) => imageGalleryDateValue(a) - imageGalleryDateValue(b));
+    } else if (sort === 'activity' && kind === 'users') {
+        sorted.sort((a, b) => (
+            Number(b.media_count || 0) + Number(b.comment_count || 0) + Number(b.bookmark_count || 0) + Number(b.collection_count || 0)
+        ) - (
+            Number(a.media_count || 0) + Number(a.comment_count || 0) + Number(a.bookmark_count || 0) + Number(a.collection_count || 0)
+        ));
+    } else if (sort === 'reports' && kind === 'reports') {
+        sorted.sort((a, b) => Number(b.status === 'open') - Number(a.status === 'open') || imageGalleryDateValue(b) - imageGalleryDateValue(a));
+    } else {
+        sorted.sort((a, b) => imageGalleryDateValue(b) - imageGalleryDateValue(a));
+    }
+    return sorted;
+}
+
+function galleryTd(label, value) {
+    return `<td data-label="${escapeHtml(label)}">${value}</td>`;
+}
+
+function renderImageGalleryAdmin() {
+    const payload = imageGalleryAdminState.payload || {};
+    const filters = currentImageGalleryFilters();
+    imageGalleryAdminState.filters = filters;
+
     const summary = document.getElementById('image-gallery-summary');
     const usersBody = document.getElementById('image-gallery-users-body');
     const reportsBody = document.getElementById('image-gallery-reports-body');
@@ -3862,125 +3938,168 @@ async function loadImageGalleryAdmin() {
     const mediaBody = document.getElementById('image-gallery-media-body');
     const taxonomyBody = document.getElementById('image-gallery-taxonomy-body');
     if (!usersBody || !commentsBody || !mediaBody) return;
+
+    const totals = payload.summary || {};
+    const query = filters.query;
+    const scope = filters.scope;
+    const shouldShow = (kind) => scope === 'all' || scope === kind;
+
+    const users = sortImageGalleryRows((payload.users || []).filter(user => (
+        shouldShow('users') && imageGalleryMatchesQuery(user, ['id', 'username', 'display_name', 'email'], query)
+    )), filters.sort, 'users');
+    const reports = sortImageGalleryRows((payload.reports || []).filter(report => (
+        shouldShow('reports') && imageGalleryMatchesQuery(report, ['id', 'username', 'display_name', 'media_title', 'reason', 'details', 'status'], query)
+    )), filters.sort, 'reports');
+    const comments = sortImageGalleryRows((payload.comments || []).filter(comment => (
+        shouldShow('comments') && imageGalleryMatchesQuery(comment, ['id', 'username', 'display_name', 'media_title', 'body'], query)
+    )), filters.sort, 'comments');
+    const media = sortImageGalleryRows((payload.media || []).filter(item => {
+        if (!shouldShow('media') || !imageGalleryMatchesQuery(item, ['id', 'username', 'title', 'media_kind', 'moderation_status', 'moderation_reason'], query)) return false;
+        if (filters.mediaStatus === 'all') return true;
+        if (filters.mediaStatus === 'adult') return Boolean(item.is_adult);
+        return String(item.moderation_status || 'clear').toLowerCase() === filters.mediaStatus;
+    }), filters.sort, 'media');
+    const categories = (payload.categories || []).filter(category => imageGalleryMatchesQuery(category, ['name', 'slug', 'media_kind'], query));
+    const collections = (payload.collections || []).filter(collection => imageGalleryMatchesQuery(collection, ['name', 'username', 'user_id'], query));
+
+    if (summary) {
+        summary.innerHTML = [
+            ['Schema', payload.schema || 'image_gallery'],
+            ['Users', `${users.length}/${totals.users ?? (payload.users || []).length}`],
+            ['Media', `${media.length}/${totals.media ?? (payload.media || []).length}`],
+            ['Comments', `${comments.length}/${totals.comments ?? (payload.comments || []).length}`],
+            ['Open Reports', totals.reports_open ?? (payload.reports || []).filter(report => report.status === 'open').length],
+            ['Collections', totals.collections ?? (payload.collections || []).length],
+        ].map(([label, value]) => `<div class="diagnostic-item gallery-summary-card"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
+    }
+
+    usersBody.innerHTML = users.length ? users.map(user => `
+        <tr>
+            ${galleryTd('ID', escapeHtml(user.id))}
+            ${galleryTd('User', `${escapeHtml(user.display_name || user.username)}<div class="muted">@${escapeHtml(user.username)}</div>`)}
+            ${galleryTd('Email', `${escapeHtml(user.email || 'No email')}<div class="muted">${user.email_verified_at ? 'verified' : user.email ? 'pending' : 'no email'}</div>`)}
+            ${galleryTd('Flags', `
+                <div>${user.public_profile ? 'public' : 'private'} profile</div>
+                <div class="muted">${user.age_verified_at ? 'age verified' : 'age unverified'} | ${user.adult_content_consent ? 'adult consent' : 'no adult consent'}</div>
+                <div class="muted">${user.show_liked_count ? 'likes visible' : 'likes hidden'}</div>
+            `)}
+            ${galleryTd('Activity', `
+                <div>${escapeHtml(user.media_count || 0)} media | ${escapeHtml(user.comment_count || 0)} comments</div>
+                <div class="muted">${escapeHtml(user.bookmark_count || 0)} bookmarks | ${escapeHtml(user.collection_count || 0)} collections</div>
+            `)}
+            ${galleryTd('Last Login', escapeHtml(user.last_login_at || 'Never'))}
+            ${galleryTd('Actions', `
+                <button class="tbl-btn" data-gallery-reset-password="${escapeHtml(user.id)}">Reset Password</button>
+                <button class="tbl-btn" data-gallery-edit-username="${escapeHtml(user.id)}" data-gallery-current-username="${escapeHtml(user.username || '')}">Edit Username</button>
+                <button class="tbl-btn" data-gallery-edit-display="${escapeHtml(user.id)}" data-gallery-current-display="${escapeHtml(user.display_name || '')}">Edit Display</button>
+                <button class="tbl-btn" data-gallery-edit-email="${escapeHtml(user.id)}" data-gallery-current-email="${escapeHtml(user.email || '')}">Edit Email</button>
+                <button class="tbl-btn" data-gallery-resend-email="${escapeHtml(user.id)}" ${user.email && !user.email_verified_at ? '' : 'disabled'}>Resend Email</button>
+                <button class="tbl-btn" data-gallery-email-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.email_verified_at ? '0' : '1'}">${user.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
+                <button class="tbl-btn" data-gallery-age-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.age_verified_at ? '0' : '1'}">${user.age_verified_at ? 'Revoke Age' : 'Verify Age'}</button>
+                <button class="tbl-btn" data-gallery-adult-consent="${escapeHtml(user.id)}" data-gallery-adult-consent-next="${user.adult_content_consent ? '0' : '1'}">${user.adult_content_consent ? 'Revoke Adult' : 'Allow Adult'}</button>
+                <button class="tbl-btn" data-gallery-liked-count="${escapeHtml(user.id)}" data-gallery-liked-count-next="${user.show_liked_count ? '0' : '1'}">${user.show_liked_count ? 'Hide Likes' : 'Show Likes'}</button>
+                <button class="tbl-btn" data-gallery-public-profile="${escapeHtml(user.id)}" data-gallery-public="${user.public_profile ? '0' : '1'}">${user.public_profile ? 'Make Private' : 'Make Public'}</button>
+                <button class="tbl-btn tbl-btn-stop" data-gallery-delete-user="${escapeHtml(user.id)}">Delete User</button>
+            `)}
+        </tr>
+    `).join('') : '<tr><td colspan="7">No Image Gallery users match this view.</td></tr>';
+
+    if (reportsBody) {
+        reportsBody.innerHTML = reports.length ? reports.map(report => `
+            <tr>
+                ${galleryTd('ID', escapeHtml(report.id))}
+                ${galleryTd('User', escapeHtml(report.display_name || report.username))}
+                ${galleryTd('Post', escapeHtml(report.media_title || `Media ${report.media_id}`))}
+                ${galleryTd('Reason', `${escapeHtml(report.reason || '')}<div class="muted">${escapeHtml(report.details || '')}</div>`)}
+                ${galleryTd('Status', escapeHtml(report.status || 'open'))}
+                ${galleryTd('Created', escapeHtml(report.created_at || ''))}
+                ${galleryTd('Actions', `
+                    <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="open" ${report.status === 'open' ? 'disabled' : ''}>Open</button>
+                    <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="reviewed" ${report.status === 'reviewed' ? 'disabled' : ''}>Reviewed</button>
+                    <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="dismissed" ${report.status === 'dismissed' ? 'disabled' : ''}>Dismiss</button>
+                `)}
+            </tr>
+        `).join('') : '<tr><td colspan="7">No Image Gallery reports match this view.</td></tr>';
+    }
+
+    commentsBody.innerHTML = comments.length ? comments.map(comment => `
+        <tr>
+            ${galleryTd('ID', escapeHtml(comment.id))}
+            ${galleryTd('User', escapeHtml(comment.display_name || comment.username))}
+            ${galleryTd('Post', escapeHtml(comment.media_title || `Media ${comment.media_id}`))}
+            ${galleryTd('Comment', escapeHtml(comment.body || ''))}
+            ${galleryTd('Created', escapeHtml(comment.created_at || ''))}
+            ${galleryTd('Actions', `<button class="tbl-btn tbl-btn-stop" data-gallery-delete-comment="${escapeHtml(comment.id)}">Delete Comment</button>`)}
+        </tr>
+    `).join('') : '<tr><td colspan="6">No Image Gallery comments match this view.</td></tr>';
+
+    mediaBody.innerHTML = media.length ? media.map(item => `
+        <tr>
+            ${galleryTd('ID', escapeHtml(item.id))}
+            ${galleryTd('User', escapeHtml(item.username || item.user_id))}
+            ${galleryTd('Title', escapeHtml(item.title || ''))}
+            ${galleryTd('Kind', escapeHtml(item.media_kind || ''))}
+            ${galleryTd('State', `${item.is_adult ? '18+' : 'clear'}<div class="muted">${escapeHtml(item.moderation_status || 'clear')} | ${galleryFormatBytes(item.file_size)}</div>${item.moderation_reason ? `<div class="muted">${escapeHtml(item.moderation_reason)}</div>` : ''}`)}
+            ${galleryTd('Views', escapeHtml(item.views || 0))}
+            ${galleryTd('Created', escapeHtml(item.created_at || ''))}
+            ${galleryTd('Actions', `
+                <button class="tbl-btn" data-gallery-media-adult="${escapeHtml(item.id)}" data-gallery-adult="${item.is_adult ? '0' : '1'}">${item.is_adult ? 'Clear 18+' : 'Mark 18+'}</button>
+                <button class="tbl-btn" data-gallery-media-status="${escapeHtml(item.id)}" data-gallery-status="clear" ${item.moderation_status === 'clear' ? 'disabled' : ''}>Clear</button>
+                <button class="tbl-btn" data-gallery-media-status="${escapeHtml(item.id)}" data-gallery-status="review" ${item.moderation_status === 'review' ? 'disabled' : ''}>Review</button>
+                <button class="tbl-btn tbl-btn-stop" data-gallery-media-status="${escapeHtml(item.id)}" data-gallery-status="blocked" ${item.moderation_status === 'blocked' ? 'disabled' : ''}>Block</button>
+                <button class="tbl-btn" data-gallery-media-reason="${escapeHtml(item.id)}" data-gallery-current-reason="${escapeHtml(item.moderation_reason || '')}">Reason</button>
+                <button class="tbl-btn" data-gallery-media-title="${escapeHtml(item.id)}" data-gallery-current-title="${escapeHtml(item.title || '')}">Rename</button>
+                <button class="tbl-btn tbl-btn-stop" data-gallery-delete-media="${escapeHtml(item.id)}">Delete Media</button>
+            `)}
+        </tr>
+    `).join('') : '<tr><td colspan="8">No Image Gallery media match this view.</td></tr>';
+
+    if (taxonomyBody) {
+        const categoryRows = shouldShow('all') ? categories.map(category => `
+            <tr>
+                ${galleryTd('Type', 'Category')}
+                ${galleryTd('Name', `${escapeHtml(category.name || '')}<div class="muted">${escapeHtml(category.slug || '')}</div>`)}
+                ${galleryTd('Owner', escapeHtml(category.media_kind || ''))}
+                ${galleryTd('Items', escapeHtml(category.media_count || 0))}
+                ${galleryTd('Created', escapeHtml(category.created_at || ''))}
+            </tr>
+        `) : [];
+        const collectionRows = shouldShow('all') ? collections.map(collection => `
+            <tr>
+                ${galleryTd('Type', 'Collection')}
+                ${galleryTd('Name', `${escapeHtml(collection.name || '')}<div class="muted">${collection.is_public ? 'public' : 'private'}</div>`)}
+                ${galleryTd('Owner', escapeHtml(collection.username || collection.user_id || ''))}
+                ${galleryTd('Items', escapeHtml(collection.item_count || 0))}
+                ${galleryTd('Created', escapeHtml(collection.created_at || ''))}
+            </tr>
+        `) : [];
+        taxonomyBody.innerHTML = [...categoryRows, ...collectionRows].join('') || '<tr><td colspan="5">No categories or collections match this view.</td></tr>';
+    }
+}
+
+async function loadImageGalleryAdmin() {
+    if (!isImageGalleryOwnerSession()) return;
+    const status = document.getElementById('image-gallery-admin-status');
+    const usersBody = document.getElementById('image-gallery-users-body');
+    const commentsBody = document.getElementById('image-gallery-comments-body');
+    const mediaBody = document.getElementById('image-gallery-media-body');
+    if (!usersBody || !commentsBody || !mediaBody) return;
+    setImageGalleryLoading(true);
     if (status) status.textContent = 'Loading Image Gallery data...';
     try {
-        const res = await fetch(`${API_BASE}/image-gallery/admin?limit=100`);
+        const res = await fetch(`${API_BASE}/image-gallery/admin?limit=${getImageGalleryLimit()}`);
         if (handle401(res)) return;
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Image Gallery request failed');
         const payload = data.data || {};
-        const totals = payload.summary || {};
-        const users = payload.users || [];
-        const reports = payload.reports || [];
-        const comments = payload.comments || [];
-        const media = payload.media || [];
-        const categories = payload.categories || [];
-        const collections = payload.collections || [];
-        if (summary) {
-            summary.innerHTML = [
-                ['Schema', payload.schema || 'image_gallery'],
-                ['Users', totals.users ?? users.length],
-                ['Media', totals.media ?? media.length],
-                ['Comments', totals.comments ?? comments.length],
-                ['Open Reports', totals.reports_open ?? reports.filter(report => report.status === 'open').length],
-                ['Collections', totals.collections ?? collections.length],
-            ].map(([label, value]) => `<div class="diagnostic-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
-        }
-        usersBody.innerHTML = users.length ? users.map(user => `
-            <tr>
-                <td>${escapeHtml(user.id)}</td>
-                <td>${escapeHtml(user.display_name || user.username)}<div class="muted">@${escapeHtml(user.username)}</div></td>
-                <td>${escapeHtml(user.email || 'No email')}<div class="muted">${user.email_verified_at ? 'verified' : user.email ? 'pending' : 'no email'}</div></td>
-                <td>
-                    <div>${user.public_profile ? 'public' : 'private'} profile</div>
-                    <div class="muted">${user.age_verified_at ? 'age verified' : 'age unverified'} | ${user.adult_content_consent ? 'adult consent' : 'no adult consent'}</div>
-                </td>
-                <td>
-                    <div>${escapeHtml(user.media_count || 0)} media | ${escapeHtml(user.comment_count || 0)} comments</div>
-                    <div class="muted">${escapeHtml(user.bookmark_count || 0)} bookmarks | ${escapeHtml(user.collection_count || 0)} collections</div>
-                </td>
-                <td>${escapeHtml(user.last_login_at || 'Never')}</td>
-                <td>
-                    <button class="tbl-btn" data-gallery-reset-password="${escapeHtml(user.id)}">Reset Password</button>
-                    <button class="tbl-btn" data-gallery-edit-username="${escapeHtml(user.id)}" data-gallery-current-username="${escapeHtml(user.username || '')}">Edit Username</button>
-                    <button class="tbl-btn" data-gallery-edit-display="${escapeHtml(user.id)}" data-gallery-current-display="${escapeHtml(user.display_name || '')}">Edit Display</button>
-                    <button class="tbl-btn" data-gallery-edit-email="${escapeHtml(user.id)}" data-gallery-current-email="${escapeHtml(user.email || '')}">Edit Email</button>
-                    <button class="tbl-btn" data-gallery-resend-email="${escapeHtml(user.id)}" ${user.email && !user.email_verified_at ? '' : 'disabled'}>Resend Email</button>
-                    <button class="tbl-btn" data-gallery-email-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.email_verified_at ? '0' : '1'}">${user.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
-                    <button class="tbl-btn" data-gallery-age-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.age_verified_at ? '0' : '1'}">${user.age_verified_at ? 'Revoke Age' : 'Verify Age'}</button>
-                    <button class="tbl-btn" data-gallery-public-profile="${escapeHtml(user.id)}" data-gallery-public="${user.public_profile ? '0' : '1'}">${user.public_profile ? 'Make Private' : 'Make Public'}</button>
-                    <button class="tbl-btn tbl-btn-stop" data-gallery-delete-user="${escapeHtml(user.id)}">Delete User</button>
-                </td>
-            </tr>
-        `).join('') : '<tr><td colspan="7">No Image Gallery users found.</td></tr>';
-        if (reportsBody) {
-            reportsBody.innerHTML = reports.length ? reports.map(report => `
-                <tr>
-                    <td>${escapeHtml(report.id)}</td>
-                    <td>${escapeHtml(report.display_name || report.username)}</td>
-                    <td>${escapeHtml(report.media_title || `Media ${report.media_id}`)}</td>
-                    <td>${escapeHtml(report.reason || '')}<div class="muted">${escapeHtml(report.details || '')}</div></td>
-                    <td>${escapeHtml(report.status || 'open')}</td>
-                    <td>${escapeHtml(report.created_at || '')}</td>
-                    <td>
-                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="open">Open</button>
-                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="reviewed">Reviewed</button>
-                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="dismissed">Dismiss</button>
-                    </td>
-                </tr>
-            `).join('') : '<tr><td colspan="7">No Image Gallery reports found.</td></tr>';
-        }
-        commentsBody.innerHTML = comments.length ? comments.map(comment => `
-            <tr>
-                <td>${escapeHtml(comment.id)}</td>
-                <td>${escapeHtml(comment.display_name || comment.username)}</td>
-                <td>${escapeHtml(comment.media_title || `Media ${comment.media_id}`)}</td>
-                <td>${escapeHtml(comment.body || '')}</td>
-                <td>${escapeHtml(comment.created_at || '')}</td>
-                <td><button class="tbl-btn tbl-btn-stop" data-gallery-delete-comment="${escapeHtml(comment.id)}">Delete Comment</button></td>
-            </tr>
-        `).join('') : '<tr><td colspan="6">No Image Gallery comments found.</td></tr>';
-        mediaBody.innerHTML = media.length ? media.map(item => `
-            <tr>
-                <td>${escapeHtml(item.id)}</td>
-                <td>${escapeHtml(item.username || item.user_id)}</td>
-                <td>${escapeHtml(item.title || '')}</td>
-                <td>${escapeHtml(item.media_kind || '')}</td>
-                <td>${item.is_adult ? '18+' : 'clear'}<div class="muted">${escapeHtml(item.moderation_status || 'clear')} | ${galleryFormatBytes(item.file_size)}</div></td>
-                <td>${escapeHtml(item.views || 0)}</td>
-                <td>${escapeHtml(item.created_at || '')}</td>
-                <td>
-                    <button class="tbl-btn" data-gallery-media-adult="${escapeHtml(item.id)}" data-gallery-adult="${item.is_adult ? '0' : '1'}">${item.is_adult ? 'Clear 18+' : 'Mark 18+'}</button>
-                    <button class="tbl-btn" data-gallery-media-title="${escapeHtml(item.id)}" data-gallery-current-title="${escapeHtml(item.title || '')}">Rename</button>
-                    <button class="tbl-btn tbl-btn-stop" data-gallery-delete-media="${escapeHtml(item.id)}">Delete Media</button>
-                </td>
-            </tr>
-        `).join('') : '<tr><td colspan="8">No Image Gallery media found.</td></tr>';
-        if (taxonomyBody) {
-            const categoryRows = categories.map(category => `
-                <tr>
-                    <td>Category</td>
-                    <td>${escapeHtml(category.name || '')}<div class="muted">${escapeHtml(category.slug || '')}</div></td>
-                    <td>${escapeHtml(category.media_kind || '')}</td>
-                    <td>${escapeHtml(category.media_count || 0)}</td>
-                    <td>${escapeHtml(category.created_at || '')}</td>
-                </tr>
-            `);
-            const collectionRows = collections.map(collection => `
-                <tr>
-                    <td>Collection</td>
-                    <td>${escapeHtml(collection.name || '')}<div class="muted">${collection.is_public ? 'public' : 'private'}</div></td>
-                    <td>${escapeHtml(collection.username || collection.user_id || '')}</td>
-                    <td>${escapeHtml(collection.item_count || 0)}</td>
-                    <td>${escapeHtml(collection.created_at || '')}</td>
-                </tr>
-            `);
-            taxonomyBody.innerHTML = [...categoryRows, ...collectionRows].join('') || '<tr><td colspan="5">No categories or collections found.</td></tr>';
-        }
+        imageGalleryAdminState.payload = payload;
+        renderImageGalleryAdmin();
         if (status) status.textContent = 'Image Gallery data loaded.';
         await loadImageGalleryTables();
     } catch (err) {
         if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+        setImageGalleryLoading(false);
     }
 }
 
@@ -4032,7 +4151,7 @@ async function viewImageGalleryTableData() {
         const columns = Object.keys(rows[0]);
         if (head) head.innerHTML = `<tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`;
         if (body) {
-            body.innerHTML = rows.map(row => `<tr>${columns.map(column => `<td>${escapeHtml(row[column] ?? '')}</td>`).join('')}</tr>`).join('');
+            body.innerHTML = rows.map(row => `<tr>${columns.map(column => galleryTd(column, escapeHtml(row[column] ?? ''))).join('')}</tr>`).join('');
         }
         if (status) status.textContent = `Loaded ${rows.length} rows from ${tableName}.`;
     } catch (err) {
@@ -4337,6 +4456,28 @@ document.addEventListener('DOMContentLoaded', () => {
         ?.addEventListener('click', loadImageGalleryTables);
     document.getElementById('view-image-gallery-table')
         ?.addEventListener('click', viewImageGalleryTableData);
+    document.getElementById('image-gallery-limit-select')
+        ?.addEventListener('change', loadImageGalleryAdmin);
+    document.getElementById('image-gallery-search')
+        ?.addEventListener('input', renderImageGalleryAdmin);
+    document.getElementById('image-gallery-scope-select')
+        ?.addEventListener('change', renderImageGalleryAdmin);
+    document.getElementById('image-gallery-media-status-select')
+        ?.addEventListener('change', renderImageGalleryAdmin);
+    document.getElementById('image-gallery-sort-select')
+        ?.addEventListener('change', renderImageGalleryAdmin);
+    document.getElementById('image-gallery-clear-filters')
+        ?.addEventListener('click', () => {
+            const search = document.getElementById('image-gallery-search');
+            const scope = document.getElementById('image-gallery-scope-select');
+            const mediaStatus = document.getElementById('image-gallery-media-status-select');
+            const sort = document.getElementById('image-gallery-sort-select');
+            if (search) search.value = '';
+            if (scope) scope.value = 'all';
+            if (mediaStatus) mediaStatus.value = 'all';
+            if (sort) sort.value = 'newest';
+            renderImageGalleryAdmin();
+        });
 
     document.getElementById('image-gallery-tab')
         ?.addEventListener('click', async (event) => {
@@ -4351,8 +4492,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const emailVerified = event.target.closest('[data-gallery-email-verified]');
             const ageVerified = event.target.closest('[data-gallery-age-verified]');
             const publicProfile = event.target.closest('[data-gallery-public-profile]');
+            const adultConsent = event.target.closest('[data-gallery-adult-consent]');
+            const likedCount = event.target.closest('[data-gallery-liked-count]');
             const deleteMedia = event.target.closest('[data-gallery-delete-media]');
             const mediaAdult = event.target.closest('[data-gallery-media-adult]');
+            const mediaStatus = event.target.closest('[data-gallery-media-status]');
+            const mediaReason = event.target.closest('[data-gallery-media-reason]');
             const mediaTitle = event.target.closest('[data-gallery-media-title]');
             const reportStatus = event.target.closest('[data-gallery-report-status]');
             try {
@@ -4418,6 +4563,16 @@ document.addEventListener('DOMContentLoaded', () => {
                     const nextPublic = publicProfile.dataset.galleryPublic === '1';
                     await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), public_profile: nextPublic });
                 }
+                if (adultConsent) {
+                    const userId = adultConsent.dataset.galleryAdultConsent;
+                    const nextAdultConsent = adultConsent.dataset.galleryAdultConsentNext === '1';
+                    await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), adult_content_consent: nextAdultConsent });
+                }
+                if (likedCount) {
+                    const userId = likedCount.dataset.galleryLikedCount;
+                    const nextLikedCount = likedCount.dataset.galleryLikedCountNext === '1';
+                    await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), show_liked_count: nextLikedCount });
+                }
                 if (deleteMedia) {
                     const mediaId = deleteMedia.dataset.galleryDeleteMedia;
                     if (confirm(`Delete Image Gallery media ${mediaId}? This removes the database row and related likes/comments/reports.`)) {
@@ -4428,6 +4583,26 @@ document.addEventListener('DOMContentLoaded', () => {
                     const mediaId = mediaAdult.dataset.galleryMediaAdult;
                     const isAdult = mediaAdult.dataset.galleryAdult === '1';
                     await postImageGalleryAdminAction('/image-gallery/media/update', { media_id: Number(mediaId), is_adult: isAdult, moderation_status: isAdult ? 'review' : 'clear' });
+                }
+                if (mediaStatus) {
+                    const mediaId = mediaStatus.dataset.galleryMediaStatus;
+                    const moderationStatus = mediaStatus.dataset.galleryStatus;
+                    const moderationReason = moderationStatus === 'blocked'
+                        ? prompt(`Reason for blocking Image Gallery media ${mediaId}.`, '')
+                        : null;
+                    await postImageGalleryAdminAction('/image-gallery/media/update', {
+                        media_id: Number(mediaId),
+                        moderation_status: moderationStatus,
+                        moderation_reason: moderationReason === null ? undefined : moderationReason.trim() || null,
+                    });
+                }
+                if (mediaReason) {
+                    const mediaId = mediaReason.dataset.galleryMediaReason;
+                    const current = mediaReason.dataset.galleryCurrentReason || '';
+                    const moderationReason = prompt(`Moderation reason for Image Gallery media ${mediaId}. Leave blank to clear it.`, current);
+                    if (moderationReason !== null) {
+                        await postImageGalleryAdminAction('/image-gallery/media/update', { media_id: Number(mediaId), moderation_reason: moderationReason.trim() || null });
+                    }
                 }
                 if (mediaTitle) {
                     const mediaId = mediaTitle.dataset.galleryMediaTitle;
@@ -4472,6 +4647,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('admin-mode-toggle')
         ?.addEventListener('change', (event) => setAdminMode(event.target.checked));
+    document.getElementById('admin-mode-status')
+        ?.addEventListener('click', toggleAdminModeFromStatus);
+    document.getElementById('admin-mode-status')
+        ?.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            toggleAdminModeFromStatus();
+        });
 
     document.querySelectorAll('[data-account-tab]')
         .forEach(button => button.addEventListener('click', () => {

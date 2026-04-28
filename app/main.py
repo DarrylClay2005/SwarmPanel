@@ -1571,7 +1571,7 @@ async def image_gallery_reset_password(request: Request, payload: GalleryPasswor
 @app.post("/api/image-gallery/users/update")
 async def image_gallery_update_user(request: Request, payload: GalleryUserUpdateRequest):
     _require_image_gallery_owner_auth(request)
-    updates = payload.model_dump(exclude={"user_id"}, exclude_none=True)
+    updates = payload.model_dump(exclude={"user_id"}, exclude_unset=True)
     try:
         user = await db.update_image_gallery_user(payload.user_id, updates)
     except ValueError as exc:
@@ -1616,7 +1616,7 @@ async def image_gallery_resend_verification(request: Request, payload: GalleryUs
 @app.post("/api/image-gallery/media/update")
 async def image_gallery_update_media(request: Request, payload: GalleryMediaUpdateRequest):
     _require_image_gallery_owner_auth(request)
-    updates = payload.model_dump(exclude={"media_id"}, exclude_none=True)
+    updates = payload.model_dump(exclude={"media_id"}, exclude_unset=True)
     try:
         media = await db.update_image_gallery_media(payload.media_id, updates)
     except ValueError as exc:

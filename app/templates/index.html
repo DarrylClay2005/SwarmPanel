@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=19-admin-mode" />
+  <link rel="stylesheet" href="/static/styles.css?v=22-swarm-ux" />
 </head>
 <body class="{% if not session_admin_mode and session_guild_id %}guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
     <div class="topbar-actions">
-      <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}">
+      <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}" role="button" tabindex="0" aria-pressed="{% if session_admin_mode %}true{% else %}false{% endif %}">
         {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}Admin Mode{% endif %}
       </span>
       <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_guild_id %}hidden{% endif %}>
@@ -503,6 +503,51 @@
       </div>
       <div id="image-gallery-admin-status" class="status"></div>
       <div class="diagnostic-grid" id="image-gallery-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="Image Gallery controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="image-gallery-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="image-gallery-search" type="search" placeholder="users, titles, reports" />
+        </label>
+        <label class="control-field">
+          <span>Scope</span>
+          <select id="image-gallery-scope-select">
+            <option value="all">All</option>
+            <option value="users">Users</option>
+            <option value="media">Media</option>
+            <option value="reports">Reports</option>
+            <option value="comments">Comments</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Media Status</span>
+          <select id="image-gallery-media-status-select">
+            <option value="all">All</option>
+            <option value="clear">Clear</option>
+            <option value="review">Review</option>
+            <option value="blocked">Blocked</option>
+            <option value="adult">18+</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="image-gallery-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="activity">Most Active</option>
+            <option value="reports">Open Reports</option>
+          </select>
+        </label>
+        <button id="image-gallery-clear-filters" type="button">Clear Filters</button>
+      </div>
       <h3>Database Tables</h3>
       <div class="row">
         <select id="image-gallery-table-select"></select>
@@ -584,6 +629,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=21-admin-mode"></script>
+  <script src="/static/final_app.js?v=22-swarm-ux"></script>
 </body>
 </html>
