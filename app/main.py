@@ -23,6 +23,7 @@ from pydantic import BaseModel, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 
 from .auth import (
+    SESSION_ADMIN_MODE_KEY,
     SESSION_AUTH_KEY,
     SESSION_GUILD_ID_KEY,
     SESSION_ROLE_KEY,
@@ -221,6 +222,10 @@ class SessionRegisterRequest(BaseModel):
     email: str | None = None
 
 
+class SessionAdminModeRequest(BaseModel):
+    enabled: bool
+
+
 class SessionEmailUpdateRequest(BaseModel):
     email: str | None = None
 
@@ -328,6 +333,8 @@ def _require_api_auth(request: Request) -> dict[str, Any]:
 def _is_admin_auth(auth: dict[str, Any] | None) -> bool:
     if not auth:
         return False
+    if auth.get("admin_mode") is not None:
+        return bool(auth.get("admin_mode"))
     return str(auth.get("role") or "admin").lower() == "admin" and not auth.get("guild_id")
 
 
@@ -344,6 +351,11 @@ def _is_image_gallery_owner_auth(auth: dict[str, Any] | None) -> bool:
 def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
     if _is_admin_auth(auth):
         return None
+    guild_id = auth.get("guild_id") if auth else None
+    return str(guild_id) if guild_id not in (None, "") else None
+
+
+def _account_guild_id(auth: dict[str, Any] | None) -> str | None:
     guild_id = auth.get("guild_id") if auth else None
     return str(guild_id) if guild_id not in (None, "") else None
 
@@ -382,14 +394,16 @@ def _set_admin_session(request: Request, username: str) -> None:
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "admin"
+    request.session[SESSION_ADMIN_MODE_KEY] = True
     request.session.pop(SESSION_GUILD_ID_KEY, None)
 
 
-def _set_account_session(request: Request, username: str, guild_id: str | int) -> None:
+def _set_account_session(request: Request, username: str, guild_id: str | int, *, admin_mode: bool = False) -> None:
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "account"
     request.session[SESSION_GUILD_ID_KEY] = str(guild_id)
+    request.session[SESSION_ADMIN_MODE_KEY] = bool(admin_mode)
 
 
 async def _authenticate_login(username: str, password: str = "", guild_id: str | int | None = None) -> dict[str, Any] | None:
@@ -722,14 +736,19 @@ async def index(request: Request):
     session_username = request.session.get(SESSION_USERNAME_KEY) or settings.admin_username
     session_role = request.session.get(SESSION_ROLE_KEY) or "admin"
     session_guild_id = request.session.get(SESSION_GUILD_ID_KEY)
+    session_admin_mode = request.session.get(SESSION_ADMIN_MODE_KEY)
+    if session_admin_mode is None:
+        session_admin_mode = str(session_role or "").lower() == "admin" and not session_guild_id
     return templates.TemplateResponse(request, "index.html", {
         "session_username": session_username,
         "session_role": session_role,
         "session_guild_id": session_guild_id,
+        "session_admin_mode": bool(session_admin_mode),
         "session_image_gallery_owner": _is_image_gallery_owner_auth({
             "username": session_username,
             "role": session_role,
             "guild_id": session_guild_id,
+            "admin_mode": bool(session_admin_mode),
         }),
     })
 
@@ -743,14 +762,17 @@ async def api_session_status(request: Request):
     username = auth.get("username") or settings.admin_username
     role = auth.get("role") or "admin"
     guild_id = auth.get("guild_id")
+    admin_mode = _is_admin_auth(auth)
     return {
         "authenticated": True,
         "mode": auth.get("mode") or "token",
         "username": username,
         "role": role,
         "guild_id": str(guild_id) if guild_id else None,
+        "account_guild_id": _account_guild_id(auth),
+        "admin_mode": admin_mode,
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
-        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=guild_id),
+        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=guild_id, admin_mode=admin_mode),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -771,6 +793,7 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         auth["username"],
         role=auth["role"],
         guild_id=auth.get("guild_id"),
+        admin_mode=_is_admin_auth(auth),
     )
     return {
         "ok": True,
@@ -778,6 +801,8 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         "username": auth["username"],
         "role": auth["role"],
         "guild_id": auth.get("guild_id"),
+        "account_guild_id": auth.get("guild_id"),
+        "admin_mode": _is_admin_auth(auth),
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
@@ -803,6 +828,7 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         account["username"],
         role="account",
         guild_id=account["guild_id"],
+        admin_mode=False,
     )
     return {
         "ok": True,
@@ -810,7 +836,48 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         "username": account["username"],
         "role": "account",
         "guild_id": account["guild_id"],
+        "account_guild_id": account["guild_id"],
+        "admin_mode": False,
         "email_verification_sent": verification_sent,
+        "pages_public_url": settings.pages_public_url,
+        "expires_in": settings.api_token_ttl_seconds,
+    }
+
+
+@app.post("/api/session/admin-mode")
+async def api_session_admin_mode(request: Request, payload: SessionAdminModeRequest):
+    auth = _require_api_auth(request)
+    username = str(auth.get("username") or settings.admin_username)
+    linked_guild_id = _account_guild_id(auth)
+    if not linked_guild_id:
+        admin_mode = True
+        request.session[SESSION_ADMIN_MODE_KEY] = True
+    else:
+        admin_mode = bool(payload.enabled)
+        if is_authenticated(request):
+            _set_account_session(request, username, linked_guild_id, admin_mode=admin_mode)
+
+    next_auth = {
+        "username": username,
+        "role": auth.get("role") or ("account" if linked_guild_id else "admin"),
+        "guild_id": linked_guild_id,
+        "admin_mode": admin_mode,
+    }
+    return {
+        "ok": True,
+        "username": username,
+        "role": next_auth["role"],
+        "guild_id": linked_guild_id,
+        "account_guild_id": linked_guild_id,
+        "admin_mode": admin_mode,
+        "image_gallery_owner": _is_image_gallery_owner_auth(next_auth),
+        "token": issue_api_token(
+            settings.session_secret,
+            username,
+            role=next_auth["role"],
+            guild_id=linked_guild_id,
+            admin_mode=admin_mode,
+        ),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -831,7 +898,7 @@ async def api_verify_session_email(request: Request, token: str):
 @app.post("/api/session/resend-verification")
 async def api_resend_session_verification(request: Request):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
         raise HTTPException(status_code=403, detail="Guild account access required")
@@ -851,7 +918,7 @@ async def api_resend_session_verification(request: Request):
 @app.post("/api/session/email")
 async def api_update_session_email(request: Request, payload: SessionEmailUpdateRequest):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
         raise HTTPException(status_code=403, detail="Guild account access required")
@@ -870,7 +937,7 @@ async def api_update_session_email(request: Request, payload: SessionEmailUpdate
 @app.post("/api/session/email/verify")
 async def api_verify_session_email_code(request: Request, payload: SessionEmailCodeRequest):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
         raise HTTPException(status_code=403, detail="Guild account access required")
@@ -892,7 +959,7 @@ async def api_session_logout(request: Request):
 @app.get("/api/users/me")
 async def api_user_profile_me(request: Request):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or settings.admin_username)
     if not scoped_guild_id:
         return {
@@ -903,7 +970,7 @@ async def api_user_profile_me(request: Request):
                 "guild_id": None,
                 "public_profile": False,
                 "panel_preferences": _clean_panel_preferences(PanelPreferencesUpdateRequest()),
-                "bio": "Admin sessions can browse the user directory; guild accounts own public profiles.",
+                "bio": "Built-in admin sessions can browse the user directory; registered accounts own public profiles.",
             },
             "favorite_bot_options": [
                 {"key": bot.key, "display_name": bot.display_name, "kind": bot.kind}
@@ -930,7 +997,7 @@ async def api_user_profile_me(request: Request):
 @app.post("/api/users/me")
 async def api_update_user_profile(request: Request, payload: UserProfileUpdateRequest):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
         raise HTTPException(status_code=403, detail="Guild account access required to edit a public profile")
@@ -950,7 +1017,7 @@ async def api_update_user_profile(request: Request, payload: UserProfileUpdateRe
 @app.get("/api/users/preferences")
 async def api_user_panel_preferences(request: Request):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     defaults = _clean_panel_preferences(PanelPreferencesUpdateRequest())
     if not scoped_guild_id or not username:
@@ -968,7 +1035,7 @@ async def api_user_panel_preferences(request: Request):
 @app.post("/api/users/preferences")
 async def api_update_user_panel_preferences(request: Request, payload: PanelPreferencesUpdateRequest):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
         raise HTTPException(status_code=403, detail="Guild account access required to save panel preferences")

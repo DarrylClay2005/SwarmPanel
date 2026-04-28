@@ -5,18 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=18-gallery-owner" />
+  <link rel="stylesheet" href="/static/styles.css?v=19-admin-mode" />
 </head>
-<body class="{% if session_role != 'admin' and session_guild_id %}guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
+<body class="{% if not session_admin_mode and session_guild_id %}guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
     <div class="topbar-actions">
-      <span class="topbar-status" data-tone="idle">
-        {{ session_username }}{% if session_role != "admin" and session_guild_id %} · Guild {{ session_guild_id }}{% endif %}
+      <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}">
+        {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}Admin Mode{% endif %}
       </span>
-      <form method="post" action="/logout">
-        <button type="submit">Logout</button>
-      </form>
+      <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_guild_id %}hidden{% endif %}>
+        <input id="admin-mode-toggle" type="checkbox" {% if session_admin_mode %}checked{% endif %} />
+        <span>Admin Mode</span>
+      </label>
+      <div id="account-menu" class="account-menu">
+        <span id="topbar-user-name" class="topbar-user-name">{{ session_username }}</span>
+        <button id="topbar-profile-button" class="topbar-profile-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Open profile menu">
+          <span id="topbar-profile-avatar" class="topbar-profile-avatar">{{ session_username[:1]|upper }}</span>
+        </button>
+        <div id="account-dropdown" class="account-dropdown" role="menu" hidden>
+          <button type="button" role="menuitem" data-account-tab="users-tab">Profile + Users</button>
+          <button type="button" role="menuitem" data-account-tab="controls-tab">Controls</button>
+        </div>
+      </div>
+      <button id="logout-button" type="button">Logout</button>
     </div>
   </header>
 
@@ -572,6 +584,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=20-gallery-owner"></script>
+  <script src="/static/final_app.js?v=21-admin-mode"></script>
 </body>
 </html>

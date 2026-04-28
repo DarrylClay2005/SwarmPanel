@@ -7,12 +7,17 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>SwarmPanel Live</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="./app/static/styles.css?v=18" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=19-admin-mode" />
 </head>
 <body>
   <header class="topbar">
     <h1>SwarmPanel Live</h1>
     <div class="topbar-actions">
+      <span id="admin-mode-status" class="topbar-status" data-tone="idle">Connecting</span>
+      <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" hidden>
+        <input id="admin-mode-toggle" type="checkbox" />
+        <span>Admin Mode</span>
+      </label>
       <div id="account-menu" class="account-menu">
         <span id="topbar-user-name" class="topbar-user-name">Swarm User</span>
         <button id="topbar-profile-button" class="topbar-profile-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Open profile menu">
@@ -38,7 +43,7 @@
         <div class="login-logo-icon">S</div>
         <h1>SwarmPanel Remote</h1>
       </div>
-      <p class="login-subtitle">Sign in to SwarmPanel with an admin password or a registered account's guild ID.</p>
+      <p class="login-subtitle">Sign in to SwarmPanel with an admin password or a registered account's guild ID, then toggle Admin Mode when needed.</p>
       <div id="remote-auth-error" class="login-error" style="display:none"></div>
       <div class="stack">
         <input id="remote-api-origin" type="hidden" />
@@ -53,7 +58,7 @@
         <button id="remote-login-button" class="login-submit" type="button">Sign In</button>
       </div>
 
-      <div class="login-divider"><span>Create guild account</span></div>
+      <div class="login-divider"><span>Create admin account</span></div>
 
       <div class="stack">
         <div class="login-field">
@@ -68,7 +73,7 @@
           <label for="remote-register-email">Email</label>
           <input id="remote-register-email" type="email" autocomplete="email" placeholder="you@example.com" />
         </div>
-        <button id="remote-register-button" class="login-submit login-submit-secondary" type="button">Create Guild Account</button>
+        <button id="remote-register-button" class="login-submit login-submit-secondary" type="button">Create Account</button>
       </div>
     </div>
   </div>
@@ -620,6 +625,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=20"></script>
+  <script src="./app/static/final_app.js?v=21-admin-mode"></script>
 </body>
 </html>

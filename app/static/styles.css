@@ -214,6 +214,19 @@ body.panel-font-dense { font-size: 13px; }
   background: rgba(255,255,255,0.04);
 }
 
+.topbar-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  font-size: 0.82rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .topbar-status[data-tone="online"] {
   color: var(--green);
   border-color: rgba(166,227,161,0.3);
@@ -226,6 +239,38 @@ body.panel-font-dense { font-size: 13px; }
 
 .topbar-status[data-tone="idle"] {
   color: var(--text-muted);
+}
+
+.admin-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  color: var(--text-muted);
+  background: rgba(255,255,255,0.03);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  user-select: none;
+}
+
+.admin-mode-toggle[hidden] {
+  display: none;
+}
+
+.admin-mode-toggle input {
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--user-panel-accent);
+  cursor: pointer;
+}
+
+.admin-mode-toggle:has(input:checked) {
+  color: var(--green);
+  border-color: rgba(166,227,161,0.35);
 }
 
 .guild-scoped-session .admin-only {

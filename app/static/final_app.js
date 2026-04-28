@@ -43,7 +43,7 @@ const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
-let currentPanelSession = { role: 'admin', guild_id: null, username: '', image_gallery_owner: false };
+let currentPanelSession = { role: 'admin', guild_id: null, account_guild_id: null, username: '', image_gallery_owner: false, admin_mode: true };
 let inviteOnlyMode = false;
 let panelAppStarted = false;
 let panelSessionChecked = false;
@@ -284,27 +284,137 @@ function setRemoteUsername(value, persist = true) {
 }
 
 function setPanelSessionContext(data = {}) {
+    const linkedGuildId = data.account_guild_id || data.guild_id || null;
+    const adminMode = data.admin_mode !== undefined
+        ? Boolean(data.admin_mode)
+        : (data.role || 'admin') === 'admin' && !linkedGuildId;
     currentPanelSession = {
         role: data.role || 'admin',
         guild_id: data.guild_id || null,
+        account_guild_id: linkedGuildId,
         username: data.username || remotePanelUsername || '',
         image_gallery_owner: Boolean(data.image_gallery_owner),
+        admin_mode: adminMode,
     };
-    document.body.classList.toggle('guild-scoped-session', currentPanelSession.role !== 'admin' && Boolean(currentPanelSession.guild_id));
+    document.body.classList.toggle('guild-scoped-session', !currentPanelSession.admin_mode && Boolean(currentPanelSession.account_guild_id || currentPanelSession.guild_id));
     document.body.classList.toggle('image-gallery-owner-session', Boolean(currentPanelSession.image_gallery_owner));
+    updateAdminModeToggle();
     updateTopbarAccount();
+    ensureSessionVisibleTab();
 }
 
 function isAdminSession() {
-    return currentPanelSession.role === 'admin';
+    return Boolean(currentPanelSession.admin_mode);
 }
 
 function isGuildScopedSession() {
-    return !isAdminSession() && Boolean(currentPanelSession.guild_id);
+    return !isAdminSession() && Boolean(currentPanelSession.account_guild_id || currentPanelSession.guild_id);
 }
 
 function isImageGalleryOwnerSession() {
     return Boolean(currentPanelSession.image_gallery_owner);
+}
+
+function ensureSessionVisibleTab() {
+    if (isAdminSession()) return;
+    const activePanel = document.querySelector('.swarm-tab-panel.active');
+    const adminPanelIds = new Set(['diagnostics-tab', 'intel-tab', 'image-gallery-tab']);
+    if (activePanel && adminPanelIds.has(activePanel.id)) {
+        activateSwarmTab('overview-tab');
+    }
+}
+
+function getLinkedGuildId() {
+    return currentPanelSession.account_guild_id || currentPanelSession.guild_id || null;
+}
+
+function updateAdminModeToggle() {
+    const wrap = document.getElementById('admin-mode-toggle-wrap');
+    const toggle = document.getElementById('admin-mode-toggle');
+    const status = document.getElementById('admin-mode-status');
+    const linkedGuildId = getLinkedGuildId();
+
+    if (wrap) wrap.hidden = !linkedGuildId;
+    if (toggle) {
+        toggle.checked = isAdminSession();
+        toggle.disabled = !linkedGuildId;
+    }
+    if (!status) return;
+
+    if (isAdminSession()) {
+        status.textContent = linkedGuildId ? `Admin Mode · Guild ${linkedGuildId}` : 'Admin Mode';
+        status.dataset.tone = 'online';
+    } else if (linkedGuildId) {
+        status.textContent = `Guild Mode · ${linkedGuildId}`;
+        status.dataset.tone = 'idle';
+    } else {
+        status.textContent = currentPanelSession.username || 'Connected';
+        status.dataset.tone = 'idle';
+    }
+}
+
+async function refreshPanelAfterModeSwitch() {
+    dashboardBotsState = [];
+    botCatalogState = [];
+    inviteCatalogState = [];
+    controlInventoryState = null;
+    clearControlMatrixState();
+    clearSelectedControlState();
+    resetControlInventorySelectors();
+    if (!isAdminSession()) {
+        disconnectEventFeed();
+        systemDiagnosticsState = null;
+        metricsSnapshotState = null;
+    }
+    await Promise.allSettled([
+        fetchDashboard(),
+        loadBotSelect(),
+        loadUserProfile(),
+        loadPanelPreferences(),
+        loadUserDirectory(),
+    ]);
+    if (isAdminSession()) {
+        await Promise.allSettled([
+            fetchDiagnostics(),
+            loadDbSchemas(),
+            loadImageGalleryAdmin(),
+            loadEventFeedHistory(),
+        ]);
+        connectEventFeed();
+    }
+}
+
+async function setAdminMode(enabled) {
+    const toggle = document.getElementById('admin-mode-toggle');
+    const desired = Boolean(enabled);
+    if (!getLinkedGuildId()) {
+        updateAdminModeToggle();
+        return;
+    }
+    if (toggle) toggle.disabled = true;
+    updateRemoteConnectionStatus(desired ? 'Switching to admin mode...' : 'Switching to guild mode...', 'idle');
+    try {
+        const res = await fetch(`${API_BASE}/session/admin-mode`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: desired }),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(data.detail || 'Mode switch failed');
+        }
+        if (data.token) setRemoteToken(data.token);
+        setPanelSessionContext(data);
+        await refreshPanelAfterModeSwitch();
+        updateRemoteConnectionStatus(isAdminSession() ? 'Admin mode active' : 'Guild mode active', isAdminSession() ? 'online' : 'idle');
+    } catch (err) {
+        if (toggle) toggle.checked = isAdminSession();
+        updateRemoteConnectionStatus(err instanceof Error ? err.message : String(err), 'offline');
+    } finally {
+        if (toggle) toggle.disabled = !getLinkedGuildId();
+        updateAdminModeToggle();
+    }
 }
 
 function resolveApiUrl(input) {
@@ -1034,13 +1144,14 @@ function updateInviteOnlyMode() {
         || botCatalogState.length > 0
         || inviteCatalogState.some(bot => bot.kind === 'music' && bot.connected_to_session_guild);
     inviteOnlyMode = isGuildScopedSession() && !hasConnectedMusicBot;
+    const linkedGuildId = getLinkedGuildId();
     document.body.classList.toggle('invite-only-mode', inviteOnlyMode);
 
     const lockout = document.getElementById('invite-lockout-message');
     if (lockout) {
         lockout.hidden = !inviteOnlyMode;
         lockout.textContent = inviteOnlyMode
-            ? `No swarm bot is connected to guild ${currentPanelSession.guild_id}. Invite at least one bot to unlock the rest of the panel.`
+            ? `No swarm bot is connected to guild ${linkedGuildId}. Invite at least one bot to unlock the rest of the panel.`
             : '';
     }
 
@@ -1385,6 +1496,7 @@ function renderUserProfile(data = userProfileState) {
     if (previewServer) previewServer.textContent = profile.server_name || (profile.guild_id ? `Guild ${profile.guild_id}` : 'No server card yet.');
     if (previewChips) {
         const chips = [];
+        if (profile.guild_id) chips.push(`Guild: ${profile.guild_id}`);
         if (profile.favorite_bot) chips.push(`Favorite: ${profile.favorite_bot}`);
         chips.push(profile.public_profile === false ? 'Private' : 'Public');
         if (profile.server_invite_url) chips.push('Invite linked');
@@ -1396,7 +1508,7 @@ function renderUserProfile(data = userProfileState) {
     }
     if (locked) {
         locked.hidden = editable;
-        locked.textContent = editable ? '' : 'Admin sessions can browse users, but only guild accounts can edit a public profile.';
+        locked.textContent = editable ? '' : 'Built-in admin sessions can browse users, but registered accounts edit profiles through their linked guild.';
     }
     setUserProfileInputsDisabled(!editable);
     updateTopbarAccount(profile);
@@ -4357,6 +4469,9 @@ document.addEventListener('DOMContentLoaded', () => {
             event.stopPropagation();
             toggleAccountDropdown();
         });
+
+    document.getElementById('admin-mode-toggle')
+        ?.addEventListener('change', (event) => setAdminMode(event.target.checked));
 
     document.querySelectorAll('[data-account-tab]')
         .forEach(button => button.addEventListener('click', () => {
