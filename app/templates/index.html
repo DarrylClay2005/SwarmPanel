@@ -14,6 +14,14 @@
       <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}" role="button" tabindex="0" aria-pressed="{% if session_admin_mode %}true{% else %}false{% endif %}">
         {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}Admin Mode{% endif %}
       </span>
+      <input id="global-panel-search" class="topbar-search" type="search" placeholder="Find bot, guild, track..." />
+      <select id="refresh-interval-select" class="topbar-select" aria-label="Dashboard refresh interval">
+        <option value="5000">5s refresh</option>
+        <option value="10000">10s refresh</option>
+        <option value="30000">30s refresh</option>
+      </select>
+      <button id="pause-refresh-toggle" type="button" aria-pressed="false">Pause Sync</button>
+      <button id="export-snapshot" type="button">Export</button>
       <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_guild_id %}hidden{% endif %}>
         <input id="admin-mode-toggle" type="checkbox" {% if session_admin_mode %}checked{% endif %} />
         <span>Admin Mode</span>
@@ -234,7 +242,29 @@
         </div>
         <span id="overview-generated" class="muted deck-timestamp">Waiting for dashboard sync...</span>
       </div>
+      <div class="utility-toolbar">
+        <label class="control-inline"><span>Overview Filter</span><input id="overview-filter" type="search" placeholder="bot, guild, track" /></label>
+        <label class="control-inline"><input id="pinned-only-toggle" type="checkbox" /> Pinned only</label>
+        <button id="clear-local-qol" type="button">Clear Local QOL</button>
+      </div>
       <div id="overview-stats" class="overview-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Alert Rules</h2>
+          <p class="muted">Local watchdog rules for stale nodes, offline nodes, live sessions, and queue pressure.</p>
+        </div>
+        <button id="save-alert-rules" type="button">Save Rules</button>
+      </div>
+      <div class="alert-rule-grid">
+        <label class="check-row"><input id="alert-offline" type="checkbox" checked /> Offline nodes</label>
+        <label class="check-row"><input id="alert-stale" type="checkbox" checked /> Stale heartbeats</label>
+        <label class="check-row"><input id="alert-live" type="checkbox" /> Live session changes</label>
+        <label class="control-field"><span>Queue threshold</span><input id="alert-queue-threshold" type="number" min="0" step="1" value="25" /></label>
+      </div>
+      <div id="alert-center" class="alert-center"></div>
     </section>
 
     <section class="panel" style="border-color: #cba6f7; background: linear-gradient(180deg, #181825 0%, #11111b 100%);">
@@ -333,6 +363,26 @@
       </div>
       <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
 
+      <div class="command-presets">
+        <div class="section-title-row">
+          <div>
+            <h3>Command Presets</h3>
+            <p class="muted">Save reusable bot, guild, voice, source, loop, and filter combinations for fast dispatch.</p>
+          </div>
+          <div class="row">
+            <input id="preset-name" type="text" maxlength="80" placeholder="Preset name" />
+            <button id="save-command-preset" type="button">Save Preset</button>
+          </div>
+        </div>
+        <div class="preset-runner">
+          <select id="command-preset-select"></select>
+          <button id="apply-command-preset" type="button">Apply</button>
+          <button id="run-command-preset" type="button">Run</button>
+          <button id="delete-command-preset" type="button">Delete</button>
+        </div>
+        <div id="command-history" class="command-history"></div>
+      </div>
+
       <div class="control-shell">
         <div class="control-main">
           <div class="direct-control-grid">
@@ -408,6 +458,15 @@
               <span class="muted">Auto-synced</span>
             </div>
             <div id="control-context-card" class="control-context-card"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Session Notes</h3>
+              <button id="save-session-note" type="button">Save</button>
+            </div>
+            <textarea id="session-note-input" class="session-note-input" rows="5" maxlength="800" placeholder="Local note for this bot and guild"></textarea>
+            <div id="session-note-status" class="muted"></div>
           </div>
 
           <div class="control-side-card">

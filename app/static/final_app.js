@@ -6,6 +6,12 @@ const REMOTE_MODE = Boolean(window.SWARM_PANEL_REMOTE_MODE) || window.location.h
 const REMOTE_ORIGIN_KEY = 'swarm_panel_remote_origin';
 const REMOTE_TOKEN_KEY = 'swarm_panel_remote_token';
 const REMOTE_USERNAME_KEY = 'swarm_panel_remote_username';
+const COMMAND_PRESETS_KEY = 'swarm_panel_command_presets';
+const PINNED_BOTS_KEY = 'swarm_panel_pinned_bots';
+const SESSION_NOTES_KEY = 'swarm_panel_session_notes';
+const ALERT_RULES_KEY = 'swarm_panel_alert_rules';
+const COMMAND_HISTORY_KEY = 'swarm_panel_command_history';
+const QOL_SETTINGS_KEY = 'swarm_panel_qol_settings';
 const REMOTE_CONFIG_FILE = 'live-config.json';
 const rawFetch = window.fetch.bind(window);
 const storageFallback = new Map();
@@ -32,6 +38,13 @@ let eventFeedConnectionState = 'offline';
 let systemDiagnosticsState = null;
 let metricsSnapshotState = null;
 let controlRefreshTimer = null;
+let pinnedBotsState = new Set();
+let commandPresetsState = [];
+let commandHistoryState = [];
+let sessionNotesState = {};
+let alertRulesState = { offline: true, stale: true, live: false, queueThreshold: 25 };
+let qolSettingsState = { refreshIntervalMs: 5000, refreshPaused: false, overviewFilter: '', pinnedOnly: false };
+let lastAlertFingerprint = '';
 let lastDashboardFetchAt = Date.now();
 let liveSessionState = [];
 let liveSessionPositionCache = new Map();
@@ -216,6 +229,73 @@ function writeStoredValue(key, value) {
             }
         } catch (_err) {}
     }
+}
+
+function readStoredJson(key, fallback) {
+    try {
+        const raw = readStoredValue(key);
+        return raw ? JSON.parse(raw) : fallback;
+    } catch (_err) {
+        return fallback;
+    }
+}
+
+function writeStoredJson(key, value) {
+    writeStoredValue(key, JSON.stringify(value));
+}
+
+function showPanelToast(message, tone = 'info') {
+    let toast = document.getElementById('panel-toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'panel-toast';
+        toast.className = 'panel-toast';
+        toast.setAttribute('role', 'status');
+        document.body.appendChild(toast);
+    }
+    toast.textContent = message;
+    toast.dataset.tone = tone;
+    toast.hidden = false;
+    clearTimeout(showPanelToast._timer);
+    showPanelToast._timer = setTimeout(() => {
+        toast.hidden = true;
+    }, 3200);
+}
+
+function copyText(value, successMessage = 'Copied') {
+    const text = String(value || '');
+    if (!text) return Promise.resolve(false);
+    return navigator.clipboard?.writeText(text)
+        .catch(() => {
+            const input = document.createElement('textarea');
+            input.value = text;
+            document.body.appendChild(input);
+            input.select();
+            document.execCommand('copy');
+            input.remove();
+        })
+        .then(() => {
+            showPanelToast(successMessage, 'success');
+            return true;
+        });
+}
+
+function loadLocalQolState() {
+    pinnedBotsState = new Set(readStoredJson(PINNED_BOTS_KEY, []));
+    commandPresetsState = readStoredJson(COMMAND_PRESETS_KEY, []);
+    commandHistoryState = readStoredJson(COMMAND_HISTORY_KEY, []);
+    sessionNotesState = readStoredJson(SESSION_NOTES_KEY, {});
+    alertRulesState = { ...alertRulesState, ...readStoredJson(ALERT_RULES_KEY, {}) };
+    qolSettingsState = { ...qolSettingsState, ...readStoredJson(QOL_SETTINGS_KEY, {}) };
+}
+
+function saveLocalQolState() {
+    writeStoredJson(PINNED_BOTS_KEY, [...pinnedBotsState]);
+    writeStoredJson(COMMAND_PRESETS_KEY, commandPresetsState.slice(0, 40));
+    writeStoredJson(COMMAND_HISTORY_KEY, commandHistoryState.slice(0, 30));
+    writeStoredJson(SESSION_NOTES_KEY, sessionNotesState);
+    writeStoredJson(ALERT_RULES_KEY, alertRulesState);
+    writeStoredJson(QOL_SETTINGS_KEY, qolSettingsState);
 }
 
 function normalizeRemoteOrigin(value) {
@@ -537,6 +617,127 @@ function updateLivePositionCounters() {
     });
 }
 
+function renderQolControls() {
+    const overviewFilter = document.getElementById('overview-filter');
+    const globalSearch = document.getElementById('global-panel-search');
+    const pinnedOnly = document.getElementById('pinned-only-toggle');
+    const refreshSelect = document.getElementById('refresh-interval-select');
+    const pauseButton = document.getElementById('pause-refresh-toggle');
+    if (overviewFilter && overviewFilter.value !== qolSettingsState.overviewFilter) overviewFilter.value = qolSettingsState.overviewFilter || '';
+    if (globalSearch && globalSearch.value !== qolSettingsState.overviewFilter) globalSearch.value = qolSettingsState.overviewFilter || '';
+    if (pinnedOnly) pinnedOnly.checked = Boolean(qolSettingsState.pinnedOnly);
+    if (refreshSelect) refreshSelect.value = String(qolSettingsState.refreshIntervalMs || 5000);
+    if (pauseButton) {
+        pauseButton.textContent = qolSettingsState.refreshPaused ? 'Resume Sync' : 'Pause Sync';
+        pauseButton.setAttribute('aria-pressed', qolSettingsState.refreshPaused ? 'true' : 'false');
+    }
+}
+
+function setOverviewFilter(value) {
+    qolSettingsState.overviewFilter = String(value || '').trim();
+    saveLocalQolState();
+    renderQolControls();
+    renderOverview(dashboardBotsState);
+    renderBots(dashboardBotsState);
+    renderSessions(liveSessionState.filter(session => isRuntimeSession(session)));
+    renderNowPlaying(liveSessionState);
+}
+
+function togglePinnedBot(botKey) {
+    if (!botKey) return;
+    if (pinnedBotsState.has(botKey)) pinnedBotsState.delete(botKey);
+    else pinnedBotsState.add(botKey);
+    saveLocalQolState();
+    renderBots(dashboardBotsState);
+    renderOverview(dashboardBotsState);
+    showPanelToast(pinnedBotsState.has(botKey) ? 'Bot pinned.' : 'Bot unpinned.', 'success');
+}
+
+function renderAlertRulesInputs() {
+    const offline = document.getElementById('alert-offline');
+    const stale = document.getElementById('alert-stale');
+    const live = document.getElementById('alert-live');
+    const queue = document.getElementById('alert-queue-threshold');
+    if (offline) offline.checked = Boolean(alertRulesState.offline);
+    if (stale) stale.checked = Boolean(alertRulesState.stale);
+    if (live) live.checked = Boolean(alertRulesState.live);
+    if (queue) queue.value = String(Number(alertRulesState.queueThreshold ?? 25));
+}
+
+function saveAlertRulesFromInputs() {
+    alertRulesState = {
+        offline: Boolean(document.getElementById('alert-offline')?.checked),
+        stale: Boolean(document.getElementById('alert-stale')?.checked),
+        live: Boolean(document.getElementById('alert-live')?.checked),
+        queueThreshold: Math.max(0, Number(document.getElementById('alert-queue-threshold')?.value || 0)),
+    };
+    saveLocalQolState();
+    renderAlertCenter();
+    showPanelToast('Alert rules saved.', 'success');
+}
+
+function getAlertItems() {
+    const alerts = [];
+    const queueThreshold = Number(alertRulesState.queueThreshold || 0);
+    dashboardBotsState.forEach(bot => {
+        const status = describeBotStatus(bot.status);
+        const heartbeat = String(bot.heartbeat_status || '').toLowerCase();
+        if (alertRulesState.offline && status.tone === 'offline') {
+            alerts.push({ tone: 'error', title: `${bot.display_name} offline`, detail: `Heartbeat ${formatHeartbeatAge(bot.heartbeat_age_seconds)}` });
+        }
+        if (alertRulesState.stale && (status.tone === 'stale' || heartbeat === 'stale')) {
+            alerts.push({ tone: 'warning', title: `${bot.display_name} stale`, detail: `Heartbeat ${formatHeartbeatAge(bot.heartbeat_age_seconds)}` });
+        }
+    });
+    liveSessionState.forEach(session => {
+        if (alertRulesState.live && session.is_playing) {
+            alerts.push({ tone: 'success', title: `${session.bot_display || session.bot_key} live`, detail: `${session.guild_name || session.guild_id}: ${session.title || 'Unknown track'}` });
+        }
+        if (queueThreshold > 0 && Number(session.queue_count || 0) >= queueThreshold) {
+            alerts.push({ tone: 'warning', title: `Queue pressure on ${session.bot_display || session.bot_key}`, detail: `${session.queue_count} queued in ${session.guild_name || session.guild_id}` });
+        }
+    });
+    return alerts.slice(0, 12);
+}
+
+function renderAlertCenter() {
+    const center = document.getElementById('alert-center');
+    if (!center) return;
+    const alerts = getAlertItems();
+    const fingerprint = alerts.map(item => `${item.tone}:${item.title}:${item.detail}`).join('|');
+    if (fingerprint && fingerprint !== lastAlertFingerprint && lastAlertFingerprint) {
+        showPanelToast(`${alerts.length} swarm alert${alerts.length === 1 ? '' : 's'} active.`, alerts.some(item => item.tone === 'error') ? 'error' : 'warning');
+    }
+    lastAlertFingerprint = fingerprint;
+    center.innerHTML = alerts.length
+        ? alerts.map(item => `<article class="alert-item alert-item-${item.tone}"><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.detail)}</span></article>`).join('')
+        : '<div class="control-context-empty">No local alerts match the current rules.</div>';
+}
+
+function exportDashboardSnapshot() {
+    const payload = {
+        exported_at: new Date().toISOString(),
+        session: currentPanelSession,
+        bots: dashboardBotsState,
+        sessions: liveSessionState,
+        metrics: metricsSnapshotState,
+        alerts: getAlertItems(),
+        pinned_bots: [...pinnedBotsState],
+        command_presets: commandPresetsState,
+        session_notes: sessionNotesState,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `swarmpanel-snapshot-${new Date().toISOString().slice(0, 19).replaceAll(':', '-')}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1200);
+    showPanelToast('Snapshot exported.', 'success');
+}
+
 function ensureLivePositionTicker() {
     if (livePositionTickerStarted) return;
     livePositionTickerStarted = true;
@@ -580,6 +781,47 @@ function safePublicUrl(value) {
 function safeHexColor(value, fallback = '#89b4fa') {
     const raw = String(value || '').trim();
     return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
+}
+
+function botMatchesQolFilter(bot) {
+    if (!bot) return false;
+    if (qolSettingsState.pinnedOnly && !pinnedBotsState.has(bot.key)) return false;
+    const query = String(qolSettingsState.overviewFilter || '').trim().toLowerCase();
+    if (!query) return true;
+    const haystack = [
+        bot.key,
+        bot.display_name,
+        bot.status,
+        bot.heartbeat_status,
+        ...(Array.isArray(bot.sessions) ? bot.sessions.flatMap(session => [
+            session.guild_name,
+            session.guild_id,
+            session.channel_name,
+            session.title,
+            session.filter_mode,
+            session.loop_mode,
+        ]) : []),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return haystack.includes(query);
+}
+
+function sessionMatchesQolFilter(session) {
+    const query = String(qolSettingsState.overviewFilter || '').trim().toLowerCase();
+    if (!query) return true;
+    return [
+        session.bot_key,
+        session.bot_display,
+        session.guild_name,
+        session.guild_id,
+        session.channel_name,
+        session.title,
+        session.filter_mode,
+        session.loop_mode,
+    ].filter(Boolean).join(' ').toLowerCase().includes(query);
+}
+
+function getSessionNoteKey(botKey = '', guildId = '') {
+    return `${botKey || 'unknown'}:${guildId || '0'}`;
 }
 
 function formatCentralTimestamp(value, withDate = false) {
@@ -1086,8 +1328,9 @@ function renderOverview(bots, generatedAt = null) {
     const timestamp = document.getElementById('overview-generated');
     if (!container) return;
 
-    const workerBots = (bots || []).filter(bot => bot.kind === 'music');
-    const orchestrator = (bots || []).find(bot => bot.kind === 'orchestrator');
+    const visibleBots = (bots || []).filter(botMatchesQolFilter);
+    const workerBots = visibleBots.filter(bot => bot.kind === 'music');
+    const orchestrator = visibleBots.find(bot => bot.kind === 'orchestrator') || (bots || []).find(bot => bot.kind === 'orchestrator');
     const onlineWorkers = workerBots.filter(bot => describeBotStatus(bot.status).tone === 'online').length;
     const staleWorkers = workerBots.filter(bot => describeBotStatus(bot.status).tone === 'stale').length;
     const liveSessions = workerBots.reduce((sum, bot) => sum + (Array.isArray(bot.sessions) ? bot.sessions.filter(session => session.is_playing).length : 0), 0);
@@ -1126,6 +1369,12 @@ function renderOverview(bots, generatedAt = null) {
             value: String(liveSessions),
             detail: `${activeGuilds.size} guild${activeGuilds.size === 1 ? '' : 's'} carrying audio`,
             tone: liveSessions ? 'online' : 'idle',
+        },
+        {
+            label: 'Pinned Nodes',
+            value: String(pinnedBotsState.size),
+            detail: qolSettingsState.pinnedOnly ? 'Pinned-only view active' : 'Pin key bots for fast triage',
+            tone: pinnedBotsState.size ? 'online' : 'idle',
         },
         {
             label: 'Event Feed',
@@ -1749,6 +1998,7 @@ async function fetchDashboard() {
         dashboardBotsState = bots;
         updateInviteOnlyMode();
 
+        renderQolControls();
         renderOverview(bots, data.generated_at);
         renderBots(bots);
 
@@ -1782,6 +2032,7 @@ async function fetchDashboard() {
         pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
         renderSessions(allSessions.filter(session => isRuntimeSession(session)));
         renderNowPlaying(allSessions);
+        renderAlertCenter();
         syncControlSelectionsFromDashboard();
         renderControlContext();
         renderAriaCommandGuide();
@@ -2002,6 +2253,7 @@ function renderSharedRuntimeCard(data) {
             <div class="diagnostic-item-meta">Schema detail: ${escapeHtml(summarizeDbDetails(data?.panel?.db_details) || 'No panel table summary available yet.')}</div>
         </div>
     `;
+    renderSessionNoteInput();
 }
 
 function renderAriaDiagnosticCard(data) {
@@ -2188,7 +2440,7 @@ function renderNowPlaying(sessions) {
     const container = document.getElementById("now-playing-cards");
     if (!container) return;
 
-    const playing = sessions.filter(s => s.is_playing);
+    const playing = sessions.filter(s => s.is_playing && sessionMatchesQolFilter(s));
 
     if (playing.length === 0) {
         container.innerHTML = `
@@ -2296,7 +2548,13 @@ function renderBots(bots) {
     container.innerHTML = "";
     if (ariaContainer) ariaContainer.innerHTML = "";
 
-    bots.forEach(bot => {
+    const visibleBots = (bots || [])
+        .filter(botMatchesQolFilter)
+        .sort((a, b) => Number(pinnedBotsState.has(b.key)) - Number(pinnedBotsState.has(a.key)) || String(a.display_name || '').localeCompare(String(b.display_name || '')));
+    if (!visibleBots.length) {
+        container.innerHTML = '<div class="control-context-empty">No worker nodes match the current overview filter.</div>';
+    }
+    visibleBots.forEach(bot => {
         const statusMeta = describeBotStatus(bot.status);
         const heartbeatLabel = formatHeartbeatAge(bot.heartbeat_age_seconds);
         const sessions = Array.isArray(bot.sessions) ? bot.sessions : [];
@@ -2317,7 +2575,8 @@ function renderBots(bots) {
         const accent = botColors[bot.key] || '#89b4fa';
 
         const card = document.createElement("div");
-        card.className = "bot-card";
+        const pinned = pinnedBotsState.has(bot.key);
+        card.className = `bot-card${pinned ? ' bot-card-pinned' : ''}`;
         card.style.setProperty('--bot-accent', accent);
 
         const initial = bot.display_name.charAt(0).toUpperCase();
@@ -2342,6 +2601,7 @@ function renderBots(bots) {
                         <span class="bot-status-label" style="color:${statusMeta.color};">${statusMeta.label}</span>
                     </div>
                 </div>
+                <button class="pin-bot-btn" type="button" data-pin-bot="${escapeHtml(bot.key)}" aria-pressed="${pinned ? 'true' : 'false'}">${pinned ? 'Pinned' : 'Pin'}</button>
             </div>
             <div class="bot-stats">
                 <div class="bot-stat-item">
@@ -2405,19 +2665,21 @@ function renderSessions(sessions) {
     if (!table) return;
 
     table.innerHTML = "";
+    const visibleSessions = (sessions || []).filter(sessionMatchesQolFilter);
 
-    if (!sessions.length) {
+    if (!visibleSessions.length) {
         table.innerHTML = '<tr><td colspan="12">No live or queued worker sessions right now.</td></tr>';
         return;
     }
 
-    sessions.forEach(session => {
+    visibleSessions.forEach(session => {
         const stateMeta = describeSessionState(session);
         const channelLabel = getSessionChannelLabel(session);
         const trackLabel = session.title || (stateMeta.key === 'queued' ? 'Queued media awaiting worker pickup' : '—');
         const row = document.createElement("tr");
         const recoverySummary = summarizeRecoveryState(session);
         const signalSummary = summarizeSessionSignals(session);
+        const note = sessionNotesState[getSessionNoteKey(session.bot_key, session.guild_id)] || '';
         const durationLabel = formatDuration(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
         const positionKey = escapeHtml(getSessionRuntimeKey(session));
         row.innerHTML = `
@@ -2425,7 +2687,7 @@ function renderSessions(sessions) {
             <td data-label="Guild">${session.guild_name || session.guild_id}</td>
             <td data-label="Channel">${channelLabel}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${session.home_channel_id}</div>` : ''}</td>
             <td data-label="Status">${stateMeta.icon} ${stateMeta.label}</td>
-            <td data-label="Track">${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}</td>
+            <td data-label="Track">${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}${note ? `<div class="session-note-chip">${escapeHtml(note.slice(0, 80))}</div>` : ''}</td>
             <td data-label="Filter">${session.filter_mode || "none"}</td>
             <td data-label="Loop">${normalizeLoopMode(session.loop_mode)}</td>
             <td data-label="Queue">${session.queue_count || 0}</td>
@@ -2475,6 +2737,14 @@ async function sendCommand(bot_key, guild_id, action, payload = null, options = 
             console.error("❌ Backend rejected request:", detail);
             return { ok: false, error: detail, data };
         }
+
+        addCommandHistory({
+            botKey: bot_key,
+            guildId: guild_id,
+            action,
+            payload: typeof payload === 'string' ? payload : JSON.stringify(payload || ''),
+            sourceUrl: payload?.source_url || '',
+        });
 
         if (refresh) {
             fetchDashboard();
@@ -3300,6 +3570,137 @@ function renderAriaCommandGuide() {
     ];
 
     container.innerHTML = examples.map(example => `<code class="aria-command-line">${escapeHtml(example)}</code>`).join('');
+}
+
+function getCommandPresetFromInputs() {
+    return {
+        botKey: document.getElementById('control-bot-select')?.value || '',
+        guildId: document.getElementById('control-guild-select')?.value || '',
+        voiceChannelId: document.getElementById('control-voice-select')?.value || '',
+        sourceUrl: document.getElementById('control-source-input')?.value?.trim() || '',
+        loopMode: normalizeLoopMode(document.getElementById('control-loop-select')?.value),
+        filterMode: document.getElementById('control-filter-select')?.value || 'none',
+    };
+}
+
+function renderCommandPresets() {
+    const select = document.getElementById('command-preset-select');
+    if (select) {
+        select.innerHTML = commandPresetsState.length
+            ? commandPresetsState.map(preset => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.name)}</option>`).join('')
+            : '<option value="">No presets saved</option>';
+    }
+    const history = document.getElementById('command-history');
+    if (history) {
+        history.innerHTML = commandHistoryState.length
+            ? commandHistoryState.slice(0, 8).map(item => `
+                <button type="button" data-history-source="${escapeHtml(item.sourceUrl || '')}">
+                    <strong>${escapeHtml(item.action || 'PLAY')}</strong>
+                    <span>${escapeHtml(item.botKey || 'bot')} · ${escapeHtml(item.guildId || 'guild')}</span>
+                    <em>${escapeHtml(item.sourceUrl || item.payload || '')}</em>
+                </button>
+            `).join('')
+            : '<div class="control-context-empty">Command history appears after you send panel commands.</div>';
+    }
+}
+
+function saveCommandPresetFromInputs() {
+    const nameInput = document.getElementById('preset-name');
+    const name = String(nameInput?.value || '').trim() || `Preset ${commandPresetsState.length + 1}`;
+    const preset = {
+        id: globalThis.crypto?.randomUUID?.() || String(Date.now()),
+        name,
+        createdAt: new Date().toISOString(),
+        ...getCommandPresetFromInputs(),
+    };
+    commandPresetsState = [preset, ...commandPresetsState.filter(item => item.name !== name)].slice(0, 40);
+    if (nameInput) nameInput.value = '';
+    saveLocalQolState();
+    renderCommandPresets();
+    showPanelToast('Command preset saved.', 'success');
+}
+
+function selectedCommandPreset() {
+    const id = document.getElementById('command-preset-select')?.value;
+    return commandPresetsState.find(preset => preset.id === id) || null;
+}
+
+async function applyCommandPreset(preset = selectedCommandPreset()) {
+    if (!preset) return;
+    const bot = document.getElementById('control-bot-select');
+    const source = document.getElementById('control-source-input');
+    const loop = document.getElementById('control-loop-select');
+    const filter = document.getElementById('control-filter-select');
+    if (bot && preset.botKey) bot.value = preset.botKey;
+    if (source) source.value = preset.sourceUrl || '';
+    if (loop) loop.value = preset.loopMode || 'queue';
+    if (filter) filter.value = preset.filterMode || 'none';
+    await loadControlInventory(preset.botKey);
+        const guild = document.getElementById('control-guild-select');
+        const voice = document.getElementById('control-voice-select');
+        if (guild && preset.guildId) {
+            guild.value = preset.guildId;
+            populateControlChannels();
+        }
+        if (voice && preset.voiceChannelId) voice.value = preset.voiceChannelId;
+        renderControlContext();
+        renderAriaCommandGuide();
+        renderSelectedBotCapabilities();
+    showPanelToast('Preset applied.', 'success');
+}
+
+async function runCommandPreset() {
+    const preset = selectedCommandPreset();
+    if (!preset) return;
+    await applyCommandPreset(preset);
+    await queueFromPanel();
+}
+
+function deleteCommandPreset() {
+    const preset = selectedCommandPreset();
+    if (!preset) return;
+    commandPresetsState = commandPresetsState.filter(item => item.id !== preset.id);
+    saveLocalQolState();
+    renderCommandPresets();
+    showPanelToast('Preset deleted.', 'success');
+}
+
+function addCommandHistory(item) {
+    commandHistoryState = [{
+        timestamp: new Date().toISOString(),
+        ...item,
+    }, ...commandHistoryState].slice(0, 30);
+    saveLocalQolState();
+    renderCommandPresets();
+}
+
+function renderSessionNoteInput() {
+    const input = document.getElementById('session-note-input');
+    const status = document.getElementById('session-note-status');
+    if (!input) return;
+    const botKey = document.getElementById('control-bot-select')?.value || '';
+    const guildId = document.getElementById('control-guild-select')?.value || '';
+    const key = getSessionNoteKey(botKey, guildId);
+    if (document.activeElement !== input) input.value = sessionNotesState[key] || '';
+    if (status) status.textContent = botKey && guildId ? `Local note for ${botKey} in ${guildId}` : 'Choose a bot and guild first.';
+}
+
+function saveSessionNote() {
+    const botKey = document.getElementById('control-bot-select')?.value || '';
+    const guildId = document.getElementById('control-guild-select')?.value || '';
+    if (!botKey || !guildId) {
+        showPanelToast('Choose a bot and guild before saving a note.', 'error');
+        return;
+    }
+    const key = getSessionNoteKey(botKey, guildId);
+    const value = document.getElementById('session-note-input')?.value || '';
+    if (value.trim()) sessionNotesState[key] = value.trim();
+    else delete sessionNotesState[key];
+    saveLocalQolState();
+    renderSessions(liveSessionState.filter(session => isRuntimeSession(session)));
+    renderControlContext();
+    renderSessionNoteInput();
+    showPanelToast('Session note saved.', 'success');
 }
 
 function renderSelectedBotCapabilities() {
@@ -4309,6 +4710,10 @@ async function truncateSchema() {
 // 🔌 WIRE UP ALL BUTTONS
 // ================================
 document.addEventListener('DOMContentLoaded', () => {
+    loadLocalQolState();
+    renderQolControls();
+    renderAlertRulesInputs();
+    renderCommandPresets();
     if (REMOTE_MODE) {
         document.body.classList.add('remote-pages-body');
         updateRemoteConnectionStatus('GitHub Pages remote mode', 'idle');
@@ -4316,6 +4721,66 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('refresh-dashboard')
         ?.addEventListener('click', fetchDashboard);
+    document.getElementById('global-panel-search')
+        ?.addEventListener('input', event => setOverviewFilter(event.target.value));
+    document.getElementById('overview-filter')
+        ?.addEventListener('input', event => setOverviewFilter(event.target.value));
+    document.getElementById('pinned-only-toggle')
+        ?.addEventListener('change', event => {
+            qolSettingsState.pinnedOnly = Boolean(event.target.checked);
+            saveLocalQolState();
+            renderQolControls();
+            renderOverview(dashboardBotsState);
+            renderBots(dashboardBotsState);
+        });
+    document.getElementById('refresh-interval-select')
+        ?.addEventListener('change', event => {
+            qolSettingsState.refreshIntervalMs = Math.max(3000, Number(event.target.value || 5000));
+            saveLocalQolState();
+            renderQolControls();
+            showPanelToast(`Refresh interval set to ${Math.round(qolSettingsState.refreshIntervalMs / 1000)}s.`, 'success');
+        });
+    document.getElementById('pause-refresh-toggle')
+        ?.addEventListener('click', () => {
+            qolSettingsState.refreshPaused = !qolSettingsState.refreshPaused;
+            saveLocalQolState();
+            renderQolControls();
+            showPanelToast(qolSettingsState.refreshPaused ? 'Auto refresh paused.' : 'Auto refresh resumed.', 'success');
+        });
+    document.getElementById('export-snapshot')
+        ?.addEventListener('click', exportDashboardSnapshot);
+    document.getElementById('clear-local-qol')
+        ?.addEventListener('click', () => {
+            if (!confirm('Clear local pins, presets, notes, alerts, history, and QOL settings?')) return;
+            [COMMAND_PRESETS_KEY, PINNED_BOTS_KEY, SESSION_NOTES_KEY, ALERT_RULES_KEY, COMMAND_HISTORY_KEY, QOL_SETTINGS_KEY].forEach(key => writeStoredValue(key, ''));
+            loadLocalQolState();
+            renderQolControls();
+            renderAlertRulesInputs();
+            renderCommandPresets();
+            renderBots(dashboardBotsState);
+            renderAlertCenter();
+            showPanelToast('Local QOL data cleared.', 'success');
+        });
+    document.getElementById('save-alert-rules')
+        ?.addEventListener('click', saveAlertRulesFromInputs);
+    document.getElementById('save-command-preset')
+        ?.addEventListener('click', saveCommandPresetFromInputs);
+    document.getElementById('apply-command-preset')
+        ?.addEventListener('click', () => applyCommandPreset());
+    document.getElementById('run-command-preset')
+        ?.addEventListener('click', runCommandPreset);
+    document.getElementById('delete-command-preset')
+        ?.addEventListener('click', deleteCommandPreset);
+    document.getElementById('save-session-note')
+        ?.addEventListener('click', saveSessionNote);
+    document.getElementById('command-history')
+        ?.addEventListener('click', event => {
+            const button = event.target.closest('[data-history-source]');
+            if (!button) return;
+            const input = document.getElementById('control-source-input');
+            if (input) input.value = button.dataset.historySource || '';
+            renderAriaCommandGuide();
+        });
 
     document.getElementById('refresh-invite-catalog')
         ?.addEventListener('click', () => {
@@ -4662,12 +5127,36 @@ document.addEventListener('DOMContentLoaded', () => {
         }));
 
     document.addEventListener('click', (event) => {
+        const pinBot = event.target.closest('[data-pin-bot]');
+        if (pinBot) {
+            event.preventDefault();
+            event.stopPropagation();
+            togglePinnedBot(pinBot.dataset.pinBot);
+            return;
+        }
         const menu = document.getElementById('account-menu');
         if (menu && !menu.contains(event.target)) setAccountDropdownOpen(false);
     });
 
     document.addEventListener('keydown', (event) => {
         if (event.key === 'Escape') setAccountDropdownOpen(false);
+        const tag = event.target?.tagName;
+        const isTyping = ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || event.target?.isContentEditable;
+        if (isTyping) return;
+        if (event.key === '/') {
+            event.preventDefault();
+            document.getElementById('global-panel-search')?.focus();
+        } else if (event.key.toLowerCase() === 'r') {
+            event.preventDefault();
+            fetchDashboard();
+        } else if (event.key.toLowerCase() === 'e') {
+            event.preventDefault();
+            exportDashboardSnapshot();
+        } else if (event.key >= '1' && event.key <= '7') {
+            const tabs = Array.from(document.querySelectorAll('.swarm-tab'));
+            const tab = tabs[Number(event.key) - 1];
+            if (tab) activateSwarmTab(tab.dataset.tabTarget);
+        }
     });
 
     document.getElementById('remote-login-button')
@@ -4688,8 +5177,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // 🔄 AUTO REFRESH
 // ================================
 async function dashboardRefreshLoop() {
-    if (panelAppStarted) await fetchDashboard();
-    dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, 5000);
+    if (panelAppStarted && !qolSettingsState.refreshPaused) await fetchDashboard();
+    dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, Math.max(3000, Number(qolSettingsState.refreshIntervalMs || 5000)));
 }
 
 async function diagnosticsRefreshLoop() {
