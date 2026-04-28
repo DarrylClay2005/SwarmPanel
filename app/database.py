@@ -513,6 +513,20 @@ class PanelDatabase:
         )
         return {"username": row["username"], "guild_id": str(row["guild_id"])}
 
+    async def issue_account_email_verification_token(self, username: str, guild_id: str | int, token: str) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        token_hash = _verification_token_hash(token)
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email_verification_token_hash = %s, email_verification_sent_at = CURRENT_TIMESTAMP
+            WHERE username = %s AND guild_id = %s AND email IS NOT NULL AND email_verified_at IS NULL
+            """,
+            (token_hash, username, gid),
+        )
+        return await self.get_account_profile(username, gid)
+
     async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
@@ -1705,15 +1719,36 @@ class PanelDatabase:
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
+                summary: dict[str, Any] = {"schema": schema}
+                for key, table in (
+                    ("users", "users"),
+                    ("media", "media_items"),
+                    ("comments", "media_comments"),
+                    ("reports_open", "media_reports"),
+                    ("collections", "media_collections"),
+                ):
+                    if key == "reports_open":
+                        await cur.execute(f"SELECT COUNT(*) AS count FROM `{schema}`.`{table}` WHERE status='open'")
+                    else:
+                        await cur.execute(f"SELECT COUNT(*) AS count FROM `{schema}`.`{table}`")
+                    row = await cur.fetchone() or {}
+                    summary[key] = int(row.get("count") or 0)
+
                 await cur.execute(
                     f"""
                     SELECT u.id, u.username, u.display_name, u.email, u.email_verified_at,
+                           u.email_verification_sent_at, u.public_profile, u.show_liked_count,
+                           u.birthdate, u.age_verified_at, u.adult_content_consent,
                            u.created_at, u.last_login_at,
                            COUNT(DISTINCT m.id) AS media_count,
-                           COUNT(DISTINCT c.id) AS comment_count
+                           COUNT(DISTINCT c.id) AS comment_count,
+                           COUNT(DISTINCT b.media_id) AS bookmark_count,
+                           COUNT(DISTINCT col.id) AS collection_count
                     FROM `{schema}`.`users` u
                     LEFT JOIN `{schema}`.`media_items` m ON m.user_id = u.id
                     LEFT JOIN `{schema}`.`media_comments` c ON c.user_id = u.id
+                    LEFT JOIN `{schema}`.`media_bookmarks` b ON b.user_id = u.id
+                    LEFT JOIN `{schema}`.`media_collections` col ON col.user_id = u.id
                     GROUP BY u.id
                     ORDER BY u.created_at DESC
                     LIMIT %s
@@ -1740,7 +1775,7 @@ class PanelDatabase:
                 await cur.execute(
                     f"""
                     SELECT m.id, m.user_id, m.title, m.media_kind, m.file_size, m.views, m.downloads,
-                           m.created_at, u.username
+                           m.is_adult, m.moderation_status, m.moderation_reason, m.created_at, u.username
                     FROM `{schema}`.`media_items` m
                     JOIN `{schema}`.`users` u ON u.id = m.user_id
                     ORDER BY m.created_at DESC
@@ -1749,7 +1784,72 @@ class PanelDatabase:
                     (safe_limit,),
                 )
                 media = [self._json_row(row) for row in await cur.fetchall()]
-        return {"schema": schema, "users": users, "comments": comments, "media": media}
+
+                await cur.execute(
+                    f"""
+                    SELECT r.id, r.media_id, r.user_id, r.reason, r.details, r.status, r.created_at,
+                           u.username, u.display_name, m.title AS media_title
+                    FROM `{schema}`.`media_reports` r
+                    JOIN `{schema}`.`users` u ON u.id = r.user_id
+                    JOIN `{schema}`.`media_items` m ON m.id = r.media_id
+                    ORDER BY FIELD(r.status, 'open', 'reviewed', 'dismissed'), r.created_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+                reports = [self._json_row(row) for row in await cur.fetchall()]
+
+                await cur.execute(
+                    f"""
+                    SELECT c.id, c.name, c.slug, c.media_kind, c.created_at,
+                           COUNT(m.id) AS media_count
+                    FROM `{schema}`.`categories` c
+                    LEFT JOIN `{schema}`.`media_items` m ON m.category_id = c.id
+                    GROUP BY c.id
+                    ORDER BY c.name ASC
+                    """
+                )
+                categories = [self._json_row(row) for row in await cur.fetchall()]
+
+                await cur.execute(
+                    f"""
+                    SELECT col.id, col.user_id, col.name, col.is_public, col.created_at, u.username,
+                           COUNT(ci.media_id) AS item_count
+                    FROM `{schema}`.`media_collections` col
+                    JOIN `{schema}`.`users` u ON u.id = col.user_id
+                    LEFT JOIN `{schema}`.`media_collection_items` ci ON ci.collection_id = col.id
+                    GROUP BY col.id
+                    ORDER BY col.created_at DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+                collections = [self._json_row(row) for row in await cur.fetchall()]
+        return {
+            "schema": schema,
+            "summary": summary,
+            "users": users,
+            "comments": comments,
+            "media": media,
+            "reports": reports,
+            "categories": categories,
+            "collections": collections,
+        }
+
+    async def get_image_gallery_user_admin(self, user_id: int) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        row = await self._fetchone(
+            f"""
+            SELECT id, username, display_name, email, email_verified_at, email_verification_sent_at,
+                   public_profile, show_liked_count, birthdate, age_verified_at, adult_content_consent,
+                   created_at, last_login_at
+            FROM `{schema}`.`users`
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (_coerce_int(user_id, "user_id"),),
+        )
+        return self._json_row(row) if row else None
 
     async def delete_image_gallery_user(self, user_id: int) -> None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
@@ -1767,6 +1867,128 @@ class PanelDatabase:
         await self._execute(
             f"UPDATE `{schema}`.`users` SET password_hash = %s WHERE id = %s",
             (password_hash, _coerce_int(user_id, "user_id")),
+        )
+
+    async def update_image_gallery_user(self, user_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        allowed = {
+            "username",
+            "display_name",
+            "email",
+            "public_profile",
+            "show_liked_count",
+            "adult_content_consent",
+        }
+        cleaned: dict[str, Any] = {}
+        if "username" in updates:
+            cleaned["username"] = str(updates["username"] or "").strip()[:40]
+            if not cleaned["username"]:
+                raise ValueError("Username cannot be empty.")
+        if "display_name" in updates:
+            cleaned["display_name"] = str(updates["display_name"] or "").strip()[:80] or None
+        if "email" in updates:
+            email = _normalize_email(updates.get("email"))
+            cleaned["email"] = email
+            if email:
+                cleaned["email_verified_at"] = None
+                cleaned["email_verification_token_hash"] = None
+                cleaned["email_verification_sent_at"] = None
+        for key in ("public_profile", "show_liked_count", "adult_content_consent"):
+            if key in updates:
+                cleaned[key] = 1 if updates.get(key) else 0
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported user fields: {', '.join(sorted(unknown))}")
+        if cleaned:
+            assignments = ", ".join(f"`{_validate_identifier(key, 'gallery user column')}` = %s" for key in cleaned)
+            await self._execute(
+                f"UPDATE `{schema}`.`users` SET {assignments} WHERE id = %s",
+                (*cleaned.values(), _coerce_int(user_id, "user_id")),
+            )
+        return await self.get_image_gallery_user_admin(user_id)
+
+    async def set_image_gallery_email_verified(self, user_id: int, verified: bool) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        await self._execute(
+            f"""
+            UPDATE `{schema}`.`users`
+            SET email_verified_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                email_verification_token_hash = CASE WHEN %s THEN NULL ELSE email_verification_token_hash END
+            WHERE id = %s
+            """,
+            (1 if verified else 0, 1 if verified else 0, _coerce_int(user_id, "user_id")),
+        )
+        return await self.get_image_gallery_user_admin(user_id)
+
+    async def set_image_gallery_age_verified(self, user_id: int, verified: bool) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        await self._execute(
+            f"""
+            UPDATE `{schema}`.`users`
+            SET age_verified_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                adult_content_consent = %s
+            WHERE id = %s
+            """,
+            (1 if verified else 0, 1 if verified else 0, _coerce_int(user_id, "user_id")),
+        )
+        return await self.get_image_gallery_user_admin(user_id)
+
+    async def issue_image_gallery_email_verification_token(self, user_id: int, token: str) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        token_hash = _verification_token_hash(token)
+        await self._execute(
+            f"""
+            UPDATE `{schema}`.`users`
+            SET email_verification_token_hash = %s, email_verification_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND email IS NOT NULL AND email_verified_at IS NULL
+            """,
+            (token_hash, _coerce_int(user_id, "user_id")),
+        )
+        return await self.get_image_gallery_user_admin(user_id)
+
+    async def update_image_gallery_media(self, media_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        allowed = {"title", "is_adult", "moderation_status", "moderation_reason"}
+        cleaned: dict[str, Any] = {}
+        if "title" in updates:
+            title = str(updates["title"] or "").strip()[:160]
+            if not title:
+                raise ValueError("Media title cannot be empty.")
+            cleaned["title"] = title
+        if "is_adult" in updates:
+            cleaned["is_adult"] = 1 if updates.get("is_adult") else 0
+            cleaned["adult_marked_by_user"] = 1 if updates.get("is_adult") else 0
+        if "moderation_status" in updates:
+            status = str(updates["moderation_status"] or "").strip().lower()
+            if status not in {"clear", "review", "blocked"}:
+                raise ValueError("Moderation status must be clear, review, or blocked.")
+            cleaned["moderation_status"] = status
+        if "moderation_reason" in updates:
+            cleaned["moderation_reason"] = str(updates["moderation_reason"] or "").strip()[:300] or None
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported media fields: {', '.join(sorted(unknown))}")
+        if cleaned:
+            assignments = ", ".join(f"`{_validate_identifier(key, 'gallery media column')}` = %s" for key in cleaned)
+            await self._execute(
+                f"UPDATE `{schema}`.`media_items` SET {assignments}, moderated_at=CURRENT_TIMESTAMP WHERE id = %s",
+                (*cleaned.values(), _coerce_int(media_id, "media_id")),
+            )
+        row = await self._fetchone(f"SELECT * FROM `{schema}`.`media_items` WHERE id = %s", (_coerce_int(media_id, "media_id"),))
+        return self._json_row(row) if row else None
+
+    async def delete_image_gallery_media(self, media_id: int) -> None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        await self._execute(f"DELETE FROM `{schema}`.`media_items` WHERE id = %s", (_coerce_int(media_id, "media_id"),))
+
+    async def update_image_gallery_report_status(self, report_id: int, status: str) -> None:
+        schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
+        status = str(status or "").strip().lower()
+        if status not in {"open", "reviewed", "dismissed"}:
+            raise ValueError("Report status must be open, reviewed, or dismissed.")
+        await self._execute(
+            f"UPDATE `{schema}`.`media_reports` SET status = %s WHERE id = %s",
+            (status, _coerce_int(report_id, "report_id")),
         )
 
     async def _clear_pending_orders(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> None:

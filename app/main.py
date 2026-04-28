@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import html
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
@@ -46,7 +47,7 @@ from .config import load_settings
 from .database import PanelDatabase
 from .diagnostics import RuntimeDiagnosticsService
 from .discord_api import DiscordInventoryService
-from .emailer import send_verification_email
+from .emailer import send_image_gallery_verification_email, send_verification_email
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -153,6 +154,45 @@ def _verification_url(request: Request, token: str) -> str:
     base = str(request.url_for("api_verify_session_email"))
     return base.replace("http://", "https://") + f"?token={token}"
 
+
+def _image_gallery_verification_url(request: Request, token: str) -> str:
+    origin = os.getenv("IMAGE_GALLERY_PUBLIC_BACKEND_URL", "").strip().rstrip("/")
+    if not origin:
+        config_path = BASE_DIR.parents[1] / "Image Gallery" / "live-config.json"
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            origin = str(payload.get("gallery_url") or "").strip().rstrip("/")
+        except Exception:
+            origin = ""
+    if origin:
+        return f"{origin}/api/auth/verify-email?token={token}"
+    base = str(request.url_for("image_gallery_admin")).replace("/api/image-gallery/admin", "")
+    return base.replace("http://", "https://").rstrip("/") + f"/api/auth/verify-email?token={token}"
+
+
+def _wants_json(request: Request) -> bool:
+    accept = request.headers.get("accept", "")
+    return "application/json" in accept and "text/html" not in accept
+
+
+def _verification_page(title: str, message: str, *, ok: bool) -> HTMLResponse:
+    color = "#89b4fa" if ok else "#ff6b6b"
+    return HTMLResponse(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{html.escape(title)}</title>"
+        "<style>body{margin:0;min-height:100vh;display:grid;place-items:center;"
+        "font-family:Inter,system-ui,sans-serif;background:#10151f;color:#edf4ff}"
+        "main{width:min(520px,calc(100vw - 32px));padding:28px;border:1px solid #273244;"
+        "background:#151d2b;border-radius:8px}h1{margin:0 0 10px;font-size:1.5rem}"
+        "p{color:#aab6c8;line-height:1.5}.badge{display:inline-block;margin-bottom:16px;"
+        f"color:{color};font-weight:700}}a{{color:#7dd3fc}}</style></head><body><main>"
+        f"<span class=\"badge\">{'Verified' if ok else 'Needs Attention'}</span>"
+        f"<h1>{html.escape(title)}</h1><p>{html.escape(message)}</p>"
+        f"<p><a href=\"{html.escape(settings.pages_public_url)}\">Return to SwarmPanel</a></p>"
+        "</main></body></html>"
+    )
+
 class TruncateTableRequest(BaseModel):
     schema_name: str
     table_name: str
@@ -187,6 +227,38 @@ class GalleryCommentDeleteRequest(BaseModel):
 class GalleryPasswordResetRequest(BaseModel):
     user_id: int
     new_password: str
+
+
+class GalleryUserUpdateRequest(BaseModel):
+    user_id: int
+    username: str | None = None
+    display_name: str | None = None
+    email: str | None = None
+    public_profile: bool | None = None
+    show_liked_count: bool | None = None
+    adult_content_consent: bool | None = None
+
+
+class GalleryUserFlagRequest(BaseModel):
+    user_id: int
+    verified: bool
+
+
+class GalleryMediaDeleteRequest(BaseModel):
+    media_id: int
+
+
+class GalleryMediaUpdateRequest(BaseModel):
+    media_id: int
+    title: str | None = None
+    is_adult: bool | None = None
+    moderation_status: str | None = None
+    moderation_reason: str | None = None
+
+
+class GalleryReportStatusRequest(BaseModel):
+    report_id: int
+    status: str
 
 
 class UserProfileUpdateRequest(BaseModel):
@@ -703,11 +775,35 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
 
 
 @app.get("/api/session/verify-email", name="api_verify_session_email")
-async def api_verify_session_email(token: str):
+async def api_verify_session_email(request: Request, token: str):
     account = await db.verify_account_email_by_token(token)
     if not account:
-        raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
-    return {"ok": True, "account": account}
+        if _wants_json(request):
+            raise HTTPException(status_code=400, detail="Invalid or expired verification link.")
+        return _verification_page("Verification Link Expired", "That SwarmPanel verification link is invalid or has already been used. Sign in and resend verification from your profile.", ok=False)
+    if _wants_json(request):
+        return {"ok": True, "account": account}
+    return _verification_page("Email Verified", f"{account.get('username')} is now verified for SwarmPanel.", ok=True)
+
+
+@app.post("/api/session/resend-verification")
+async def api_resend_session_verification(request: Request):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _scoped_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required")
+    profile = await db.get_account_profile(username, scoped_guild_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    if not profile.get("email"):
+        raise HTTPException(status_code=400, detail="This account does not have an email address.")
+    if profile.get("email_verified"):
+        return {"ok": True, "email_verification_sent": False, "already_verified": True}
+    email_token = secrets.token_urlsafe(32)
+    profile = await db.issue_account_email_verification_token(username, scoped_guild_id, email_token)
+    verification_sent = bool(profile and send_verification_email(settings, profile["email"], _verification_url(request, email_token)))
+    return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
 
 
 @app.post("/api/session/logout")
@@ -1299,6 +1395,82 @@ async def image_gallery_reset_password(request: Request, payload: GalleryPasswor
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     action_logger.warning("image_gallery_reset_password user_id=%s", payload.user_id)
+    return {"ok": True}
+
+
+@app.post("/api/image-gallery/users/update")
+async def image_gallery_update_user(request: Request, payload: GalleryUserUpdateRequest):
+    _require_admin_auth(request)
+    updates = payload.model_dump(exclude={"user_id"}, exclude_none=True)
+    try:
+        user = await db.update_image_gallery_user(payload.user_id, updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    action_logger.warning("image_gallery_update_user user_id=%s fields=%s", payload.user_id, sorted(updates))
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/image-gallery/users/email-verified")
+async def image_gallery_set_email_verified(request: Request, payload: GalleryUserFlagRequest):
+    _require_admin_auth(request)
+    user = await db.set_image_gallery_email_verified(payload.user_id, payload.verified)
+    action_logger.warning("image_gallery_email_verified user_id=%s verified=%s", payload.user_id, payload.verified)
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/image-gallery/users/age-verified")
+async def image_gallery_set_age_verified(request: Request, payload: GalleryUserFlagRequest):
+    _require_admin_auth(request)
+    user = await db.set_image_gallery_age_verified(payload.user_id, payload.verified)
+    action_logger.warning("image_gallery_age_verified user_id=%s verified=%s", payload.user_id, payload.verified)
+    return {"ok": True, "user": user}
+
+
+@app.post("/api/image-gallery/users/resend-verification")
+async def image_gallery_resend_verification(request: Request, payload: GalleryUserDeleteRequest):
+    _require_admin_auth(request)
+    user = await db.get_image_gallery_user_admin(payload.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Image Gallery user not found")
+    if not user.get("email"):
+        raise HTTPException(status_code=400, detail="This Image Gallery user does not have an email address.")
+    if user.get("email_verified_at"):
+        return {"ok": True, "email_verification_sent": False, "already_verified": True}
+    email_token = secrets.token_urlsafe(32)
+    user = await db.issue_image_gallery_email_verification_token(payload.user_id, email_token)
+    verification_sent = bool(user and send_image_gallery_verification_email(settings, user["email"], _image_gallery_verification_url(request, email_token)))
+    action_logger.warning("image_gallery_resend_verification user_id=%s sent=%s", payload.user_id, verification_sent)
+    return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
+
+
+@app.post("/api/image-gallery/media/update")
+async def image_gallery_update_media(request: Request, payload: GalleryMediaUpdateRequest):
+    _require_admin_auth(request)
+    updates = payload.model_dump(exclude={"media_id"}, exclude_none=True)
+    try:
+        media = await db.update_image_gallery_media(payload.media_id, updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    action_logger.warning("image_gallery_update_media media_id=%s fields=%s", payload.media_id, sorted(updates))
+    return {"ok": True, "media": media}
+
+
+@app.post("/api/image-gallery/media/delete")
+async def image_gallery_delete_media(request: Request, payload: GalleryMediaDeleteRequest):
+    _require_admin_auth(request)
+    await db.delete_image_gallery_media(payload.media_id)
+    action_logger.warning("image_gallery_delete_media media_id=%s", payload.media_id)
+    return {"ok": True}
+
+
+@app.post("/api/image-gallery/reports/status")
+async def image_gallery_update_report_status(request: Request, payload: GalleryReportStatusRequest):
+    _require_admin_auth(request)
+    try:
+        await db.update_image_gallery_report_status(payload.report_id, payload.status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    action_logger.warning("image_gallery_report_status report_id=%s status=%s", payload.report_id, payload.status)
     return {"ok": True}
 
 class BotControlRequest(BaseModel):

@@ -157,6 +157,7 @@
           </label>
           <div class="row">
             <button id="save-user-profile" type="button">Save Profile</button>
+            <button id="resend-panel-email-verification" type="button" hidden>Resend Email Verification</button>
             <span id="user-profile-status" class="status"></span>
           </div>
         </div>
@@ -531,7 +532,7 @@
       <div class="section-title-row">
         <div>
           <h2>Image Gallery Admin</h2>
-          <p class="muted">Real Image Gallery users, comments, and media from the gallery database.</p>
+          <p class="muted">Account recovery, moderation, and database operations for the Image Gallery.</p>
         </div>
         <button id="refresh-image-gallery-admin" type="button">Refresh Gallery Data</button>
       </div>
@@ -540,8 +541,15 @@
       <h3>Users</h3>
       <div class="table-wrap">
         <table class="sessions-table">
-          <thead><tr><th>ID</th><th>User</th><th>Email</th><th>Media</th><th>Comments</th><th>Last Login</th><th>Actions</th></tr></thead>
+          <thead><tr><th>ID</th><th>User</th><th>Email</th><th>Flags</th><th>Activity</th><th>Last Login</th><th>Actions</th></tr></thead>
           <tbody id="image-gallery-users-body"></tbody>
+        </table>
+      </div>
+      <h3>Reports</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>ID</th><th>User</th><th>Post</th><th>Reason</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="image-gallery-reports-body"></tbody>
         </table>
       </div>
       <h3>Recent Comments</h3>
@@ -554,8 +562,15 @@
       <h3>Recent Media</h3>
       <div class="table-wrap">
         <table class="sessions-table">
-          <thead><tr><th>ID</th><th>User</th><th>Title</th><th>Kind</th><th>Size</th><th>Views</th><th>Created</th></tr></thead>
+          <thead><tr><th>ID</th><th>User</th><th>Title</th><th>Kind</th><th>State</th><th>Views</th><th>Created</th><th>Actions</th></tr></thead>
           <tbody id="image-gallery-media-body"></tbody>
+        </table>
+      </div>
+      <h3>Categories + Collections</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>Type</th><th>Name</th><th>Owner</th><th>Items</th><th>Created</th></tr></thead>
+          <tbody id="image-gallery-taxonomy-body"></tbody>
         </table>
       </div>
     </section>
@@ -595,6 +610,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=18"></script>
+  <script src="./app/static/final_app.js?v=19"></script>
 </body>
 </html>

@@ -765,6 +765,7 @@ async function startPanelApplication() {
         loadUserDirectory();
         if (isAdminSession()) {
             loadDbSchemas();
+            loadImageGalleryAdmin();
             loadEventFeedHistory();
             connectEventFeed();
         }
@@ -782,6 +783,7 @@ async function startPanelApplication() {
     loadUserDirectory();
     if (isAdminSession()) {
         loadDbSchemas();
+        loadImageGalleryAdmin();
         loadEventFeedHistory();
         connectEventFeed();
     }
@@ -1339,6 +1341,7 @@ function renderUserProfile(data = userProfileState) {
     const previewServer = document.getElementById('user-profile-preview-server');
     const previewChips = document.getElementById('user-profile-preview-chips');
     const locked = document.getElementById('user-profile-locked');
+    const resendEmailButton = document.getElementById('resend-panel-email-verification');
 
     populateFavoriteBotSelect(data.favoriteBotOptions, profile.favorite_bot || '');
 
@@ -1372,7 +1375,11 @@ function renderUserProfile(data = userProfileState) {
         if (profile.favorite_bot) chips.push(`Favorite: ${profile.favorite_bot}`);
         chips.push(profile.public_profile === false ? 'Private' : 'Public');
         if (profile.server_invite_url) chips.push('Invite linked');
+        if (profile.email) chips.push(profile.email_verified ? 'Email verified' : 'Email pending');
         previewChips.innerHTML = chips.map(chip => `<span>${escapeHtml(chip)}</span>`).join('');
+    }
+    if (resendEmailButton) {
+        resendEmailButton.hidden = !editable || !profile.email || Boolean(profile.email_verified);
     }
     if (locked) {
         locked.hidden = editable;
@@ -1402,6 +1409,32 @@ async function loadUserProfile() {
         renderUserProfile(userProfileState);
     } catch (err) {
         setUserProfileStatus(String(err), true);
+    }
+}
+
+async function resendPanelEmailVerification() {
+    if (!userProfileState.editable) return;
+    const button = document.getElementById('resend-panel-email-verification');
+    if (button) button.disabled = true;
+    setUserProfileStatus('Sending verification email...');
+    try {
+        const res = await fetch(`${API_BASE}/session/resend-verification`, { method: 'POST' });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Verification resend failed');
+        setUserProfileStatus(
+            data.email_verification_sent
+                ? 'Verification email sent.'
+                : data.already_verified
+                    ? 'Email is already verified.'
+                    : 'Verification email could not be sent.',
+            !data.email_verification_sent && !data.already_verified,
+        );
+        await loadUserProfile();
+    } catch (err) {
+        setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
+    } finally {
+        if (button) button.disabled = false;
     }
 }
 
@@ -3650,8 +3683,10 @@ async function loadImageGalleryAdmin() {
     const status = document.getElementById('image-gallery-admin-status');
     const summary = document.getElementById('image-gallery-summary');
     const usersBody = document.getElementById('image-gallery-users-body');
+    const reportsBody = document.getElementById('image-gallery-reports-body');
     const commentsBody = document.getElementById('image-gallery-comments-body');
     const mediaBody = document.getElementById('image-gallery-media-body');
+    const taxonomyBody = document.getElementById('image-gallery-taxonomy-body');
     if (!usersBody || !commentsBody || !mediaBody) return;
     if (status) status.textContent = 'Loading Image Gallery data...';
     try {
@@ -3660,31 +3695,65 @@ async function loadImageGalleryAdmin() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Image Gallery request failed');
         const payload = data.data || {};
+        const totals = payload.summary || {};
         const users = payload.users || [];
+        const reports = payload.reports || [];
         const comments = payload.comments || [];
         const media = payload.media || [];
+        const categories = payload.categories || [];
+        const collections = payload.collections || [];
         if (summary) {
             summary.innerHTML = [
                 ['Schema', payload.schema || 'image_gallery'],
-                ['Users', users.length],
-                ['Recent Comments', comments.length],
-                ['Recent Media', media.length],
+                ['Users', totals.users ?? users.length],
+                ['Media', totals.media ?? media.length],
+                ['Comments', totals.comments ?? comments.length],
+                ['Open Reports', totals.reports_open ?? reports.filter(report => report.status === 'open').length],
+                ['Collections', totals.collections ?? collections.length],
             ].map(([label, value]) => `<div class="diagnostic-item"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
         }
         usersBody.innerHTML = users.length ? users.map(user => `
             <tr>
                 <td>${escapeHtml(user.id)}</td>
                 <td>${escapeHtml(user.display_name || user.username)}<div class="muted">@${escapeHtml(user.username)}</div></td>
-                <td>${escapeHtml(user.email || 'No email')}${user.email_verified_at ? '<div class="muted">verified</div>' : ''}</td>
-                <td>${escapeHtml(user.media_count || 0)}</td>
-                <td>${escapeHtml(user.comment_count || 0)}</td>
+                <td>${escapeHtml(user.email || 'No email')}<div class="muted">${user.email_verified_at ? 'verified' : user.email ? 'pending' : 'no email'}</div></td>
+                <td>
+                    <div>${user.public_profile ? 'public' : 'private'} profile</div>
+                    <div class="muted">${user.age_verified_at ? 'age verified' : 'age unverified'} | ${user.adult_content_consent ? 'adult consent' : 'no adult consent'}</div>
+                </td>
+                <td>
+                    <div>${escapeHtml(user.media_count || 0)} media | ${escapeHtml(user.comment_count || 0)} comments</div>
+                    <div class="muted">${escapeHtml(user.bookmark_count || 0)} bookmarks | ${escapeHtml(user.collection_count || 0)} collections</div>
+                </td>
                 <td>${escapeHtml(user.last_login_at || 'Never')}</td>
                 <td>
                     <button class="tbl-btn" data-gallery-reset-password="${escapeHtml(user.id)}">Reset Password</button>
+                    <button class="tbl-btn" data-gallery-edit-email="${escapeHtml(user.id)}" data-gallery-current-email="${escapeHtml(user.email || '')}">Edit Email</button>
+                    <button class="tbl-btn" data-gallery-resend-email="${escapeHtml(user.id)}" ${user.email && !user.email_verified_at ? '' : 'disabled'}>Resend Email</button>
+                    <button class="tbl-btn" data-gallery-email-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.email_verified_at ? '0' : '1'}">${user.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
+                    <button class="tbl-btn" data-gallery-age-verified="${escapeHtml(user.id)}" data-gallery-verified="${user.age_verified_at ? '0' : '1'}">${user.age_verified_at ? 'Revoke Age' : 'Verify Age'}</button>
+                    <button class="tbl-btn" data-gallery-public-profile="${escapeHtml(user.id)}" data-gallery-public="${user.public_profile ? '0' : '1'}">${user.public_profile ? 'Make Private' : 'Make Public'}</button>
                     <button class="tbl-btn tbl-btn-stop" data-gallery-delete-user="${escapeHtml(user.id)}">Delete User</button>
                 </td>
             </tr>
         `).join('') : '<tr><td colspan="7">No Image Gallery users found.</td></tr>';
+        if (reportsBody) {
+            reportsBody.innerHTML = reports.length ? reports.map(report => `
+                <tr>
+                    <td>${escapeHtml(report.id)}</td>
+                    <td>${escapeHtml(report.display_name || report.username)}</td>
+                    <td>${escapeHtml(report.media_title || `Media ${report.media_id}`)}</td>
+                    <td>${escapeHtml(report.reason || '')}<div class="muted">${escapeHtml(report.details || '')}</div></td>
+                    <td>${escapeHtml(report.status || 'open')}</td>
+                    <td>${escapeHtml(report.created_at || '')}</td>
+                    <td>
+                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="open">Open</button>
+                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="reviewed">Reviewed</button>
+                        <button class="tbl-btn" data-gallery-report-status="${escapeHtml(report.id)}" data-gallery-status="dismissed">Dismiss</button>
+                    </td>
+                </tr>
+            `).join('') : '<tr><td colspan="7">No Image Gallery reports found.</td></tr>';
+        }
         commentsBody.innerHTML = comments.length ? comments.map(comment => `
             <tr>
                 <td>${escapeHtml(comment.id)}</td>
@@ -3701,11 +3770,37 @@ async function loadImageGalleryAdmin() {
                 <td>${escapeHtml(item.username || item.user_id)}</td>
                 <td>${escapeHtml(item.title || '')}</td>
                 <td>${escapeHtml(item.media_kind || '')}</td>
-                <td>${galleryFormatBytes(item.file_size)}</td>
+                <td>${item.is_adult ? '18+' : 'clear'}<div class="muted">${escapeHtml(item.moderation_status || 'clear')} | ${galleryFormatBytes(item.file_size)}</div></td>
                 <td>${escapeHtml(item.views || 0)}</td>
                 <td>${escapeHtml(item.created_at || '')}</td>
+                <td>
+                    <button class="tbl-btn" data-gallery-media-adult="${escapeHtml(item.id)}" data-gallery-adult="${item.is_adult ? '0' : '1'}">${item.is_adult ? 'Clear 18+' : 'Mark 18+'}</button>
+                    <button class="tbl-btn" data-gallery-media-title="${escapeHtml(item.id)}" data-gallery-current-title="${escapeHtml(item.title || '')}">Rename</button>
+                    <button class="tbl-btn tbl-btn-stop" data-gallery-delete-media="${escapeHtml(item.id)}">Delete Media</button>
+                </td>
             </tr>
-        `).join('') : '<tr><td colspan="7">No Image Gallery media found.</td></tr>';
+        `).join('') : '<tr><td colspan="8">No Image Gallery media found.</td></tr>';
+        if (taxonomyBody) {
+            const categoryRows = categories.map(category => `
+                <tr>
+                    <td>Category</td>
+                    <td>${escapeHtml(category.name || '')}<div class="muted">${escapeHtml(category.slug || '')}</div></td>
+                    <td>${escapeHtml(category.media_kind || '')}</td>
+                    <td>${escapeHtml(category.media_count || 0)}</td>
+                    <td>${escapeHtml(category.created_at || '')}</td>
+                </tr>
+            `);
+            const collectionRows = collections.map(collection => `
+                <tr>
+                    <td>Collection</td>
+                    <td>${escapeHtml(collection.name || '')}<div class="muted">${collection.is_public ? 'public' : 'private'}</div></td>
+                    <td>${escapeHtml(collection.username || collection.user_id || '')}</td>
+                    <td>${escapeHtml(collection.item_count || 0)}</td>
+                    <td>${escapeHtml(collection.created_at || '')}</td>
+                </tr>
+            `);
+            taxonomyBody.innerHTML = [...categoryRows, ...collectionRows].join('') || '<tr><td colspan="5">No categories or collections found.</td></tr>';
+        }
         if (status) status.textContent = 'Image Gallery data loaded.';
     } catch (err) {
         if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -3881,6 +3976,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('save-user-profile')
         ?.addEventListener('click', saveUserProfile);
+    document.getElementById('resend-panel-email-verification')
+        ?.addEventListener('click', resendPanelEmailVerification);
 
     document.getElementById('save-panel-preferences')
         ?.addEventListener('click', () => savePanelPreferences());
@@ -4004,6 +4101,15 @@ document.addEventListener('DOMContentLoaded', () => {
             const deleteUser = event.target.closest('[data-gallery-delete-user]');
             const deleteComment = event.target.closest('[data-gallery-delete-comment]');
             const resetPassword = event.target.closest('[data-gallery-reset-password]');
+            const editEmail = event.target.closest('[data-gallery-edit-email]');
+            const resendEmail = event.target.closest('[data-gallery-resend-email]');
+            const emailVerified = event.target.closest('[data-gallery-email-verified]');
+            const ageVerified = event.target.closest('[data-gallery-age-verified]');
+            const publicProfile = event.target.closest('[data-gallery-public-profile]');
+            const deleteMedia = event.target.closest('[data-gallery-delete-media]');
+            const mediaAdult = event.target.closest('[data-gallery-media-adult]');
+            const mediaTitle = event.target.closest('[data-gallery-media-title]');
+            const reportStatus = event.target.closest('[data-gallery-report-status]');
             try {
                 if (deleteUser) {
                     const userId = deleteUser.dataset.galleryDeleteUser;
@@ -4023,6 +4129,58 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (password) {
                         await postImageGalleryAdminAction('/image-gallery/users/reset-password', { user_id: Number(userId), new_password: password });
                     }
+                }
+                if (editEmail) {
+                    const userId = editEmail.dataset.galleryEditEmail;
+                    const current = editEmail.dataset.galleryCurrentEmail || '';
+                    const email = prompt(`Set Image Gallery email for user ${userId}. Leave blank to clear it.`, current);
+                    if (email !== null) {
+                        await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), email: email.trim() || null });
+                    }
+                }
+                if (resendEmail) {
+                    const userId = resendEmail.dataset.galleryResendEmail;
+                    await postImageGalleryAdminAction('/image-gallery/users/resend-verification', { user_id: Number(userId) });
+                }
+                if (emailVerified) {
+                    const userId = emailVerified.dataset.galleryEmailVerified;
+                    const verified = emailVerified.dataset.galleryVerified === '1';
+                    await postImageGalleryAdminAction('/image-gallery/users/email-verified', { user_id: Number(userId), verified });
+                }
+                if (ageVerified) {
+                    const userId = ageVerified.dataset.galleryAgeVerified;
+                    const verified = ageVerified.dataset.galleryVerified === '1';
+                    await postImageGalleryAdminAction('/image-gallery/users/age-verified', { user_id: Number(userId), verified });
+                }
+                if (publicProfile) {
+                    const userId = publicProfile.dataset.galleryPublicProfile;
+                    const nextPublic = publicProfile.dataset.galleryPublic === '1';
+                    await postImageGalleryAdminAction('/image-gallery/users/update', { user_id: Number(userId), public_profile: nextPublic });
+                }
+                if (deleteMedia) {
+                    const mediaId = deleteMedia.dataset.galleryDeleteMedia;
+                    if (confirm(`Delete Image Gallery media ${mediaId}? This removes the database row and related likes/comments/reports.`)) {
+                        await postImageGalleryAdminAction('/image-gallery/media/delete', { media_id: Number(mediaId) });
+                    }
+                }
+                if (mediaAdult) {
+                    const mediaId = mediaAdult.dataset.galleryMediaAdult;
+                    const isAdult = mediaAdult.dataset.galleryAdult === '1';
+                    await postImageGalleryAdminAction('/image-gallery/media/update', { media_id: Number(mediaId), is_adult: isAdult, moderation_status: isAdult ? 'review' : 'clear' });
+                }
+                if (mediaTitle) {
+                    const mediaId = mediaTitle.dataset.galleryMediaTitle;
+                    const current = mediaTitle.dataset.galleryCurrentTitle || '';
+                    const title = prompt(`Rename Image Gallery media ${mediaId}.`, current);
+                    if (title) {
+                        await postImageGalleryAdminAction('/image-gallery/media/update', { media_id: Number(mediaId), title });
+                    }
+                }
+                if (reportStatus) {
+                    await postImageGalleryAdminAction('/image-gallery/reports/status', {
+                        report_id: Number(reportStatus.dataset.galleryReportStatus),
+                        status: reportStatus.dataset.galleryStatus,
+                    });
                 }
             } catch (err) {
                 const status = document.getElementById('image-gallery-admin-status');
