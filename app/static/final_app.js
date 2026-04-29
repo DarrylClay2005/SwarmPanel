@@ -56,6 +56,7 @@ const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
+let remotePanelConfigRefreshPromise = null;
 let currentPanelSession = { role: 'admin', guild_id: null, account_guild_id: null, username: '', image_gallery_owner: false, admin_mode: true };
 let adminModeSwitching = false;
 let inviteOnlyMode = false;
@@ -524,24 +525,79 @@ function buildStaticUrl(path) {
     }
 }
 
-async function loadRemotePanelConfig() {
-    if (!REMOTE_MODE) return '';
+function syncRemoteOriginInputs() {
+    const originInput = document.getElementById('remote-api-origin');
+    if (originInput && remotePanelOrigin) originInput.value = remotePanelOrigin;
+}
 
-    try {
+async function refreshRemotePanelConfig({ force = false } = {}) {
+    if (!REMOTE_MODE) return '';
+    if (!force && remotePanelOrigin) {
+        syncRemoteOriginInputs();
+        return remotePanelOrigin;
+    }
+    if (remotePanelConfigRefreshPromise) return remotePanelConfigRefreshPromise;
+    remotePanelConfigRefreshPromise = (async () => {
         const response = await rawFetch(buildStaticUrl(REMOTE_CONFIG_FILE), {
             cache: 'no-store',
         });
-        if (!response.ok) return '';
+        if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
         const payload = await response.json().catch(() => ({}));
-        return normalizeRemoteOrigin(
+        const nextOrigin = normalizeRemoteOrigin(
             payload.panel_url
             || payload.panel
             || payload.remote_panel_origin
             || payload.remote_origin
             || '',
         );
+        if (!nextOrigin) throw new Error('live-config.json has no panel_url');
+        setRemoteOrigin(nextOrigin);
+        syncRemoteOriginInputs();
+        return remotePanelOrigin;
+    })();
+    try {
+        return await remotePanelConfigRefreshPromise;
+    } finally {
+        remotePanelConfigRefreshPromise = null;
+    }
+}
+
+async function loadRemotePanelConfig() {
+    if (!REMOTE_MODE) return '';
+
+    try {
+        return await refreshRemotePanelConfig({ force: true });
     } catch (_err) {
         return '';
+    }
+}
+
+function isApiFetchTarget(target) {
+    return typeof target === 'string' && target.includes('/api/');
+}
+
+async function performRemoteJsonRequest(path, init = {}, attempt = 0) {
+    if (!REMOTE_MODE) {
+        const response = await rawFetch(path, init);
+        return response;
+    }
+    if (!remotePanelOrigin) {
+        await refreshRemotePanelConfig({ force: true });
+    }
+    const requestUrl = new URL(path, `${remotePanelOrigin}/`).toString();
+    try {
+        const response = await rawFetch(requestUrl, init);
+        if (attempt === 0 && response.status >= 500) {
+            await refreshRemotePanelConfig({ force: true });
+            return performRemoteJsonRequest(path, init, attempt + 1);
+        }
+        return response;
+    } catch (err) {
+        if (attempt === 0) {
+            await refreshRemotePanelConfig({ force: true });
+            return performRemoteJsonRequest(path, init, attempt + 1);
+        }
+        throw err;
     }
 }
 
@@ -561,7 +617,7 @@ function buildWebSocketUrl(path = '/ws') {
     return `${protocol}//${window.location.host}${path}${suffix}`;
 }
 
-window.fetch = function patchedFetch(input, init = {}) {
+window.fetch = async function patchedFetch(input, init = {}, attempt = 0) {
     const target = resolveApiUrl(input);
     const headers = new Headers(init.headers || {});
 
@@ -569,10 +625,23 @@ window.fetch = function patchedFetch(input, init = {}) {
         headers.set('Authorization', `Bearer ${remotePanelToken}`);
     }
 
-    return rawFetch(target, {
-        ...init,
-        headers,
-    });
+    try {
+        const response = await rawFetch(target, {
+            ...init,
+            headers,
+        });
+        if (REMOTE_MODE && attempt === 0 && isApiFetchTarget(target) && response.status >= 500) {
+            await refreshRemotePanelConfig({ force: true });
+            return window.fetch(input, init, attempt + 1);
+        }
+        return response;
+    } catch (err) {
+        if (REMOTE_MODE && attempt === 0 && isApiFetchTarget(target)) {
+            await refreshRemotePanelConfig({ force: true });
+            return window.fetch(input, init, attempt + 1);
+        }
+        throw err;
+    }
 };
 
 function handle401(res) {
@@ -948,7 +1017,12 @@ function hideRemoteAuthShell() {
 
 async function syncPanelSession() {
     if (REMOTE_MODE && !remotePanelOrigin) {
-        return false;
+        try {
+            await refreshRemotePanelConfig({ force: true });
+        } catch (_err) {
+            return false;
+        }
+        if (!remotePanelOrigin) return false;
     }
 
     try {
@@ -1000,14 +1074,13 @@ async function loginRemotePanel() {
     }
 
     setRemoteOrigin(nextOrigin);
-    if (originInput) originInput.value = remotePanelOrigin;
+    syncRemoteOriginInputs();
     setRemoteUsername(username);
     setRemoteAuthError('');
     if (submitButton) submitButton.disabled = true;
 
     try {
-        const loginUrl = new URL('/api/session/login', `${remotePanelOrigin}/`).toString();
-        const res = await rawFetch(loginUrl, {
+        const res = await performRemoteJsonRequest('/api/session/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
@@ -1058,14 +1131,13 @@ async function registerRemotePanel() {
     }
 
     setRemoteOrigin(nextOrigin);
-    if (originInput) originInput.value = remotePanelOrigin;
+    syncRemoteOriginInputs();
     setRemoteUsername(username);
     setRemoteAuthError('');
     if (submitButton) submitButton.disabled = true;
 
     try {
-        const registerUrl = new URL('/api/session/register', `${remotePanelOrigin}/`).toString();
-        const res = await rawFetch(registerUrl, {
+        const res = await performRemoteJsonRequest('/api/session/register', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, guild_id: guildId, email: email || null }),
@@ -3115,7 +3187,12 @@ function updateLiveSyncStatus() {
     }
 }
 
-function connectEventFeed() {
+async function connectEventFeed() {
+    if (REMOTE_MODE) {
+        try {
+            await refreshRemotePanelConfig({ force: !remotePanelOrigin });
+        } catch (_err) {}
+    }
     const wsUrl = buildWebSocketUrl('/ws');
     if (!wsUrl) {
         eventFeedConnectionState = 'offline';
@@ -3184,7 +3261,15 @@ function connectEventFeed() {
         if (!panelAppStarted || (REMOTE_MODE && !remotePanelToken)) {
             return;
         }
-        eventFeedReconnectTimer = setTimeout(connectEventFeed, 3000);
+        eventFeedReconnectTimer = setTimeout(() => {
+            if (REMOTE_MODE) {
+                refreshRemotePanelConfig({ force: true })
+                    .catch(() => null)
+                    .finally(() => connectEventFeed());
+                return;
+            }
+            connectEventFeed();
+        }, 3000);
     };
 }
 
