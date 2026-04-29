@@ -51,7 +51,7 @@
         <div class="login-logo-icon">S</div>
         <h1>SwarmPanel Remote</h1>
       </div>
-      <p class="login-subtitle">Sign in to SwarmPanel with an admin password or a registered account's guild ID, then toggle Admin Mode when needed.</p>
+      <p class="login-subtitle">Sign in to SwarmPanel with your password. Guild IDs stay linked to accounts for routing, access, and recovery.</p>
       <div id="remote-connection-status" class="login-sync-status" data-tone="idle">Waiting for live panel sync</div>
       <div id="remote-auth-error" class="login-error" style="display:none"></div>
       <div class="stack">
@@ -61,13 +61,13 @@
           <input id="remote-username" type="text" autocomplete="username" placeholder="SwarmPanel username" />
         </div>
         <div class="login-field">
-          <label for="remote-password">Password / Guild ID</label>
-          <input id="remote-password" type="password" autocomplete="current-password" placeholder="Admin password or guild ID" />
+          <label for="remote-password">Password</label>
+          <input id="remote-password" type="password" autocomplete="current-password" placeholder="Admin or account password" />
         </div>
         <button id="remote-login-button" class="login-submit" type="button">Sign In</button>
       </div>
 
-      <div class="login-divider"><span>Create admin account</span></div>
+      <div class="login-divider"><span>Create account</span></div>
 
       <div class="stack">
         <div class="login-field">
@@ -81,6 +81,10 @@
         <div class="login-field">
           <label for="remote-register-email">Email</label>
           <input id="remote-register-email" type="email" autocomplete="email" placeholder="you@example.com" />
+        </div>
+        <div class="login-field">
+          <label for="remote-register-password">Password</label>
+          <input id="remote-register-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
         </div>
         <button id="remote-register-button" class="login-submit login-submit-secondary" type="button">Create Account</button>
       </div>
@@ -194,11 +198,26 @@
             <span>Bio</span>
             <textarea id="profile-bio" maxlength="280" rows="3" placeholder="Short server vibe, music taste, or community note"></textarea>
           </label>
+          <div class="user-profile-grid">
+            <label class="control-field">
+              <span>Current Password</span>
+              <input id="profile-current-password" type="password" autocomplete="current-password" placeholder="Current password or legacy guild ID" />
+            </label>
+            <label class="control-field">
+              <span>New Password</span>
+              <input id="profile-new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+            </label>
+            <label class="control-field">
+              <span>Confirm Password</span>
+              <input id="profile-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat new password" />
+            </label>
+          </div>
           <div class="row">
             <button id="save-user-profile" type="button">Save Profile</button>
             <button id="save-panel-email" type="button">Save Email + Send Code</button>
             <button id="verify-panel-email-code" type="button">Verify Email Code</button>
             <button id="resend-panel-email-verification" type="button" hidden>Resend Email Verification</button>
+            <button id="change-panel-password" type="button">Change Password</button>
             <span id="user-profile-status" class="status"></span>
           </div>
         </div>
@@ -359,8 +378,8 @@
         <button id="refresh-swarm-accounts-admin" type="button">Refresh Accounts</button>
       </div>
       <div class="invite-lockout-message">
-        SwarmPanel accounts do not store their own password hash right now.
-        Sign-in uses <strong>username + linked guild ID</strong>, so the closest recovery control is updating the linked guild ID and email state.
+        SwarmPanel accounts now use passwords while keeping guild IDs linked to each account.
+        Admins can reset passwords, update linked guild IDs, and manage email verification from here.
       </div>
       <div id="swarm-accounts-admin-status" class="status"></div>
       <div class="diagnostic-grid" id="swarm-accounts-summary"></div>

@@ -1029,6 +1029,7 @@ function renderSectionHero(target = getActiveTabId()) {
         pills.push(`${rows.length} accounts loaded`);
         pills.push(`${verifiedCount} verified emails`);
         pills.push(`${rows.filter(row => row.email && !row.email_verified_at).length} pending emails`);
+        pills.push(`${rows.filter(row => row.has_password).length} passwords set`);
     } else if (target === 'profile-tab') {
         const profile = userProfileState.profile || {};
         pills.push(profile.public_profile === false ? 'Private card' : 'Public card');
@@ -1289,6 +1290,7 @@ async function registerRemotePanel() {
     const usernameInput = document.getElementById('remote-register-username');
     const guildInput = document.getElementById('remote-register-guild-id');
     const emailInput = document.getElementById('remote-register-email');
+    const passwordInput = document.getElementById('remote-register-password');
     const submitButton = document.getElementById('remote-register-button');
 
     const configuredOrigin = await loadRemotePanelConfig();
@@ -1296,13 +1298,14 @@ async function registerRemotePanel() {
     const username = String(usernameInput?.value || '').trim();
     const guildId = String(guildInput?.value || '').trim();
     const email = String(emailInput?.value || '').trim();
+    const password = String(passwordInput?.value || '');
 
     if (!nextOrigin) {
         showRemoteAuthShell('The live panel is still syncing. Try again after the panel finishes starting.');
         return;
     }
-    if (!username || !guildId) {
-        showRemoteAuthShell('Choose a username and enter your Discord guild ID.');
+    if (!username || !guildId || !password) {
+        showRemoteAuthShell('Choose a username, enter your guild ID, and set a password.');
         return;
     }
 
@@ -1316,7 +1319,7 @@ async function registerRemotePanel() {
         const res = await performRemoteJsonRequest('/api/session/register', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, guild_id: guildId, email: email || null }),
+            body: JSON.stringify({ username, guild_id: guildId, password, email: email || null }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data.token) {
@@ -1973,12 +1976,16 @@ function setUserProfileInputsDisabled(disabled) {
         'profile-theme-accent',
         'profile-public-profile',
         'profile-bio',
+        'profile-current-password',
+        'profile-new-password',
+        'profile-confirm-password',
         'save-user-profile',
         'profile-email',
         'profile-email-code',
         'save-panel-email',
         'verify-panel-email-code',
         'resend-panel-email-verification',
+        'change-panel-password',
     ].forEach(id => {
         const element = document.getElementById(id);
         if (element) element.disabled = disabled;
@@ -2007,6 +2014,9 @@ function renderUserProfile(data = userProfileState) {
         'profile-server-invite-url': profile.server_invite_url || '',
         'profile-theme-accent': profile.theme_accent || '#89b4fa',
         'profile-bio': profile.bio || '',
+        'profile-current-password': '',
+        'profile-new-password': '',
+        'profile-confirm-password': '',
     };
     Object.entries(fieldValues).forEach(([id, value]) => {
         const element = document.getElementById(id);
@@ -2031,6 +2041,7 @@ function renderUserProfile(data = userProfileState) {
         chips.push(profile.public_profile === false ? 'Private' : 'Public');
         if (profile.server_invite_url) chips.push('Invite linked');
         if (profile.email) chips.push(profile.email_verified ? 'Email verified' : 'Email pending');
+        chips.push(profile.has_password ? 'Password set' : 'Legacy login');
         previewChips.innerHTML = chips.map(chip => `<span>${escapeHtml(chip)}</span>`).join('');
     }
     const previewStats = document.getElementById('user-profile-preview-stats');
@@ -2155,6 +2166,41 @@ async function resendPanelEmailVerification() {
             !data.email_verification_sent && !data.already_verified,
         );
         await loadUserProfile();
+    } catch (err) {
+        setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function changePanelPassword() {
+    if (!userProfileState.editable) return;
+    const currentPassword = document.getElementById('profile-current-password')?.value || '';
+    const newPassword = document.getElementById('profile-new-password')?.value || '';
+    const confirmPassword = document.getElementById('profile-confirm-password')?.value || '';
+    if (!currentPassword || !newPassword) {
+        setUserProfileStatus('Enter your current password and a new password.', true);
+        return;
+    }
+    if (newPassword !== confirmPassword) {
+        setUserProfileStatus('New password and confirmation do not match.', true);
+        return;
+    }
+    const button = document.getElementById('change-panel-password');
+    if (button) button.disabled = true;
+    setUserProfileStatus('Updating password...');
+    try {
+        const res = await fetch(`${API_BASE}/session/password`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+        });
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'Password update failed');
+        userProfileState.profile = data.profile || userProfileState.profile;
+        renderUserProfile(userProfileState);
+        setUserProfileStatus('Password updated.');
     } catch (err) {
         setUserProfileStatus(err instanceof Error ? err.message : String(err), true);
     } finally {
@@ -4699,6 +4745,7 @@ function renderSwarmAccountAdmin() {
         (payload.users || []).filter(row => matchesQuery(row) && matchesEmailState(row) && matchesVisibility(row)),
         filters.sort,
     );
+    const passwordCount = totals.passwords_set ?? (payload.users || []).filter(row => row.has_password).length;
 
     summary.innerHTML = [
         ['Accounts', `${rows.length}/${totals.total_accounts ?? (payload.users || []).length}`],
@@ -4706,13 +4753,14 @@ function renderSwarmAccountAdmin() {
         ['Verified', totals.verified_emails ?? (payload.users || []).filter(row => row.email_verified_at).length],
         ['Pending', totals.pending_emails ?? (payload.users || []).filter(row => row.email && !row.email_verified_at).length],
         ['Public', totals.public_profiles ?? (payload.users || []).filter(row => row.public_profile).length],
+        ['Passwords', `${passwordCount}/${totals.total_accounts ?? (payload.users || []).length}`],
     ].map(([label, value]) => `<div class="diagnostic-item gallery-summary-card"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
 
     body.innerHTML = rows.length ? rows.map(account => `
         <tr>
             ${galleryTd('ID', escapeHtml(account.id))}
             ${galleryTd('Account', `${escapeHtml(account.display_name || account.username)}<div class="muted">@${escapeHtml(account.username || '')}</div>`)}
-            ${galleryTd('Login Key', `${escapeHtml(account.guild_id || '')}<div class="muted">username + guild ID</div>`)}
+            ${galleryTd('Login Key', `${escapeHtml(account.guild_id || '')}<div class="muted">${account.has_password ? 'password set' : 'legacy guild login still active'}</div>`)}
             ${galleryTd('Email', `${escapeHtml(account.email || 'No email')}<div class="muted">${account.email_verified_at ? 'verified' : account.email ? 'pending' : 'no email'}</div>`)}
             ${galleryTd('Profile', `
                 <div>${account.public_profile ? 'public' : 'private'} profile</div>
@@ -4729,6 +4777,7 @@ function renderSwarmAccountAdmin() {
                 <button class="tbl-btn" data-swarm-account-edit-email="${escapeHtml(account.id)}" data-swarm-account-current-email="${escapeHtml(account.email || '')}">Edit Email</button>
                 <button class="tbl-btn" data-swarm-account-edit-server="${escapeHtml(account.id)}" data-swarm-account-current-server="${escapeHtml(account.server_name || '')}">Edit Server</button>
                 <button class="tbl-btn" data-swarm-account-edit-guild="${escapeHtml(account.id)}" data-swarm-account-current-guild="${escapeHtml(account.guild_id || '')}">Change Guild ID</button>
+                <button class="tbl-btn" data-swarm-account-reset-password="${escapeHtml(account.id)}">Reset Password</button>
                 <button class="tbl-btn" data-swarm-account-resend-email="${escapeHtml(account.id)}" ${account.email && !account.email_verified_at ? '' : 'disabled'}>Resend Email</button>
                 <button class="tbl-btn" data-swarm-account-email-verified="${escapeHtml(account.id)}" data-swarm-account-verified="${account.email_verified_at ? '0' : '1'}">${account.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
                 <button class="tbl-btn" data-swarm-account-public="${escapeHtml(account.id)}" data-swarm-account-public-next="${account.public_profile ? '0' : '1'}">${account.public_profile ? 'Make Private' : 'Make Public'}</button>
@@ -4784,6 +4833,8 @@ async function postSwarmAccountAdminAction(path, payload) {
                 : data.email_verification_sent
                     ? 'Verification email sent.'
                     : 'Verification email could not be sent.';
+        } else if (path.endsWith('/reset-password')) {
+            status.textContent = 'Password reset.';
         } else {
             status.textContent = 'SwarmPanel account updated.';
         }
@@ -5330,6 +5381,8 @@ document.addEventListener('DOMContentLoaded', () => {
         ?.addEventListener('click', verifyPanelEmailCode);
     document.getElementById('resend-panel-email-verification')
         ?.addEventListener('click', resendPanelEmailVerification);
+    document.getElementById('change-panel-password')
+        ?.addEventListener('click', changePanelPassword);
 
     document.getElementById('save-panel-preferences')
         ?.addEventListener('click', () => savePanelPreferences());
@@ -5511,6 +5564,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const editEmail = event.target.closest('[data-swarm-account-edit-email]');
             const editServer = event.target.closest('[data-swarm-account-edit-server]');
             const editGuild = event.target.closest('[data-swarm-account-edit-guild]');
+            const resetPassword = event.target.closest('[data-swarm-account-reset-password]');
             const resendEmail = event.target.closest('[data-swarm-account-resend-email]');
             const emailVerified = event.target.closest('[data-swarm-account-email-verified]');
             const publicProfile = event.target.closest('[data-swarm-account-public]');
@@ -5556,9 +5610,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (editGuild) {
                     const accountId = editGuild.dataset.swarmAccountEditGuild;
                     const current = editGuild.dataset.swarmAccountCurrentGuild || '';
-                    const guildId = prompt(`Set the linked guild ID for SwarmPanel account ${accountId}. This is the login key for non-admin accounts.`, current);
+                    const guildId = prompt(`Set the linked guild ID for SwarmPanel account ${accountId}. The guild stays tied to the account even when it has a password.`, current);
                     if (guildId !== null && guildId.trim()) {
                         await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), guild_id: guildId.trim() });
+                    }
+                }
+                if (resetPassword) {
+                    const accountId = resetPassword.dataset.swarmAccountResetPassword;
+                    const password = prompt(`Enter a new SwarmPanel password for account ${accountId}. Minimum 8 characters.`);
+                    if (password) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/reset-password', { account_id: Number(accountId), new_password: password });
                     }
                 }
                 if (resendEmail) {

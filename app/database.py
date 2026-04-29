@@ -24,6 +24,9 @@ ACCOUNT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 ACCOUNT_LOGIN_SCHEMA = "accountlogins"
 ACCOUNT_LOGIN_TABLE = "users"
 ACCOUNT_GUILD_LOCK_TABLE = "guild_locks"
+ACCOUNT_AUTH_COLUMNS = (
+    ("password_hash", "TEXT NULL"),
+)
 ACCOUNT_PROFILE_COLUMNS = (
     ("email", "VARCHAR(255) NULL"),
     ("email_verified_at", "TIMESTAMP NULL DEFAULT NULL"),
@@ -104,11 +107,43 @@ def _verification_token_hash(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
-def _gallery_password_hash(password: str) -> str:
+def _password_hash(password: str) -> str:
     salt = secrets.token_bytes(16)
     iterations = 260_000
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return f"pbkdf2_sha256${iterations}${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def _verify_password_hash(password: str, stored_hash: str | None) -> bool:
+    raw_hash = str(stored_hash or "").strip()
+    if not raw_hash:
+        return False
+    try:
+        algorithm, iterations_text, salt_b64, digest_b64 = raw_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        iterations = int(iterations_text)
+        salt = base64.b64decode(salt_b64.encode())
+        expected = base64.b64decode(digest_b64.encode())
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return secrets.compare_digest(actual, expected)
+    except Exception:
+        return False
+
+
+def _gallery_password_hash(password: str) -> str:
+    return _password_hash(password)
+
+
+def _account_password_hash(password: str) -> str:
+    return _password_hash(password)
+
+
+def _normalize_account_password(value: Any, field_name: str = "Password") -> str:
+    password = str(value or "")
+    if len(password) < 8:
+        raise ValueError(f"{field_name} must be at least 8 characters.")
+    return password
 
 
 def _normalize_loop_mode(value: Any) -> str:
@@ -361,7 +396,8 @@ class PanelDatabase:
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
-            async with conn.cursor(cursor_cls) as cur:
+            cursor_context = conn.cursor(cursor_cls) if cursor_cls else conn.cursor()
+            async with cursor_context as cur:
                 await asyncio.wait_for(cur.execute(query, params), timeout=15)
                 return await asyncio.wait_for(cur.fetchall(), timeout=15)
 
@@ -369,7 +405,8 @@ class PanelDatabase:
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
-            async with conn.cursor(cursor_cls) as cur:
+            cursor_context = conn.cursor(cursor_cls) if cursor_cls else conn.cursor()
+            async with cursor_context as cur:
                 await asyncio.wait_for(cur.execute(query, params), timeout=15)
                 return await asyncio.wait_for(cur.fetchone(), timeout=15)
 
@@ -398,7 +435,7 @@ class PanelDatabase:
                 pass
 
     async def _ensure_account_profile_schema(self, cur) -> None:
-        for column_name, definition in ACCOUNT_PROFILE_COLUMNS:
+        for column_name, definition in (*ACCOUNT_AUTH_COLUMNS, *ACCOUNT_PROFILE_COLUMNS):
             try:
                 safe_column = _validate_identifier(column_name, "account profile column")
                 await asyncio.wait_for(cur.execute(
@@ -429,11 +466,14 @@ class PanelDatabase:
         self,
         username: str,
         guild_id: str | int,
+        password: str,
         email: str | None = None,
         email_verification_token: str | None = None,
     ) -> dict[str, Any]:
         username = _normalize_account_username(username)
         gid = _coerce_int(guild_id, "guild_id")
+        normalized_password = _normalize_account_password(password)
+        password_hash = _account_password_hash(normalized_password)
         email = _normalize_email(email)
         token_hash = _verification_token_hash(email_verification_token) if email and email_verification_token else None
         await self._ensure_connected()
@@ -468,11 +508,11 @@ class PanelDatabase:
                     await asyncio.wait_for(cur.execute(
                         f"""
                         INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (
-                            username, guild_id, email, email_verification_token_hash, email_verification_sent_at
+                            username, guild_id, password_hash, email, email_verification_token_hash, email_verification_sent_at
                         )
-                        VALUES (%s, %s, %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
+                        VALUES (%s, %s, %s, %s, %s, CASE WHEN %s IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END)
                         """,
-                        (username, gid, email, token_hash, token_hash),
+                        (username, gid, password_hash, email, token_hash, token_hash),
                     ), timeout=15)
                     await asyncio.wait_for(conn.commit(), timeout=15)
                 except ValueError:
@@ -566,19 +606,28 @@ class PanelDatabase:
         )
         return await self.get_account_profile(username, gid)
 
-    async def authenticate_account_login(self, username: str, guild_id: str | int) -> dict[str, Any] | None:
+    async def authenticate_account_login(self, username: str, password: str) -> dict[str, Any] | None:
         username = _normalize_account_username(username)
-        gid = _coerce_int(guild_id, "guild_id")
+        secret = str(password or "")
+        if not secret:
+            return None
         row = await self._fetchone(
             f"""
-            SELECT username, guild_id, email, email_verified_at
+            SELECT username, guild_id, email, email_verified_at, password_hash
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
-            WHERE username = %s AND guild_id = %s
+            WHERE username = %s
             LIMIT 1
             """,
-            (username, gid),
+            (username,),
         )
         if not row:
+            return None
+        password_hash = row.get("password_hash")
+        password_ok = _verify_password_hash(secret, password_hash) if password_hash else False
+        legacy_ok = False
+        if not password_ok and not password_hash:
+            legacy_ok = secrets.compare_digest(str(row.get("guild_id") or ""), secret.strip())
+        if not password_ok and not legacy_ok:
             return None
         await self._execute(
             f"""
@@ -586,9 +635,16 @@ class PanelDatabase:
             SET last_login_at = CURRENT_TIMESTAMP
             WHERE username = %s AND guild_id = %s
             """,
-            (username, gid),
+            (username, row["guild_id"]),
         )
-        return {"username": row["username"], "guild_id": str(row["guild_id"]), "email": row.get("email"), "email_verified": bool(row.get("email_verified_at"))}
+        return {
+            "username": row["username"],
+            "guild_id": str(row["guild_id"]),
+            "email": row.get("email"),
+            "email_verified": bool(row.get("email_verified_at")),
+            "has_password": bool(password_hash),
+            "used_legacy_login": legacy_ok,
+        }
 
     async def get_account_guild_id_for_username(self, username: str) -> str | None:
         username = _normalize_account_username(username)
@@ -610,6 +666,8 @@ class PanelDatabase:
         profile["display_name"] = profile.get("display_name") or profile.get("username")
         profile["public_profile"] = bool(profile.get("public_profile"))
         profile["email_verified"] = bool(profile.get("email_verified_at"))
+        profile["has_password"] = bool(profile.get("password_hash"))
+        profile.pop("password_hash", None)
         preferences = profile.get("panel_preferences")
         if isinstance(preferences, str):
             try:
@@ -630,7 +688,7 @@ class PanelDatabase:
         gid = _coerce_int(guild_id, "guild_id")
         row = await self._fetchone(
             f"""
-            SELECT username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
+            SELECT username, guild_id, email, email_verified_at, password_hash, display_name, avatar_url, bio, favorite_bot, theme_accent,
                    public_profile, server_invite_url, server_name, server_icon_url,
                    panel_preferences, created_at, last_login_at, updated_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
@@ -682,7 +740,7 @@ class PanelDatabase:
     async def get_account_admin(self, account_id: int) -> dict[str, Any] | None:
         row = await self._fetchone(
             f"""
-            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at,
+            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at, password_hash,
                    display_name, avatar_url, bio, favorite_bot, theme_accent, public_profile,
                    server_invite_url, server_name, server_icon_url, panel_preferences,
                    created_at, last_login_at, updated_at
@@ -705,13 +763,14 @@ class PanelDatabase:
                 SUM(CASE WHEN email IS NOT NULL THEN 1 ELSE 0 END) AS accounts_with_email,
                 SUM(CASE WHEN email_verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified_emails,
                 SUM(CASE WHEN email IS NOT NULL AND email_verified_at IS NULL THEN 1 ELSE 0 END) AS pending_emails,
-                SUM(CASE WHEN public_profile = 1 THEN 1 ELSE 0 END) AS public_profiles
+                SUM(CASE WHEN public_profile = 1 THEN 1 ELSE 0 END) AS public_profiles,
+                SUM(CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN 1 ELSE 0 END) AS passwords_set
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
             """,
         ) or {}
         rows = await self._fetchall(
             f"""
-            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at,
+            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at, password_hash,
                    display_name, favorite_bot, public_profile, server_name,
                    created_at, last_login_at, updated_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
@@ -735,6 +794,7 @@ class PanelDatabase:
                 "verified_emails": int(summary_row.get("verified_emails") or 0),
                 "pending_emails": int(summary_row.get("pending_emails") or 0),
                 "public_profiles": int(summary_row.get("public_profiles") or 0),
+                "passwords_set": int(summary_row.get("passwords_set") or 0),
             },
             "users": [self._serialize_account_profile(row) for row in rows],
             "query": normalized_query,
@@ -905,6 +965,49 @@ class PanelDatabase:
             (1 if verified else 0, 1 if verified else 0, _coerce_int(account_id, "account_id")),
         )
         return await self.get_account_admin(account_id)
+
+    async def update_account_password(self, username: str, guild_id: str | int, current_password: str, new_password: str) -> dict[str, Any] | None:
+        username = _normalize_account_username(username)
+        gid = _coerce_int(guild_id, "guild_id")
+        next_password = _normalize_account_password(new_password, "New password")
+        row = await self._fetchone(
+            f"""
+            SELECT username, guild_id, password_hash
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE username = %s AND guild_id = %s
+            LIMIT 1
+            """,
+            (username, gid),
+        )
+        if not row:
+            return None
+        stored_hash = row.get("password_hash")
+        current_secret = str(current_password or "")
+        valid_current = _verify_password_hash(current_secret, stored_hash) if stored_hash else secrets.compare_digest(str(gid), current_secret.strip())
+        if not valid_current:
+            raise ValueError("Current password is incorrect.")
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET password_hash = %s
+            WHERE username = %s AND guild_id = %s
+            """,
+            (_account_password_hash(next_password), username, gid),
+        )
+        return await self.get_account_profile(username, gid)
+
+    async def reset_account_password_admin(self, account_id: int, new_password: str) -> dict[str, Any] | None:
+        safe_account_id = _coerce_int(account_id, "account_id")
+        normalized_password = _normalize_account_password(new_password, "Password")
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET password_hash = %s
+            WHERE id = %s
+            """,
+            (_account_password_hash(normalized_password), safe_account_id),
+        )
+        return await self.get_account_admin(safe_account_id)
 
     async def issue_account_email_verification_token_by_id(self, account_id: int, token: str) -> dict[str, Any] | None:
         token_hash = _verification_token_hash(token)

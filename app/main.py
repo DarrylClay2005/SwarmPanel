@@ -222,6 +222,7 @@ class SessionLoginRequest(BaseModel):
 class SessionRegisterRequest(BaseModel):
     username: str
     guild_id: str | int
+    password: str
     email: str | None = None
 
 
@@ -235,6 +236,11 @@ class SessionEmailUpdateRequest(BaseModel):
 
 class SessionEmailCodeRequest(BaseModel):
     code: str
+
+
+class SessionPasswordUpdateRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class SwarmAccountDeleteRequest(BaseModel):
@@ -254,6 +260,11 @@ class SwarmAccountUpdateRequest(BaseModel):
 class SwarmAccountFlagRequest(BaseModel):
     account_id: int
     verified: bool
+
+
+class SwarmAccountPasswordResetRequest(BaseModel):
+    account_id: int
+    new_password: str
 
 
 class GalleryUserDeleteRequest(BaseModel):
@@ -451,11 +462,11 @@ async def _authenticate_login(username: str, password: str = "", guild_id: str |
     if verify_credentials(username, password, settings.admin_username, settings.admin_password):
         return {"username": username, "role": "admin", "guild_id": None}
 
-    account_guild_id = guild_id if guild_id not in (None, "") else password
-    if account_guild_id in (None, ""):
+    account_secret = password if password not in (None, "") else guild_id
+    if account_secret in (None, ""):
         return None
     try:
-        account = await db.authenticate_account_login(username, account_guild_id)
+        account = await db.authenticate_account_login(username, str(account_secret))
     except ValueError:
         return None
     if not account:
@@ -739,17 +750,23 @@ async def login_submit(
     return templates.TemplateResponse(
         request,
         "login.html",
-        {"error": "Invalid username or guild ID", "register_error": None},
+        {"error": "Invalid username or password", "register_error": None},
         status_code=401,
     )
 
 
 @app.post("/register")
-async def register_submit(request: Request, username: str = Form(...), guild_id: str = Form(...), email: str = Form("")):
+async def register_submit(
+    request: Request,
+    username: str = Form(...),
+    guild_id: str = Form(...),
+    password: str = Form(...),
+    email: str = Form(""),
+):
     email_token = _verification_code() if email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
-        account = await db.register_account_login(username, registerable_guild_id, email, email_token)
+        account = await db.register_account_login(username, registerable_guild_id, password, email, email_token)
     except ValueError as exc:
         return templates.TemplateResponse(
             request,
@@ -831,7 +848,7 @@ async def api_session_status(request: Request):
 async def api_session_login(request: Request, payload: SessionLoginRequest):
     auth = await _authenticate_login(payload.username, payload.password, payload.guild_id)
     if not auth:
-        raise HTTPException(status_code=401, detail="Invalid username, password, or guild ID")
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if auth["role"] == "admin":
         _set_admin_session(request, auth["username"])
@@ -864,7 +881,7 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
     email_token = _verification_code() if payload.email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(payload.guild_id)
-        account = await db.register_account_login(payload.username, registerable_guild_id, payload.email, email_token)
+        account = await db.register_account_login(payload.username, registerable_guild_id, payload.password, payload.email, email_token)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1003,6 +1020,22 @@ async def api_verify_session_email_code(request: Request, payload: SessionEmailC
     return {"ok": True, "profile": profile}
 
 
+@app.post("/api/session/password")
+async def api_update_session_password(request: Request, payload: SessionPasswordUpdateRequest):
+    auth = _require_api_auth(request)
+    scoped_guild_id = _account_guild_id(auth)
+    username = str(auth.get("username") or "")
+    if not scoped_guild_id or not username:
+        raise HTTPException(status_code=403, detail="Guild account access required")
+    try:
+        profile = await db.update_account_password(username, scoped_guild_id, payload.current_password, payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    return {"ok": True, "profile": profile}
+
+
 @app.post("/api/session/logout")
 async def api_session_logout(request: Request):
     request.session.clear()
@@ -1022,6 +1055,7 @@ async def api_user_profile_me(request: Request):
                 "display_name": username,
                 "guild_id": None,
                 "public_profile": False,
+                "has_password": False,
                 "panel_preferences": _clean_panel_preferences(PanelPreferencesUpdateRequest()),
                 "bio": "Built-in admin sessions can browse the user directory; registered accounts own public profiles.",
             },
@@ -1155,6 +1189,19 @@ async def api_swarm_accounts_email_verified(request: Request, payload: SwarmAcco
     if not account:
         raise HTTPException(status_code=404, detail="SwarmPanel account not found")
     action_logger.warning("swarm_account_email_verified account_id=%s verified=%s", payload.account_id, payload.verified)
+    return {"ok": True, "account": account}
+
+
+@app.post("/api/swarm-accounts/reset-password")
+async def api_swarm_accounts_reset_password(request: Request, payload: SwarmAccountPasswordResetRequest):
+    _require_admin_auth(request)
+    try:
+        account = await db.reset_account_password_admin(payload.account_id, payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not account:
+        raise HTTPException(status_code=404, detail="SwarmPanel account not found")
+    action_logger.warning("swarm_account_reset_password account_id=%s", payload.account_id)
     return {"ok": True, "account": account}
 
 

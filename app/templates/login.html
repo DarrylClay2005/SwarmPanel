@@ -21,7 +21,7 @@
       <div class="login-logo-icon">🎵</div>
       <h1>SwarmPanel</h1>
     </div>
-    <p class="login-subtitle">Sign in with your username and guild ID, then use Admin Mode when you need the full panel.</p>
+    <p class="login-subtitle">Sign in with your password. Guild IDs stay linked to accounts for routing, access, and recovery.</p>
 
     {% if error %}
     <div class="login-error">
@@ -38,17 +38,13 @@
         <input type="text" id="username" name="username" autocomplete="username" required placeholder="your-name" />
       </div>
       <div class="login-field">
-        <label for="guild_id">Guild ID</label>
-        <input type="text" id="guild_id" name="guild_id" inputmode="numeric" autocomplete="off" placeholder="123456789012345678" />
-      </div>
-      <div class="login-field">
-        <label for="password">Admin Password</label>
-        <input type="password" id="password" name="password" autocomplete="current-password" placeholder="admin only" />
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" placeholder="admin or account password" />
       </div>
       <button type="submit" class="login-submit">Sign in</button>
     </form>
 
-    <div class="login-divider"><span>Create admin account</span></div>
+    <div class="login-divider"><span>Create account</span></div>
 
     {% if register_error %}
     <div class="login-error">
@@ -67,6 +63,14 @@
       <div class="login-field">
         <label for="register_guild_id">Guild ID</label>
         <input type="text" id="register_guild_id" name="guild_id" inputmode="numeric" autocomplete="off" required placeholder="123456789012345678" />
+      </div>
+      <div class="login-field">
+        <label for="register_email">Email</label>
+        <input type="email" id="register_email" name="email" autocomplete="email" placeholder="you@example.com" />
+      </div>
+      <div class="login-field">
+        <label for="register_password">Password</label>
+        <input type="password" id="register_password" name="password" autocomplete="new-password" required placeholder="At least 8 characters" />
       </div>
       <button type="submit" class="login-submit login-submit-secondary">Create Account</button>
     </form>
