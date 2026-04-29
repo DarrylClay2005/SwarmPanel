@@ -52,6 +52,7 @@
         <h1>SwarmPanel Remote</h1>
       </div>
       <p class="login-subtitle">Sign in to SwarmPanel with an admin password or a registered account's guild ID, then toggle Admin Mode when needed.</p>
+      <div id="remote-connection-status" class="login-sync-status" data-tone="idle">Waiting for live panel sync</div>
       <div id="remote-auth-error" class="login-error" style="display:none"></div>
       <div class="stack">
         <input id="remote-api-origin" type="hidden" />
@@ -97,6 +98,15 @@
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
 
+  <section class="panel swarm-section-hero" id="swarm-section-hero">
+    <div class="swarm-section-hero-copy">
+      <p id="swarm-section-eyebrow" class="swarm-section-eyebrow">Overview</p>
+      <h2 id="swarm-section-title">Swarm Command Deck</h2>
+      <p id="swarm-section-description" class="muted">Live command posture, alerting, sessions, and system visibility for the swarm.</p>
+    </div>
+    <div id="swarm-section-meta" class="swarm-section-meta"></div>
+  </section>
+
   <div class="swarm-tab-panel" id="invites-tab">
     <section class="panel deck-panel">
       <div class="section-title-row">
@@ -121,12 +131,19 @@
       </div>
       <div class="user-profile-shell">
         <aside class="user-profile-preview">
+          <div class="user-profile-banner">
+            <p class="swarm-section-eyebrow">Public Card</p>
+            <h3>Server Identity</h3>
+            <p class="muted">This is how your SwarmPanel account appears in the public directory.</p>
+          </div>
           <div id="user-avatar-preview" class="user-avatar-preview">S</div>
           <div>
             <h3 id="user-profile-preview-name">Swarm User</h3>
             <p id="user-profile-preview-server" class="muted">No server card yet.</p>
           </div>
           <div id="user-profile-preview-chips" class="user-chip-row"></div>
+          <div id="user-profile-preview-stats" class="user-profile-preview-stats"></div>
+          <div id="user-profile-preview-layout" class="user-chip-row"></div>
         </aside>
         <div class="user-profile-editor">
           <div id="user-profile-locked" class="invite-lockout-message" hidden></div>
@@ -258,6 +275,46 @@
             <option value="reduced">Reduced</option>
           </select>
         </label>
+        <label class="control-field">
+          <span>Profile Layout</span>
+          <select id="panel-profile-layout">
+            <option value="spotlight">Spotlight</option>
+            <option value="studio">Studio</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>User Directory Layout</span>
+          <select id="panel-directory-layout">
+            <option value="grid">Grid</option>
+            <option value="magazine">Magazine</option>
+            <option value="stack">Stack</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Tab Style</span>
+          <select id="panel-tab-style">
+            <option value="pills">Pills</option>
+            <option value="underline">Underline</option>
+            <option value="minimal">Minimal</option>
+          </select>
+        </label>
+      </div>
+      <div class="appearance-preview-card">
+        <div class="appearance-preview-surface">
+          <div class="appearance-preview-head">
+            <span class="appearance-preview-dot"></span>
+            <strong>Live Preview</strong>
+          </div>
+          <div class="appearance-preview-body">
+            <div class="appearance-preview-card-block">
+              <span class="appearance-preview-label">Section</span>
+              <strong id="appearance-preview-title">Overview</strong>
+              <p id="appearance-preview-copy" class="muted">Preview your active color, layout, and tab styling together.</p>
+            </div>
+            <div id="appearance-preview-chips" class="user-chip-row"></div>
+          </div>
+        </div>
       </div>
       <div class="row">
         <button id="save-panel-preferences" type="button">Save Look</button>
@@ -279,7 +336,15 @@
         <input id="user-search-input" type="search" placeholder="Search users, servers, or favorite bots..." />
         <button id="user-search-button" type="button">Search</button>
       </div>
-      <div id="user-directory-grid" class="user-directory-grid"></div>
+      <div class="user-directory-shell">
+        <aside id="user-directory-featured" class="user-directory-featured">
+          <div class="control-context-empty">Run a search or refresh the directory to spotlight a public profile.</div>
+        </aside>
+        <div class="user-directory-main">
+          <div id="user-directory-summary" class="user-directory-summary"></div>
+          <div id="user-directory-grid" class="user-directory-grid"></div>
+        </div>
+      </div>
     </section>
   </div>
 

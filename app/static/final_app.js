@@ -12,6 +12,7 @@ const SESSION_NOTES_KEY = 'swarm_panel_session_notes';
 const ALERT_RULES_KEY = 'swarm_panel_alert_rules';
 const COMMAND_HISTORY_KEY = 'swarm_panel_command_history';
 const QOL_SETTINGS_KEY = 'swarm_panel_qol_settings';
+const ACTIVE_TAB_KEY = 'swarm_panel_active_tab';
 const REMOTE_CONFIG_FILE = 'live-config.json';
 const rawFetch = window.fetch.bind(window);
 const storageFallback = new Map();
@@ -78,6 +79,56 @@ const DEFAULT_PANEL_PREFERENCES = {
     card_shape: 'soft',
     font_scale: 'normal',
     motion: 'standard',
+    profile_layout: 'spotlight',
+    directory_layout: 'grid',
+    tab_style: 'pills',
+};
+const TAB_META = {
+    'overview-tab': {
+        eyebrow: 'Overview',
+        title: 'Swarm Command Deck',
+        description: 'Live command posture, alerting, sessions, and runtime visibility for the full swarm.',
+    },
+    'diagnostics-tab': {
+        eyebrow: 'Diagnostics',
+        title: 'System Runtime',
+        description: 'Trace shared env health, database reachability, Discord inventory readiness, and Aria intelligence state.',
+    },
+    'controls-tab': {
+        eyebrow: 'Controls',
+        title: 'Direct Playback Control',
+        description: 'Dispatch tracks, tune loop and filter state, and inspect real guild-level readiness before you press play.',
+    },
+    'invites-tab': {
+        eyebrow: 'Invites',
+        title: 'Bot Access',
+        description: 'Invite the right nodes into a guild and see which swarm pieces are still missing.',
+    },
+    'users-tab': {
+        eyebrow: 'Users',
+        title: 'Swarm Directory',
+        description: 'Browse public server cards, favorite bots, and listening activity in a more editorial layout.',
+    },
+    'profile-tab': {
+        eyebrow: 'Profile',
+        title: 'Server Identity',
+        description: 'Shape how your account and linked server appear in the public directory, with richer preview feedback.',
+    },
+    'appearance-tab': {
+        eyebrow: 'Appearance',
+        title: 'Panel Look',
+        description: 'Customize tab styling, directory layout, and profile presentation in addition to the global panel theme.',
+    },
+    'image-gallery-tab': {
+        eyebrow: 'Image Gallery',
+        title: 'Gallery Admin',
+        description: 'Moderation, account recovery, and database inspection for the Image Gallery owner workspace.',
+    },
+    'intel-tab': {
+        eyebrow: 'Intel',
+        title: 'Errors And Metrics',
+        description: 'Follow the live event stream and metrics surface without losing the operational context.',
+    },
 };
 
 
@@ -383,6 +434,7 @@ function setPanelSessionContext(data = {}) {
     updateAdminModeToggle();
     updateTopbarAccount();
     ensureSessionVisibleTab();
+    renderSectionHero();
 }
 
 function isAdminSession() {
@@ -403,7 +455,9 @@ function ensureSessionVisibleTab() {
     const adminPanelIds = new Set(['diagnostics-tab', 'intel-tab', 'image-gallery-tab']);
     if (activePanel && adminPanelIds.has(activePanel.id)) {
         activateSwarmTab('overview-tab');
+        return;
     }
+    renderSectionHero();
 }
 
 function getLinkedGuildId() {
@@ -538,22 +592,35 @@ async function refreshRemotePanelConfig({ force = false } = {}) {
     }
     if (remotePanelConfigRefreshPromise) return remotePanelConfigRefreshPromise;
     remotePanelConfigRefreshPromise = (async () => {
-        const response = await rawFetch(buildStaticUrl(REMOTE_CONFIG_FILE), {
-            cache: 'no-store',
-        });
-        if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
-        const payload = await response.json().catch(() => ({}));
-        const nextOrigin = normalizeRemoteOrigin(
-            payload.panel_url
-            || payload.panel
-            || payload.remote_panel_origin
-            || payload.remote_origin
-            || '',
-        );
-        if (!nextOrigin) throw new Error('live-config.json has no panel_url');
-        setRemoteOrigin(nextOrigin);
-        syncRemoteOriginInputs();
-        return remotePanelOrigin;
+        const cachedOrigin = normalizeRemoteOrigin(remotePanelOrigin || readStoredValue(REMOTE_ORIGIN_KEY) || '');
+        try {
+            const response = await rawFetch(`${buildStaticUrl(REMOTE_CONFIG_FILE)}?t=${Date.now()}`, {
+                cache: 'no-store',
+            });
+            if (!response.ok) throw new Error(`Config HTTP ${response.status}`);
+            const payload = await response.json().catch(() => ({}));
+            const nextOrigin = normalizeRemoteOrigin(
+                payload.panel_url
+                || payload.panel
+                || payload.remote_panel_origin
+                || payload.remote_origin
+                || '',
+            );
+            if (!nextOrigin) throw new Error('live-config.json has no panel_url');
+            setRemoteOrigin(nextOrigin);
+            updateRemoteConnectionStatus('Live panel synced', 'online');
+            syncRemoteOriginInputs();
+            return remotePanelOrigin;
+        } catch (err) {
+            if (cachedOrigin) {
+                setRemoteOrigin(cachedOrigin, false);
+                updateRemoteConnectionStatus('Using cached live panel route', 'warn');
+                syncRemoteOriginInputs();
+                return remotePanelOrigin;
+            }
+            updateRemoteConnectionStatus('Waiting for live panel sync', 'offline');
+            throw err;
+        }
     })();
     try {
         return await remotePanelConfigRefreshPromise;
@@ -564,11 +631,16 @@ async function refreshRemotePanelConfig({ force = false } = {}) {
 
 async function loadRemotePanelConfig() {
     if (!REMOTE_MODE) return '';
+    const cachedOrigin = normalizeRemoteOrigin(remotePanelOrigin || readStoredValue(REMOTE_ORIGIN_KEY) || '');
 
     try {
         return await refreshRemotePanelConfig({ force: true });
     } catch (_err) {
-        return '';
+        if (cachedOrigin) {
+            setRemoteOrigin(cachedOrigin, false);
+            syncRemoteOriginInputs();
+        }
+        return cachedOrigin;
     }
 }
 
@@ -907,12 +979,102 @@ function maskSecret(value) {
     return raw;
 }
 
-function activateSwarmTab(target) {
+function getVisibleSwarmTabs() {
+    return Array.from(document.querySelectorAll('.swarm-tab')).filter(button => button.getClientRects().length > 0);
+}
+
+function resolveAllowedTab(target) {
+    const visibleTabs = getVisibleSwarmTabs();
+    const fallback = inviteOnlyMode ? 'invites-tab' : (visibleTabs[0]?.dataset.tabTarget || 'overview-tab');
+    if (inviteOnlyMode && target !== 'invites-tab') return 'invites-tab';
+    if (!target) return fallback;
+    if (['profile-tab', 'appearance-tab'].includes(target) && document.getElementById(target)) return target;
+    const allowed = visibleTabs.some(button => button.dataset.tabTarget === target);
+    return allowed ? target : fallback;
+}
+
+function getActiveTabId() {
+    return document.querySelector('.swarm-tab-panel.active')?.id || resolveAllowedTab(readStoredValue(ACTIVE_TAB_KEY) || 'overview-tab');
+}
+
+function renderSectionHero(target = getActiveTabId()) {
+    const meta = TAB_META[target] || TAB_META['overview-tab'];
+    const pills = [];
+    if (target === 'overview-tab') {
+        pills.push(`${dashboardBotsState.length} bots`);
+        pills.push(`${liveSessionState.filter(session => isRuntimeSession(session)).length} live sessions`);
+        if (eventFeedConnectionState) pills.push(`Feed ${eventFeedConnectionState}`);
+    } else if (target === 'diagnostics-tab') {
+        const bots = Array.isArray(systemDiagnosticsState?.bots) ? systemDiagnosticsState.bots : [];
+        pills.push(`${bots.filter(bot => bot.db?.reachable).length}/${bots.length || 0} DB links`);
+        pills.push(`${bots.filter(bot => bot.discord?.reachable).length}/${bots.length || 0} Discord ready`);
+    } else if (target === 'controls-tab') {
+        pills.push(`${controlInventoryState?.guilds?.length || 0} guilds loaded`);
+        pills.push(`${controlMatrixState?.bots?.length || 0} swarm entries`);
+    } else if (target === 'invites-tab') {
+        pills.push(`${inviteCatalogState.length} bots`);
+        if (getLinkedGuildId()) pills.push(`Guild ${getLinkedGuildId()}`);
+    } else if (target === 'users-tab') {
+        pills.push(`${userDirectoryState.length} public profiles`);
+        if (userProfileState.profile?.favorite_bot) pills.push(`Favorite ${userProfileState.profile.favorite_bot}`);
+    } else if (target === 'profile-tab') {
+        const profile = userProfileState.profile || {};
+        pills.push(profile.public_profile === false ? 'Private card' : 'Public card');
+        if (profile.server_name) pills.push(profile.server_name);
+        if (profile.email) pills.push(profile.email_verified ? 'Email verified' : 'Email pending');
+    } else if (target === 'appearance-tab') {
+        pills.push(`Tabs ${panelPreferencesState.tab_style || DEFAULT_PANEL_PREFERENCES.tab_style}`);
+        pills.push(`Profile ${panelPreferencesState.profile_layout || DEFAULT_PANEL_PREFERENCES.profile_layout}`);
+        pills.push(`Directory ${panelPreferencesState.directory_layout || DEFAULT_PANEL_PREFERENCES.directory_layout}`);
+    } else if (target === 'image-gallery-tab') {
+        pills.push(`Owner tools`);
+        pills.push(`${document.getElementById('image-gallery-limit-select')?.value || 100} row limit`);
+    } else if (target === 'intel-tab') {
+        pills.push(`${eventFeedEntries.length} feed entries`);
+        pills.push(metricsSnapshotState?.bots?.length ? `${metricsSnapshotState.bots.length} metrics nodes` : 'Metrics standby');
+    }
+    const eyebrow = document.getElementById('swarm-section-eyebrow');
+    const title = document.getElementById('swarm-section-title');
+    const description = document.getElementById('swarm-section-description');
+    const metaWrap = document.getElementById('swarm-section-meta');
+    if (eyebrow) eyebrow.textContent = meta.eyebrow;
+    if (title) title.textContent = meta.title;
+    if (description) description.textContent = meta.description;
+    if (metaWrap) metaWrap.innerHTML = pills.map(pill => `<span>${escapeHtml(pill)}</span>`).join('');
+}
+
+function renderAppearancePreview(preferences = panelPreferencesState) {
+    const prefs = normalizePanelPreferences(preferences);
+    const title = document.getElementById('appearance-preview-title');
+    const copy = document.getElementById('appearance-preview-copy');
+    const chips = document.getElementById('appearance-preview-chips');
+    if (title) title.textContent = `${prefs.layout_mode[0].toUpperCase()}${prefs.layout_mode.slice(1)} layout`;
+    if (copy) copy.textContent = `Accent ${prefs.accent_color}, ${prefs.tab_style} tabs, ${prefs.profile_layout} profile cards, ${prefs.directory_layout} directory.`;
+    if (chips) {
+        chips.innerHTML = [
+            `Tabs ${prefs.tab_style}`,
+            `Profile ${prefs.profile_layout}`,
+            `Directory ${prefs.directory_layout}`,
+            `Density ${prefs.density}`,
+            `Motion ${prefs.motion}`,
+        ].map(item => `<span>${escapeHtml(item)}</span>`).join('');
+    }
+}
+
+function activateSwarmTab(target, { persist = true } = {}) {
     const buttons = Array.from(document.querySelectorAll('.swarm-tab'));
     const panels = Array.from(document.querySelectorAll('.swarm-tab-panel'));
     if (!target || !buttons.length || !panels.length) return;
-    buttons.forEach(item => item.classList.toggle('active', item.dataset.tabTarget === target));
-    panels.forEach(panel => panel.classList.toggle('active', panel.id === target));
+    const nextTarget = resolveAllowedTab(target);
+    buttons.forEach(item => item.classList.toggle('active', item.dataset.tabTarget === nextTarget));
+    panels.forEach(panel => panel.classList.toggle('active', panel.id === nextTarget));
+    document.body.dataset.activeTab = nextTarget.replace('-tab', '');
+    renderSectionHero(nextTarget);
+    if (persist) {
+        writeStoredValue(ACTIVE_TAB_KEY, nextTarget);
+        const nextHash = `#${nextTarget}`;
+        if (window.location.hash !== nextHash) history.replaceState(null, '', nextHash);
+    }
 }
 
 function initTabs() {
@@ -931,6 +1093,8 @@ function initTabs() {
             activateSwarmTab(target);
         });
     });
+    const initialTarget = window.location.hash?.replace(/^#/, '') || readStoredValue(ACTIVE_TAB_KEY) || document.querySelector('.swarm-tab.active')?.dataset.tabTarget || 'overview-tab';
+    activateSwarmTab(initialTarget, { persist: false });
 }
 
 function describeBotStatus(status) {
@@ -1561,6 +1725,9 @@ function normalizePanelPreferences(preferences = {}) {
         card_shape: pick(String(merged.card_shape || ''), ['soft', 'crisp'], 'soft'),
         font_scale: pick(String(merged.font_scale || ''), ['normal', 'large', 'dense'], 'normal'),
         motion: pick(String(merged.motion || ''), ['standard', 'reduced'], 'standard'),
+        profile_layout: pick(String(merged.profile_layout || ''), ['spotlight', 'studio', 'compact'], 'spotlight'),
+        directory_layout: pick(String(merged.directory_layout || ''), ['grid', 'magazine', 'stack'], 'grid'),
+        tab_style: pick(String(merged.tab_style || ''), ['pills', 'underline', 'minimal'], 'pills'),
     };
 }
 
@@ -1581,6 +1748,9 @@ function applyPanelPreferences(preferences = panelPreferencesState) {
         'panel-shape-soft', 'panel-shape-crisp',
         'panel-font-normal', 'panel-font-large', 'panel-font-dense',
         'panel-motion-standard', 'panel-motion-reduced',
+        'panel-profile-spotlight', 'panel-profile-studio', 'panel-profile-compact',
+        'panel-directory-grid', 'panel-directory-magazine', 'panel-directory-stack',
+        'panel-tabs-pills', 'panel-tabs-underline', 'panel-tabs-minimal',
     ];
     body.classList.remove(...managedClasses);
     body.classList.add(
@@ -1590,6 +1760,9 @@ function applyPanelPreferences(preferences = panelPreferencesState) {
         `panel-shape-${prefs.card_shape}`,
         `panel-font-${prefs.font_scale}`,
         `panel-motion-${prefs.motion}`,
+        `panel-profile-${prefs.profile_layout}`,
+        `panel-directory-${prefs.directory_layout}`,
+        `panel-tabs-${prefs.tab_style}`,
     );
     return prefs;
 }
@@ -1606,11 +1779,16 @@ function renderPanelPreferenceInputs(preferences = panelPreferencesState) {
         'panel-card-shape': prefs.card_shape,
         'panel-font-scale': prefs.font_scale,
         'panel-motion': prefs.motion,
+        'panel-profile-layout': prefs.profile_layout,
+        'panel-directory-layout': prefs.directory_layout,
+        'panel-tab-style': prefs.tab_style,
     };
     Object.entries(values).forEach(([id, value]) => {
         const element = document.getElementById(id);
         if (element) element.value = value;
     });
+    renderAppearancePreview(prefs);
+    renderSectionHero();
 }
 
 function getPanelPreferencesFromInputs() {
@@ -1624,6 +1802,9 @@ function getPanelPreferencesFromInputs() {
         card_shape: document.getElementById('panel-card-shape')?.value,
         font_scale: document.getElementById('panel-font-scale')?.value,
         motion: document.getElementById('panel-motion')?.value,
+        profile_layout: document.getElementById('panel-profile-layout')?.value,
+        directory_layout: document.getElementById('panel-directory-layout')?.value,
+        tab_style: document.getElementById('panel-tab-style')?.value,
     });
 }
 
@@ -1645,6 +1826,9 @@ function setPanelPreferenceControlsDisabled(disabled) {
         'panel-card-shape',
         'panel-font-scale',
         'panel-motion',
+        'panel-profile-layout',
+        'panel-directory-layout',
+        'panel-tab-style',
         'save-panel-preferences',
         'reset-panel-preferences',
     ].forEach(id => {
@@ -1835,6 +2019,26 @@ function renderUserProfile(data = userProfileState) {
         if (profile.email) chips.push(profile.email_verified ? 'Email verified' : 'Email pending');
         previewChips.innerHTML = chips.map(chip => `<span>${escapeHtml(chip)}</span>`).join('');
     }
+    const previewStats = document.getElementById('user-profile-preview-stats');
+    if (previewStats) {
+        const botCount = dashboardBotsState.length;
+        const liveCount = liveSessionState.filter(session => isRuntimeSession(session)).length;
+        previewStats.innerHTML = `
+            <div><strong>${profile.public_profile === false ? 'Private' : 'Public'}</strong><span>Visibility</span></div>
+            <div><strong>${escapeHtml(profile.favorite_bot || 'None')}</strong><span>Favorite Bot</span></div>
+            <div><strong>${botCount}</strong><span>Swarm Bots</span></div>
+            <div><strong>${liveCount}</strong><span>Live Sessions</span></div>
+        `;
+    }
+    const previewLayout = document.getElementById('user-profile-preview-layout');
+    if (previewLayout) {
+        const prefs = normalizePanelPreferences(profile.panel_preferences || panelPreferencesState);
+        previewLayout.innerHTML = [
+            `Profile ${prefs.profile_layout}`,
+            `Directory ${prefs.directory_layout}`,
+            `Tabs ${prefs.tab_style}`,
+        ].map(item => `<span>${escapeHtml(item)}</span>`).join('');
+    }
     if (resendEmailButton) {
         resendEmailButton.hidden = !editable || !profile.email || Boolean(profile.email_verified);
     }
@@ -1844,6 +2048,7 @@ function renderUserProfile(data = userProfileState) {
     }
     setUserProfileInputsDisabled(!editable);
     updateTopbarAccount(profile);
+    renderSectionHero();
 }
 
 async function loadUserProfile() {
@@ -1866,6 +2071,7 @@ async function loadUserProfile() {
         renderUserProfile(userProfileState);
     } catch (err) {
         setUserProfileStatus(String(err), true);
+        renderSectionHero();
     }
 }
 
@@ -1983,10 +2189,52 @@ async function saveUserProfile() {
 
 function renderUserDirectory(users = userDirectoryState) {
     const grid = document.getElementById('user-directory-grid');
+    const summary = document.getElementById('user-directory-summary');
+    const featured = document.getElementById('user-directory-featured');
     if (!grid) return;
     if (!users.length) {
         grid.innerHTML = '<div class="control-context-empty">No public users found yet.</div>';
+        if (summary) summary.innerHTML = '';
+        if (featured) featured.innerHTML = '<div class="control-context-empty">Run a search or refresh the directory to spotlight a public profile.</div>';
+        renderSectionHero();
         return;
+    }
+
+    const totalPlays = users.reduce((acc, profile) => acc + Number(profile.activity?.total_plays || 0), 0);
+    const activeListeners = users.filter(profile => Array.isArray(profile.activity?.active_sessions) && profile.activity.active_sessions.length).length;
+    if (summary) {
+        summary.innerHTML = `
+            <article class="user-directory-summary-card"><strong>${users.length}</strong><span>Public Profiles</span></article>
+            <article class="user-directory-summary-card"><strong>${totalPlays}</strong><span>Total Plays Tracked</span></article>
+            <article class="user-directory-summary-card"><strong>${activeListeners}</strong><span>Listening Now</span></article>
+        `;
+    }
+    if (featured) {
+        const profile = users[0];
+        const activity = profile.activity || {};
+        const topTrack = Array.isArray(activity.top_tracks) && activity.top_tracks.length ? activity.top_tracks[0] : null;
+        featured.innerHTML = `
+            <article class="user-directory-feature-card" style="--user-accent: ${escapeHtml(profile.theme_accent || '#89b4fa')};">
+                <div class="user-directory-feature-card-head">
+                    ${renderCircularAvatar(profile, 'user-card-avatar')}
+                    <div>
+                        <p class="swarm-section-eyebrow">Spotlight</p>
+                        <h3>${escapeHtml(profile.display_name || profile.username)}</h3>
+                        <p class="muted">${escapeHtml(profile.server_name || profile.guild_id || 'Linked server')}</p>
+                    </div>
+                </div>
+                <p>${escapeHtml(profile.bio || 'No public bio yet.')}</p>
+                <div class="user-chip-row">
+                    ${profile.favorite_bot ? `<span>Favorite ${escapeHtml(profile.favorite_bot)}</span>` : ''}
+                    <span>${Number(activity.total_plays || 0)} plays</span>
+                    <span>${Array.isArray(activity.active_sessions) && activity.active_sessions.length ? 'Listening now' : 'Offline now'}</span>
+                </div>
+                <div class="user-activity-block">
+                    <div class="user-activity-title">Top Track</div>
+                    ${topTrack ? `<div class="user-activity-row"><span>${escapeHtml(topTrack.title)}</span><strong>${Number(topTrack.plays || 0)}</strong></div>` : '<div class="user-empty-line">No track history yet.</div>'}
+                </div>
+            </article>
+        `;
     }
 
     grid.innerHTML = users.map(profile => {
@@ -2032,6 +2280,7 @@ function renderUserDirectory(users = userDirectoryState) {
             </article>
         `;
     }).join('');
+    renderSectionHero();
 }
 
 async function loadUserDirectory(query = null) {
@@ -2053,6 +2302,7 @@ async function loadUserDirectory(query = null) {
         renderUserDirectory(userDirectoryState);
     } catch (err) {
         if (grid) grid.innerHTML = `<div class="control-context-empty">User directory failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</div>`;
+        renderSectionHero();
     }
 }
 
@@ -2121,6 +2371,7 @@ async function fetchDashboard() {
         }
 
         updateLivePositionCounters();
+        renderSectionHero();
 
     } catch (err) {
         console.error("❌ Dashboard fetch failed:", err);
@@ -2144,11 +2395,13 @@ async function fetchDiagnostics(force = false) {
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
         fetchMetrics();
+        renderSectionHero();
     } catch (err) {
         systemDiagnosticsState = null;
         renderControlContext();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
+        renderSectionHero();
         console.error('❌ Diagnostics fetch failed:', err);
     }
 }
@@ -2164,9 +2417,11 @@ async function fetchMetrics() {
         }
         metricsSnapshotState = data;
         renderMetricsDashboard(data);
+        renderSectionHero();
     } catch (err) {
         metricsSnapshotState = null;
         renderMetricsDashboard({ error: String(err), totals: {}, bots: [] });
+        renderSectionHero();
         console.error('❌ Metrics fetch failed:', err);
     }
 }
@@ -4937,6 +5192,9 @@ document.addEventListener('DOMContentLoaded', () => {
         'panel-card-shape',
         'panel-font-scale',
         'panel-motion',
+        'panel-profile-layout',
+        'panel-directory-layout',
+        'panel-tab-style',
     ].forEach(id => {
         const eventName = id === 'panel-background-image-url' ? 'input' : 'change';
         document.getElementById(id)?.addEventListener(eventName, () => {
@@ -5242,6 +5500,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const tab = tabs[Number(event.key) - 1];
             if (tab) activateSwarmTab(tab.dataset.tabTarget);
         }
+    });
+
+    window.addEventListener('hashchange', () => {
+        const target = window.location.hash?.replace(/^#/, '');
+        if (target) activateSwarmTab(target, { persist: false });
     });
 
     document.getElementById('remote-login-button')

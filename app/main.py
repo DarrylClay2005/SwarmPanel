@@ -71,6 +71,9 @@ PANEL_DENSITY_MODES = {"comfortable", "compact"}
 PANEL_SHAPE_MODES = {"soft", "crisp"}
 PANEL_FONT_MODES = {"normal", "large", "dense"}
 PANEL_MOTION_MODES = {"standard", "reduced"}
+PANEL_PROFILE_LAYOUT_MODES = {"spotlight", "studio", "compact"}
+PANEL_DIRECTORY_LAYOUT_MODES = {"grid", "magazine", "stack"}
+PANEL_TAB_STYLE_MODES = {"pills", "underline", "minimal"}
 DISCORD_INVITE_HOSTS = {
     "discord.gg",
     "www.discord.gg",
@@ -301,6 +304,9 @@ class PanelPreferencesUpdateRequest(BaseModel):
     card_shape: str | None = None
     font_scale: str | None = None
     motion: str | None = None
+    profile_layout: str | None = None
+    directory_layout: str | None = None
+    tab_style: str | None = None
 
 
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
@@ -519,6 +525,9 @@ def _clean_panel_preferences(payload: PanelPreferencesUpdateRequest) -> dict[str
         "card_shape": "soft",
         "font_scale": "normal",
         "motion": "standard",
+        "profile_layout": "spotlight",
+        "directory_layout": "grid",
+        "tab_style": "pills",
     }
     if "accent_color" in raw:
         preferences["accent_color"] = _normalize_profile_accent(raw.get("accent_color")) or "#89b4fa"
@@ -538,6 +547,12 @@ def _clean_panel_preferences(payload: PanelPreferencesUpdateRequest) -> dict[str
         preferences["font_scale"] = _normalize_choice(raw.get("font_scale"), "Font scale", PANEL_FONT_MODES, "normal")
     if "motion" in raw:
         preferences["motion"] = _normalize_choice(raw.get("motion"), "Motion", PANEL_MOTION_MODES, "standard")
+    if "profile_layout" in raw:
+        preferences["profile_layout"] = _normalize_choice(raw.get("profile_layout"), "Profile layout", PANEL_PROFILE_LAYOUT_MODES, "spotlight")
+    if "directory_layout" in raw:
+        preferences["directory_layout"] = _normalize_choice(raw.get("directory_layout"), "Directory layout", PANEL_DIRECTORY_LAYOUT_MODES, "grid")
+    if "tab_style" in raw:
+        preferences["tab_style"] = _normalize_choice(raw.get("tab_style"), "Tab style", PANEL_TAB_STYLE_MODES, "pills")
     return preferences
 
 
