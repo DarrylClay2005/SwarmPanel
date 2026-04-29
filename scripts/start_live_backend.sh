@@ -11,15 +11,26 @@ PAGES_URL="${PANEL_PAGES_PUBLIC_URL:-https://darrylclay2005.github.io/SwarmPanel
 LOG_DIR="${ROOT_DIR}/.runtime"
 UVICORN_LOG="${LOG_DIR}/uvicorn.log"
 TUNNEL_LOG="${LOG_DIR}/cloudflared.log"
+PID_FILE="${LOG_DIR}/live_backend.pid"
 AUTO_PUSH_CONFIG="${PANEL_AUTO_PUSH_CONFIG:-1}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
+echo "$$" > "${PID_FILE}"
 
 write_config() {
   local panel_url="$1"
   cat > "${CONFIG_FILE}" <<EOF
 {
   "panel_url": "${panel_url}",
+  "updated_at": "$(date -Is)"
+}
+EOF
+}
+
+write_offline_config() {
+  cat > "${CONFIG_FILE}" <<EOF
+{
+  "panel_url": "",
   "updated_at": "$(date -Is)"
 }
 EOF
@@ -96,6 +107,11 @@ cloudflared_bin() {
 }
 
 cleanup() {
+  if [[ -n "${PUBLISHED_PANEL_URL:-}" ]] && grep -Fq "\"panel_url\": \"${PUBLISHED_PANEL_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
+    write_offline_config
+    publish_config
+  fi
+  rm -f "${PID_FILE}"
   if [[ -n "${UVICORN_PID:-}" ]]; then
     kill "${UVICORN_PID}" >/dev/null 2>&1 || true
   fi
@@ -162,6 +178,7 @@ for _ in {1..80}; do
       exit 1
     fi
     write_config "${PANEL_URL}"
+    PUBLISHED_PANEL_URL="${PANEL_URL}"
     publish_config
     echo
     echo "Live backend URL: ${PANEL_URL}"
