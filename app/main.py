@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import html
-import hmac
 import json
 import logging
 import os
@@ -27,6 +26,7 @@ from .auth import (
     SESSION_AUTH_KEY,
     SESSION_GUILD_ID_KEY,
     SESSION_ROLE_KEY,
+    SESSION_SITE_OWNER_KEY,
     SESSION_USERNAME_KEY,
     get_api_auth,
     is_authenticated,
@@ -82,6 +82,7 @@ DISCORD_INVITE_HOSTS = {
     "discordapp.com",
     "www.discordapp.com",
 }
+OWNER_SCOPE_SENTINEL = "__site_owner_only__"
 
 
 def _validate_discord_webhook_url(value: Any) -> str:
@@ -369,22 +370,39 @@ def _require_api_auth(request: Request) -> dict[str, Any]:
 def _is_admin_auth(auth: dict[str, Any] | None) -> bool:
     if not auth:
         return False
+    if not _is_site_owner_auth(auth):
+        return False
     if auth.get("admin_mode") is not None:
         return bool(auth.get("admin_mode"))
     return str(auth.get("role") or "admin").lower() == "admin" and not auth.get("guild_id")
 
 
-def _is_image_gallery_owner_username(username: Any) -> bool:
-    normalized = str(username or "").strip().lower()
-    owners = {str(name or "").strip().lower() for name in settings.image_gallery_owner_usernames if str(name or "").strip()}
-    return bool(normalized and normalized in owners)
+def _normalize_owner_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_site_owner_email(email: Any) -> bool:
+    normalized = _normalize_owner_email(email)
+    return bool(normalized and normalized == settings.site_owner_email)
+
+
+def _is_site_owner_account(account: dict[str, Any] | None) -> bool:
+    if not account:
+        return False
+    return bool(account.get("email_verified")) and _is_site_owner_email(account.get("email"))
+
+
+def _is_site_owner_auth(auth: dict[str, Any] | None) -> bool:
+    return bool(auth and auth.get("site_owner"))
 
 
 def _is_image_gallery_owner_auth(auth: dict[str, Any] | None) -> bool:
-    return _is_admin_auth(auth) and _is_image_gallery_owner_username(auth.get("username"))
+    return _is_admin_auth(auth) and _is_site_owner_auth(auth)
 
 
 def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
+    if auth and not _is_site_owner_auth(auth) and not auth.get("guild_id"):
+        return OWNER_SCOPE_SENTINEL
     if _is_admin_auth(auth):
         return None
     guild_id = auth.get("guild_id") if auth else None
@@ -394,6 +412,11 @@ def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
 def _account_guild_id(auth: dict[str, Any] | None) -> str | None:
     guild_id = auth.get("guild_id") if auth else None
     return str(guild_id) if guild_id not in (None, "") else None
+
+
+def _public_scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
+    scoped = _scoped_guild_id(auth)
+    return None if scoped == OWNER_SCOPE_SENTINEL else scoped
 
 
 async def _resolve_account_guild_id(auth: dict[str, Any] | None, username: str | None = None) -> str | None:
@@ -444,23 +467,72 @@ def _set_admin_session(request: Request, username: str) -> None:
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "admin"
-    request.session[SESSION_ADMIN_MODE_KEY] = True
+    request.session[SESSION_SITE_OWNER_KEY] = False
+    request.session[SESSION_ADMIN_MODE_KEY] = False
     request.session.pop(SESSION_GUILD_ID_KEY, None)
 
 
-def _set_account_session(request: Request, username: str, guild_id: str | int, *, admin_mode: bool = False) -> None:
+def _set_account_session(
+    request: Request,
+    username: str,
+    guild_id: str | int,
+    *,
+    admin_mode: bool = False,
+    site_owner: bool = False,
+) -> None:
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "account"
     request.session[SESSION_GUILD_ID_KEY] = str(guild_id)
-    request.session[SESSION_ADMIN_MODE_KEY] = bool(admin_mode)
+    request.session[SESSION_SITE_OWNER_KEY] = bool(site_owner)
+    request.session[SESSION_ADMIN_MODE_KEY] = bool(site_owner and admin_mode)
+
+
+def _sync_account_session_owner_state(request: Request, profile: dict[str, Any] | None) -> None:
+    if not is_authenticated(request) or not profile:
+        return
+    username = profile.get("username") or request.session.get(SESSION_USERNAME_KEY)
+    guild_id = profile.get("guild_id") or request.session.get(SESSION_GUILD_ID_KEY)
+    if not username or guild_id in (None, ""):
+        return
+    _set_account_session(
+        request,
+        str(username),
+        str(guild_id),
+        admin_mode=bool(request.session.get(SESSION_ADMIN_MODE_KEY)),
+        site_owner=_is_site_owner_account(profile),
+    )
+
+
+async def _hydrate_site_owner_auth(request: Request, auth: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not auth or auth.get("site_owner"):
+        return auth
+    username = str(auth.get("username") or "").strip()
+    linked_guild_id = await _resolve_account_guild_id(auth, username)
+    if not username or not linked_guild_id:
+        return auth
+    try:
+        profile = await db.get_account_profile(username, linked_guild_id)
+    except Exception as exc:
+        action_logger.warning("Failed to hydrate owner auth for %s: %s", username, exc)
+        return auth
+    if not _is_site_owner_account(profile):
+        return auth
+    hydrated = {**auth, "guild_id": str(linked_guild_id), "site_owner": True}
+    if is_authenticated(request):
+        _set_account_session(
+            request,
+            username,
+            linked_guild_id,
+            admin_mode=bool(auth.get("admin_mode")),
+            site_owner=True,
+        )
+    return hydrated
 
 
 async def _authenticate_login(username: str, password: str = "", guild_id: str | int | None = None) -> dict[str, Any] | None:
-    if _is_image_gallery_owner_username(username) and hmac.compare_digest(str(password or ""), settings.admin_password):
-        return {"username": str(username).strip(), "role": "admin", "guild_id": None}
     if verify_credentials(username, password, settings.admin_username, settings.admin_password):
-        return {"username": username, "role": "admin", "guild_id": None}
+        return {"username": username, "role": "admin", "guild_id": None, "site_owner": False}
 
     account_secret = password if password not in (None, "") else guild_id
     if account_secret in (None, ""):
@@ -471,7 +543,12 @@ async def _authenticate_login(username: str, password: str = "", guild_id: str |
         return None
     if not account:
         return None
-    return {"username": account["username"], "role": "account", "guild_id": account["guild_id"]}
+    return {
+        "username": account["username"],
+        "role": "account",
+        "guild_id": account["guild_id"],
+        "site_owner": _is_site_owner_account(account),
+    }
 
 
 async def _bot_has_registered_guild(bot_key: str, guild_id: str | int) -> bool:
@@ -745,7 +822,7 @@ async def login_submit(
         if auth["role"] == "admin":
             _set_admin_session(request, auth["username"])
         else:
-            _set_account_session(request, auth["username"], auth["guild_id"])
+            _set_account_session(request, auth["username"], auth["guild_id"], site_owner=bool(auth.get("site_owner")))
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(
         request,
@@ -784,7 +861,7 @@ async def register_submit(
 
     if account.get("email") and email_token:
         send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
-    _set_account_session(request, account["username"], account["guild_id"])
+    _set_account_session(request, account["username"], account["guild_id"], site_owner=_is_site_owner_account(account))
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -801,18 +878,21 @@ async def index(request: Request):
     session_username = request.session.get(SESSION_USERNAME_KEY) or settings.admin_username
     session_role = request.session.get(SESSION_ROLE_KEY) or "admin"
     session_guild_id = request.session.get(SESSION_GUILD_ID_KEY)
+    session_site_owner = bool(request.session.get(SESSION_SITE_OWNER_KEY))
     session_admin_mode = request.session.get(SESSION_ADMIN_MODE_KEY)
     if session_admin_mode is None:
-        session_admin_mode = str(session_role or "").lower() == "admin" and not session_guild_id
+        session_admin_mode = session_site_owner and str(session_role or "").lower() == "admin" and not session_guild_id
     return templates.TemplateResponse(request, "index.html", {
         "session_username": session_username,
         "session_role": session_role,
         "session_guild_id": session_guild_id,
+        "session_site_owner": session_site_owner,
         "session_admin_mode": bool(session_admin_mode),
         "session_image_gallery_owner": _is_image_gallery_owner_auth({
             "username": session_username,
             "role": session_role,
             "guild_id": session_guild_id,
+            "site_owner": session_site_owner,
             "admin_mode": bool(session_admin_mode),
         }),
     })
@@ -820,13 +900,14 @@ async def index(request: Request):
 
 @app.get("/api/session")
 async def api_session_status(request: Request):
-    auth = _get_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _get_api_auth(request))
     if not auth:
         return {"authenticated": False, "pages_public_url": settings.pages_public_url}
 
     username = auth.get("username") or settings.admin_username
     role = auth.get("role") or "admin"
     guild_id = auth.get("guild_id")
+    site_owner = _is_site_owner_auth(auth)
     admin_mode = _is_admin_auth(auth)
     account_guild_id = await _resolve_account_guild_id(auth, username)
     return {
@@ -836,9 +917,17 @@ async def api_session_status(request: Request):
         "role": role,
         "guild_id": str(guild_id or account_guild_id) if (guild_id or account_guild_id) else None,
         "account_guild_id": account_guild_id,
+        "site_owner": site_owner,
         "admin_mode": admin_mode,
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
-        "token": issue_api_token(settings.session_secret, username, role=role, guild_id=account_guild_id or guild_id, admin_mode=admin_mode),
+        "token": issue_api_token(
+            settings.session_secret,
+            username,
+            role=role,
+            guild_id=account_guild_id or guild_id,
+            admin_mode=admin_mode,
+            site_owner=site_owner,
+        ),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
     }
@@ -853,14 +942,16 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
     if auth["role"] == "admin":
         _set_admin_session(request, auth["username"])
     else:
-        _set_account_session(request, auth["username"], auth["guild_id"])
+        _set_account_session(request, auth["username"], auth["guild_id"], site_owner=bool(auth.get("site_owner")))
     linked_guild_id = auth.get("guild_id") or (await _resolve_account_guild_id(auth, auth["username"]) if auth["role"] == "admin" else None)
+    site_owner = bool(auth.get("site_owner"))
     token = issue_api_token(
         settings.session_secret,
         auth["username"],
         role=auth["role"],
         guild_id=linked_guild_id,
         admin_mode=_is_admin_auth(auth),
+        site_owner=site_owner,
     )
     return {
         "ok": True,
@@ -869,6 +960,7 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
         "role": auth["role"],
         "guild_id": linked_guild_id,
         "account_guild_id": linked_guild_id,
+        "site_owner": site_owner,
         "admin_mode": _is_admin_auth(auth),
         "image_gallery_owner": _is_image_gallery_owner_auth(auth),
         "pages_public_url": settings.pages_public_url,
@@ -889,13 +981,15 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
     if account.get("email") and email_token:
         verification_sent = send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
 
-    _set_account_session(request, account["username"], account["guild_id"])
+    site_owner = _is_site_owner_account(account)
+    _set_account_session(request, account["username"], account["guild_id"], site_owner=site_owner)
     token = issue_api_token(
         settings.session_secret,
         account["username"],
         role="account",
         guild_id=account["guild_id"],
         admin_mode=False,
+        site_owner=site_owner,
     )
     return {
         "ok": True,
@@ -904,7 +998,9 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         "role": "account",
         "guild_id": account["guild_id"],
         "account_guild_id": account["guild_id"],
+        "site_owner": site_owner,
         "admin_mode": False,
+        "image_gallery_owner": False,
         "email_verification_sent": verification_sent,
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
@@ -913,24 +1009,22 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
 
 @app.post("/api/session/admin-mode")
 async def api_session_admin_mode(request: Request, payload: SessionAdminModeRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    if not _is_site_owner_auth(auth):
+        raise HTTPException(status_code=403, detail="Admin mode is locked to the verified owner account.")
     username = str(auth.get("username") or settings.admin_username)
     linked_guild_id = await _resolve_account_guild_id(auth, username)
     if not linked_guild_id:
-        if payload.enabled:
-            admin_mode = True
-            request.session[SESSION_ADMIN_MODE_KEY] = True
-        else:
-            raise HTTPException(status_code=400, detail="This admin account is not linked to a registered guild.")
-    else:
-        admin_mode = bool(payload.enabled)
-        if is_authenticated(request):
-            _set_account_session(request, username, linked_guild_id, admin_mode=admin_mode)
+        raise HTTPException(status_code=400, detail="This owner account is not linked to a registered guild.")
+    admin_mode = bool(payload.enabled)
+    if is_authenticated(request):
+        _set_account_session(request, username, linked_guild_id, admin_mode=admin_mode, site_owner=True)
 
     next_auth = {
         "username": username,
         "role": auth.get("role") or ("account" if linked_guild_id else "admin"),
         "guild_id": linked_guild_id,
+        "site_owner": True,
         "admin_mode": admin_mode,
     }
     return {
@@ -939,6 +1033,7 @@ async def api_session_admin_mode(request: Request, payload: SessionAdminModeRequ
         "role": next_auth["role"],
         "guild_id": linked_guild_id,
         "account_guild_id": linked_guild_id,
+        "site_owner": True,
         "admin_mode": admin_mode,
         "image_gallery_owner": _is_image_gallery_owner_auth(next_auth),
         "token": issue_api_token(
@@ -947,6 +1042,7 @@ async def api_session_admin_mode(request: Request, payload: SessionAdminModeRequ
             role=next_auth["role"],
             guild_id=linked_guild_id,
             admin_mode=admin_mode,
+            site_owner=True,
         ),
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,
@@ -1001,6 +1097,7 @@ async def api_update_session_email(request: Request, payload: SessionEmailUpdate
         email_token = _verification_code()
         profile = await db.issue_account_email_verification_token(username, scoped_guild_id, email_token)
         verification_sent = bool(profile and send_verification_email(settings, profile["email"], _verification_url(request, email_token), email_token))
+    _sync_account_session_owner_state(request, profile)
     return {"ok": True, "profile": profile, "email_verification_sent": verification_sent}
 
 
@@ -1017,6 +1114,7 @@ async def api_verify_session_email_code(request: Request, payload: SessionEmailC
     profile = await db.verify_account_email_code(username, scoped_guild_id, code)
     if not profile:
         raise HTTPException(status_code=400, detail="Invalid verification code.")
+    _sync_account_session_owner_state(request, profile)
     return {"ok": True, "profile": profile}
 
 
@@ -1242,7 +1340,7 @@ async def api_health(request: Request):
 @app.get("/api/bots")
 async def list_bots(request: Request):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
+    scoped_guild_id = _public_scoped_guild_id(auth)
     visible_music_bots = await _visible_music_bots_for_auth(auth)
     visible_bots = [*visible_music_bots]
     if _is_admin_auth(auth):

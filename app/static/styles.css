@@ -335,6 +335,9 @@ body.panel-font-dense { font-size: 13px; }
   border-color: rgba(166,227,161,0.35);
 }
 
+.non-owner-session .admin-only {
+  display: none !important;
+}
 .guild-scoped-session .admin-only {
   display: none !important;
 }

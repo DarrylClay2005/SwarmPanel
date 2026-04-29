@@ -58,7 +58,7 @@ let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
 let remotePanelConfigRefreshPromise = null;
-let currentPanelSession = { role: 'admin', guild_id: null, account_guild_id: null, username: '', image_gallery_owner: false, admin_mode: true };
+let currentPanelSession = { role: 'account', guild_id: null, account_guild_id: null, username: '', site_owner: false, image_gallery_owner: false, admin_mode: false };
 let adminModeSwitching = false;
 let inviteOnlyMode = false;
 let panelAppStarted = false;
@@ -423,17 +423,20 @@ function setRemoteUsername(value, persist = true) {
 
 function setPanelSessionContext(data = {}) {
     const linkedGuildId = data.account_guild_id || data.guild_id || null;
+    const siteOwner = Boolean(data.site_owner);
     const adminMode = data.admin_mode !== undefined
         ? Boolean(data.admin_mode)
-        : (data.role || 'admin') === 'admin' && !linkedGuildId;
+        : (siteOwner && (data.role || 'admin') === 'admin' && !linkedGuildId);
     currentPanelSession = {
-        role: data.role || 'admin',
+        role: data.role || 'account',
         guild_id: data.guild_id || null,
         account_guild_id: linkedGuildId,
         username: data.username || remotePanelUsername || '',
+        site_owner: siteOwner,
         image_gallery_owner: Boolean(data.image_gallery_owner),
         admin_mode: adminMode,
     };
+    document.body.classList.toggle('non-owner-session', !currentPanelSession.site_owner);
     document.body.classList.toggle('guild-scoped-session', !currentPanelSession.admin_mode && Boolean(currentPanelSession.account_guild_id || currentPanelSession.guild_id));
     document.body.classList.toggle('image-gallery-owner-session', Boolean(currentPanelSession.image_gallery_owner));
     updateAdminModeToggle();
@@ -444,6 +447,10 @@ function setPanelSessionContext(data = {}) {
 
 function isAdminSession() {
     return Boolean(currentPanelSession.admin_mode);
+}
+
+function isSiteOwnerSession() {
+    return Boolean(currentPanelSession.site_owner);
 }
 
 function isGuildScopedSession() {
@@ -474,9 +481,9 @@ function updateAdminModeToggle() {
     const toggle = document.getElementById('admin-mode-toggle');
     const status = document.getElementById('admin-mode-status');
     const linkedGuildId = getLinkedGuildId();
-    const canTryModeSwitch = Boolean(linkedGuildId || isAdminSession());
+    const canTryModeSwitch = isSiteOwnerSession() && Boolean(linkedGuildId || isAdminSession());
 
-    if (wrap) wrap.hidden = !linkedGuildId;
+    if (wrap) wrap.hidden = !linkedGuildId || !isSiteOwnerSession();
     if (toggle) {
         toggle.checked = isAdminSession();
         toggle.disabled = adminModeSwitching || !canTryModeSwitch;
@@ -502,7 +509,7 @@ function updateAdminModeToggle() {
 }
 
 function toggleAdminModeFromStatus() {
-    if (adminModeSwitching || (!getLinkedGuildId() && !isAdminSession())) return;
+    if (adminModeSwitching || !isSiteOwnerSession() || (!getLinkedGuildId() && !isAdminSession())) return;
     setAdminMode(!isAdminSession());
 }
 
@@ -564,7 +571,7 @@ async function setAdminMode(enabled) {
         updateRemoteConnectionStatus(err instanceof Error ? err.message : String(err), 'offline');
     } finally {
         adminModeSwitching = false;
-        if (toggle) toggle.disabled = !getLinkedGuildId() && !isAdminSession();
+        if (toggle) toggle.disabled = adminModeSwitching || !isSiteOwnerSession() || (!getLinkedGuildId() && !isAdminSession());
         updateAdminModeToggle();
     }
 }
@@ -2113,6 +2120,7 @@ async function savePanelEmailAndSendCode() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || 'Email update failed');
         userProfileState.profile = data.profile || userProfileState.profile;
+        await syncExistingPanelSession();
         renderUserProfile(userProfileState);
         setUserProfileStatus(
             data.profile?.email
@@ -2140,6 +2148,7 @@ async function verifyPanelEmailCode() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || 'Email verification failed');
         userProfileState.profile = data.profile || userProfileState.profile;
+        await syncExistingPanelSession();
         renderUserProfile(userProfileState);
         setUserProfileStatus('Email verified.');
     } catch (err) {

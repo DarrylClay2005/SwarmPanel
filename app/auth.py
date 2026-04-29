@@ -9,6 +9,7 @@ SESSION_USERNAME_KEY = "swarm_panel_username"
 SESSION_ROLE_KEY = "swarm_panel_role"
 SESSION_GUILD_ID_KEY = "swarm_panel_guild_id"
 SESSION_ADMIN_MODE_KEY = "swarm_panel_admin_mode"
+SESSION_SITE_OWNER_KEY = "swarm_panel_site_owner"
 API_TOKEN_SALT = "swarm_panel_api_token"
 
 
@@ -31,13 +32,14 @@ def issue_api_token(
     role: str = "admin",
     guild_id: str | None = None,
     admin_mode: bool | None = None,
+    site_owner: bool = False,
 ) -> str:
     serializer = URLSafeTimedSerializer(secret_key, salt=API_TOKEN_SALT)
-    payload = {"username": username, "role": role}
+    payload = {"username": username, "role": role, "site_owner": bool(site_owner)}
     if guild_id:
         payload["guild_id"] = str(guild_id)
     if admin_mode is None:
-        admin_mode = str(role or "").lower() == "admin" and not guild_id
+        admin_mode = bool(site_owner) and str(role or "").lower() == "admin" and not guild_id
     payload["admin_mode"] = bool(admin_mode)
     return serializer.dumps(payload)
 
@@ -52,9 +54,10 @@ def verify_api_token(token: str | None, secret_key: str, max_age_seconds: int) -
         return None
     if isinstance(data, dict):
         data.setdefault("role", "account" if data.get("guild_id") else "admin")
-        data.setdefault("admin_mode", str(data.get("role") or "").lower() == "admin" and not data.get("guild_id"))
+        data.setdefault("site_owner", False)
+        data.setdefault("admin_mode", bool(data.get("site_owner")) and str(data.get("role") or "").lower() == "admin" and not data.get("guild_id"))
         return data
-    return {"username": str(data), "role": "admin", "admin_mode": True}
+    return {"username": str(data), "role": "admin", "site_owner": False, "admin_mode": False}
 
 
 def get_api_auth(
@@ -73,6 +76,7 @@ def get_api_auth(
             "mode": "session",
             "username": request.session.get(SESSION_USERNAME_KEY),
             "role": role,
+            "site_owner": bool(request.session.get(SESSION_SITE_OWNER_KEY)),
             "admin_mode": bool(admin_mode),
         }
         if guild_id:

@@ -41,7 +41,7 @@ class Settings:
     api_token_ttl_seconds: int
     pages_public_url: str
     image_gallery_schema: str
-    image_gallery_owner_usernames: list[str]
+    site_owner_email: str
     smtp_host: str
     smtp_port: int
     smtp_username: str
@@ -68,7 +68,7 @@ def load_settings() -> Settings:
         api_token_ttl_seconds=int(_env("PANEL_API_TOKEN_TTL_SECONDS", "43200")),
         pages_public_url=_env("PANEL_PAGES_PUBLIC_URL", "https://darrylclay2005.github.io/SwarmPanel/"),
         image_gallery_schema=_env("IMAGE_GALLERY_DB_SCHEMA") or _env("GALLERY_DB_SCHEMA", "image_gallery"),
-        image_gallery_owner_usernames=_env_csv("IMAGE_GALLERY_OWNER_USERNAMES") or ["Desmond"],
+        site_owner_email=(_env("SWARM_PANEL_SITE_OWNER_EMAIL") or _env("IMAGE_GALLERY_OWNER_EMAIL") or "heavenlyxenusvr@icloud.com").lower(),
         smtp_host=_env("PANEL_SMTP_HOST") or _env("SMTP_HOST"),
         smtp_port=int(_env("PANEL_SMTP_PORT") or _env("SMTP_PORT") or "587"),
         smtp_username=_env("PANEL_SMTP_USERNAME") or _env("SMTP_USERNAME"),

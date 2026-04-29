@@ -5,14 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=23-admin-toggle" />
+  <link rel="stylesheet" href="/static/styles.css?v=24-owner-lock" />
 </head>
-<body class="{% if not session_admin_mode and session_guild_id %}guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
+<body class="{% if not session_site_owner %}non-owner-session{% endif %}{% if not session_admin_mode and session_guild_id %} guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
     <div class="topbar-actions">
       <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}" role="button" tabindex="0" aria-pressed="{% if session_admin_mode %}true{% else %}false{% endif %}">
-        {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}Admin Mode{% endif %}
+        {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}{{ session_username }}{% endif %}
       </span>
       <input id="global-panel-search" class="topbar-search" type="search" placeholder="Find bot, guild, track..." />
       <select id="refresh-interval-select" class="topbar-select" aria-label="Dashboard refresh interval">
@@ -22,7 +22,7 @@
       </select>
       <button id="pause-refresh-toggle" type="button" aria-pressed="false">Pause Sync</button>
       <button id="export-snapshot" type="button">Export</button>
-      <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_guild_id %}hidden{% endif %}>
+      <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_site_owner or not session_guild_id %}hidden{% endif %}>
         <input id="admin-mode-toggle" type="checkbox" {% if session_admin_mode %}checked{% endif %} />
         <span>Admin Mode</span>
       </label>
