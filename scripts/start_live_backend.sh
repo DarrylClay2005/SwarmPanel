@@ -12,10 +12,60 @@ LOG_DIR="${ROOT_DIR}/.runtime"
 UVICORN_LOG="${LOG_DIR}/uvicorn.log"
 TUNNEL_LOG="${LOG_DIR}/cloudflared.log"
 PID_FILE="${LOG_DIR}/live_backend.pid"
+INSTANCE_LOCK_FILE="${LOG_DIR}/live-manager.lock"
 AUTO_PUSH_CONFIG="${PANEL_AUTO_PUSH_CONFIG:-1}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
 echo "$$" > "${PID_FILE}"
+
+current_live_url() {
+  CONFIG_FILE_PATH="${CONFIG_FILE}" python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+config_path = Path(os.environ["CONFIG_FILE_PATH"])
+try:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+else:
+    print(str(payload.get("panel_url") or "").strip())
+PY
+}
+
+acquire_instance_lock() {
+  exec {INSTANCE_LOCK_FD}> "${INSTANCE_LOCK_FILE}"
+  if flock -n "${INSTANCE_LOCK_FD}"; then
+    return 0
+  fi
+
+  local existing_url
+  existing_url="$(current_live_url)"
+  echo "Another SwarmPanel live tunnel manager is already running."
+  if [[ -n "${existing_url}" ]]; then
+    echo "Current published live URL: ${existing_url}"
+  else
+    echo "Current published live URL is not available yet. Reuse the running manager instead of starting a second tunnel."
+  fi
+  exit 0
+}
+
+release_instance_lock() {
+  if [[ -n "${INSTANCE_LOCK_FD:-}" ]]; then
+    flock -u "${INSTANCE_LOCK_FD}" || true
+    eval "exec ${INSTANCE_LOCK_FD}>&-"
+    INSTANCE_LOCK_FD=""
+  fi
+}
+
+flush_local_dns_cache() {
+  if command -v resolvectl >/dev/null 2>&1; then
+    resolvectl flush-caches >/dev/null 2>&1 || true
+  elif command -v systemd-resolve >/dev/null 2>&1; then
+    systemd-resolve --flush-caches >/dev/null 2>&1 || true
+  fi
+}
 
 write_config() {
   local panel_url="$1"
@@ -107,6 +157,7 @@ cloudflared_bin() {
 }
 
 cleanup() {
+  release_instance_lock
   if [[ -n "${PUBLISHED_PANEL_URL:-}" ]] && grep -Fq "\"panel_url\": \"${PUBLISHED_PANEL_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
     write_offline_config
     publish_config
@@ -120,6 +171,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
+
+acquire_instance_lock
 
 install_python_deps
 CLOUDFLARED="$(cloudflared_bin)"
@@ -177,7 +230,8 @@ for _ in {1..80}; do
       tail -80 "${TUNNEL_LOG}" >&2 || true
       exit 1
     fi
-    write_config "${PANEL_URL}"
+write_config "${PANEL_URL}"
+    flush_local_dns_cache
     PUBLISHED_PANEL_URL="${PANEL_URL}"
     publish_config
     echo
