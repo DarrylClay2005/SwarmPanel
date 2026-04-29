@@ -58,4 +58,3 @@ Web control panel for all 8 music bots plus Aria.
 - Bot inventory/channels are fetched via Discord REST with each bot token.
 - If a token is missing, that bot still appears in the dashboard but Discord inventory calls are disabled.
 - The GitHub Pages site is a static front-end. It still needs a public SwarmPanel backend URL to talk to.
-- `scripts/start_quick_tunnel.sh` opens a Cloudflare quick tunnel so the GitHub Pages site can reach your local panel without using your local IP on the phone.
