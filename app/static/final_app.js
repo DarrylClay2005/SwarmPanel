@@ -109,6 +109,11 @@ const TAB_META = {
         title: 'Swarm Directory',
         description: 'Browse public server cards, favorite bots, and listening activity in a more editorial layout.',
     },
+    'accounts-tab': {
+        eyebrow: 'Accounts',
+        title: 'SwarmPanel Recovery',
+        description: 'Inspect SwarmPanel login accounts, email state, and recovery details from one admin workspace.',
+    },
     'profile-tab': {
         eyebrow: 'Profile',
         title: 'Server Identity',
@@ -452,7 +457,7 @@ function isImageGalleryOwnerSession() {
 function ensureSessionVisibleTab() {
     if (isAdminSession()) return;
     const activePanel = document.querySelector('.swarm-tab-panel.active');
-    const adminPanelIds = new Set(['diagnostics-tab', 'intel-tab', 'image-gallery-tab']);
+    const adminPanelIds = new Set(['diagnostics-tab', 'accounts-tab', 'intel-tab', 'image-gallery-tab']);
     if (activePanel && adminPanelIds.has(activePanel.id)) {
         activateSwarmTab('overview-tab');
         return;
@@ -524,6 +529,7 @@ async function refreshPanelAfterModeSwitch() {
     if (isAdminSession()) {
         await Promise.allSettled([
             fetchDiagnostics(),
+            loadSwarmAccountAdmin(),
             loadDbSchemas(),
             loadImageGalleryAdmin(),
             loadEventFeedHistory(),
@@ -1017,6 +1023,12 @@ function renderSectionHero(target = getActiveTabId()) {
     } else if (target === 'users-tab') {
         pills.push(`${userDirectoryState.length} public profiles`);
         if (userProfileState.profile?.favorite_bot) pills.push(`Favorite ${userProfileState.profile.favorite_bot}`);
+    } else if (target === 'accounts-tab') {
+        const rows = Array.isArray(swarmAccountAdminState?.payload?.users) ? swarmAccountAdminState.payload.users : [];
+        const verifiedCount = rows.filter(row => row.email_verified_at).length;
+        pills.push(`${rows.length} accounts loaded`);
+        pills.push(`${verifiedCount} verified emails`);
+        pills.push(`${rows.filter(row => row.email && !row.email_verified_at).length} pending emails`);
     } else if (target === 'profile-tab') {
         const profile = userProfileState.profile || {};
         pills.push(profile.public_profile === false ? 'Private card' : 'Public card');
@@ -1369,6 +1381,7 @@ async function startPanelApplication() {
         loadPanelPreferences();
         loadUserDirectory();
         if (isAdminSession()) {
+            loadSwarmAccountAdmin();
             loadDbSchemas();
             loadImageGalleryAdmin();
             loadEventFeedHistory();
@@ -1387,6 +1400,7 @@ async function startPanelApplication() {
     loadPanelPreferences();
     loadUserDirectory();
     if (isAdminSession()) {
+        loadSwarmAccountAdmin();
         loadDbSchemas();
         loadImageGalleryAdmin();
         loadEventFeedHistory();
@@ -4595,10 +4609,187 @@ async function sendPanelAction(action) {
 // ================================
 let dbSchemas = [];
 let imageGalleryTables = [];
+let swarmAccountAdminState = {
+    payload: null,
+    filters: { query: '', emailState: 'all', visibility: 'all', sort: 'newest' },
+};
 let imageGalleryAdminState = {
     payload: null,
     filters: { query: '', scope: 'all', mediaStatus: 'all', sort: 'newest' },
 };
+
+function getSwarmAccountLimit() {
+    const raw = Number(document.getElementById('swarm-accounts-limit-select')?.value || 100);
+    return Math.max(1, Math.min(raw || 100, 200));
+}
+
+function currentSwarmAccountFilters() {
+    return {
+        query: String(document.getElementById('swarm-accounts-search')?.value || '').trim().toLowerCase(),
+        emailState: document.getElementById('swarm-accounts-email-filter')?.value || 'all',
+        visibility: document.getElementById('swarm-accounts-visibility-filter')?.value || 'all',
+        sort: document.getElementById('swarm-accounts-sort-select')?.value || 'newest',
+    };
+}
+
+function swarmAccountDateValue(row, key = 'created_at') {
+    const value = row?.[key] || row?.updated_at || row?.created_at || '';
+    const time = Date.parse(value);
+    return Number.isFinite(time) ? time : 0;
+}
+
+function sortSwarmAccountRows(rows, sort) {
+    const sorted = [...rows];
+    if (sort === 'oldest') {
+        sorted.sort((a, b) => swarmAccountDateValue(a, 'created_at') - swarmAccountDateValue(b, 'created_at'));
+    } else if (sort === 'recent-login') {
+        sorted.sort((a, b) => swarmAccountDateValue(b, 'last_login_at') - swarmAccountDateValue(a, 'last_login_at'));
+    } else if (sort === 'email') {
+        const score = (row) => {
+            if (row?.email_verified_at) return 2;
+            if (row?.email) return 1;
+            return 0;
+        };
+        sorted.sort((a, b) => score(b) - score(a) || swarmAccountDateValue(b, 'updated_at') - swarmAccountDateValue(a, 'updated_at'));
+    } else {
+        sorted.sort((a, b) => swarmAccountDateValue(b, 'updated_at') - swarmAccountDateValue(a, 'updated_at'));
+    }
+    return sorted;
+}
+
+function setSwarmAccountLoading(isLoading) {
+    const tab = document.getElementById('accounts-tab');
+    const refresh = document.getElementById('refresh-swarm-accounts-admin');
+    if (tab) tab.classList.toggle('gallery-admin-loading', Boolean(isLoading));
+    if (refresh) refresh.disabled = Boolean(isLoading);
+}
+
+function renderSwarmAccountAdmin() {
+    const payload = swarmAccountAdminState.payload || {};
+    const filters = currentSwarmAccountFilters();
+    swarmAccountAdminState.filters = filters;
+
+    const summary = document.getElementById('swarm-accounts-summary');
+    const body = document.getElementById('swarm-accounts-body');
+    if (!summary || !body) return;
+
+    const totals = payload.summary || {};
+    const query = filters.query;
+    const matchesQuery = (row) => !query || gallerySearchText(
+        row?.id,
+        row?.username,
+        row?.display_name,
+        row?.guild_id,
+        row?.email,
+        row?.server_name,
+    ).includes(query);
+    const matchesEmailState = (row) => {
+        if (filters.emailState === 'verified') return Boolean(row?.email_verified_at);
+        if (filters.emailState === 'pending') return Boolean(row?.email) && !row?.email_verified_at;
+        if (filters.emailState === 'missing') return !row?.email;
+        return true;
+    };
+    const matchesVisibility = (row) => {
+        if (filters.visibility === 'public') return Boolean(row?.public_profile);
+        if (filters.visibility === 'private') return !row?.public_profile;
+        return true;
+    };
+
+    const rows = sortSwarmAccountRows(
+        (payload.users || []).filter(row => matchesQuery(row) && matchesEmailState(row) && matchesVisibility(row)),
+        filters.sort,
+    );
+
+    summary.innerHTML = [
+        ['Accounts', `${rows.length}/${totals.total_accounts ?? (payload.users || []).length}`],
+        ['Emails', totals.accounts_with_email ?? (payload.users || []).filter(row => row.email).length],
+        ['Verified', totals.verified_emails ?? (payload.users || []).filter(row => row.email_verified_at).length],
+        ['Pending', totals.pending_emails ?? (payload.users || []).filter(row => row.email && !row.email_verified_at).length],
+        ['Public', totals.public_profiles ?? (payload.users || []).filter(row => row.public_profile).length],
+    ].map(([label, value]) => `<div class="diagnostic-item gallery-summary-card"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(String(value))}</span></div>`).join('');
+
+    body.innerHTML = rows.length ? rows.map(account => `
+        <tr>
+            ${galleryTd('ID', escapeHtml(account.id))}
+            ${galleryTd('Account', `${escapeHtml(account.display_name || account.username)}<div class="muted">@${escapeHtml(account.username || '')}</div>`)}
+            ${galleryTd('Login Key', `${escapeHtml(account.guild_id || '')}<div class="muted">username + guild ID</div>`)}
+            ${galleryTd('Email', `${escapeHtml(account.email || 'No email')}<div class="muted">${account.email_verified_at ? 'verified' : account.email ? 'pending' : 'no email'}</div>`)}
+            ${galleryTd('Profile', `
+                <div>${account.public_profile ? 'public' : 'private'} profile</div>
+                <div class="muted">${escapeHtml(account.server_name || 'No server name')}</div>
+                <div class="muted">${escapeHtml(account.favorite_bot || 'No favorite bot')}</div>
+            `)}
+            ${galleryTd('Activity', `
+                <div>Created ${escapeHtml(account.created_at || 'Unknown')}</div>
+                <div class="muted">Last login ${escapeHtml(account.last_login_at || 'Never')}</div>
+            `)}
+            ${galleryTd('Actions', `
+                <button class="tbl-btn" data-swarm-account-edit-username="${escapeHtml(account.id)}" data-swarm-account-current-username="${escapeHtml(account.username || '')}">Edit Username</button>
+                <button class="tbl-btn" data-swarm-account-edit-display="${escapeHtml(account.id)}" data-swarm-account-current-display="${escapeHtml(account.display_name || '')}">Edit Display</button>
+                <button class="tbl-btn" data-swarm-account-edit-email="${escapeHtml(account.id)}" data-swarm-account-current-email="${escapeHtml(account.email || '')}">Edit Email</button>
+                <button class="tbl-btn" data-swarm-account-edit-server="${escapeHtml(account.id)}" data-swarm-account-current-server="${escapeHtml(account.server_name || '')}">Edit Server</button>
+                <button class="tbl-btn" data-swarm-account-edit-guild="${escapeHtml(account.id)}" data-swarm-account-current-guild="${escapeHtml(account.guild_id || '')}">Change Guild ID</button>
+                <button class="tbl-btn" data-swarm-account-resend-email="${escapeHtml(account.id)}" ${account.email && !account.email_verified_at ? '' : 'disabled'}>Resend Email</button>
+                <button class="tbl-btn" data-swarm-account-email-verified="${escapeHtml(account.id)}" data-swarm-account-verified="${account.email_verified_at ? '0' : '1'}">${account.email_verified_at ? 'Unverify Email' : 'Verify Email'}</button>
+                <button class="tbl-btn" data-swarm-account-public="${escapeHtml(account.id)}" data-swarm-account-public-next="${account.public_profile ? '0' : '1'}">${account.public_profile ? 'Make Private' : 'Make Public'}</button>
+                <button class="tbl-btn tbl-btn-stop" data-swarm-account-delete="${escapeHtml(account.id)}">Delete Account</button>
+            `)}
+        </tr>
+    `).join('') : '<tr><td colspan="7">No SwarmPanel accounts match this view.</td></tr>';
+    renderSectionHero();
+}
+
+async function loadSwarmAccountAdmin() {
+    if (!isAdminSession()) return;
+    const status = document.getElementById('swarm-accounts-admin-status');
+    const body = document.getElementById('swarm-accounts-body');
+    if (!body) return;
+    setSwarmAccountLoading(true);
+    if (status) status.textContent = 'Loading SwarmPanel accounts...';
+    try {
+        const res = await fetch(`${API_BASE}/swarm-accounts/admin?limit=${getSwarmAccountLimit()}`);
+        if (handle401(res)) return;
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || 'SwarmPanel account request failed');
+        swarmAccountAdminState.payload = data.data || {};
+        renderSwarmAccountAdmin();
+        if (status) status.textContent = 'SwarmPanel accounts loaded.';
+    } catch (err) {
+        if (status) status.textContent = `SwarmPanel Accounts Error: ${err instanceof Error ? err.message : String(err)}`;
+    } finally {
+        setSwarmAccountLoading(false);
+        renderSectionHero();
+    }
+}
+
+async function postSwarmAccountAdminAction(path, payload) {
+    if (!isAdminSession()) return false;
+    const status = document.getElementById('swarm-accounts-admin-status');
+    const res = await fetch(`${API_BASE}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    if (handle401(res)) return false;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || 'SwarmPanel account action failed');
+    if (data.ok === false && !data.already_verified) {
+        throw new Error(data.detail || 'SwarmPanel account action failed');
+    }
+    await loadSwarmAccountAdmin();
+    if (status) {
+        if (path.endsWith('/resend-verification')) {
+            status.textContent = data.already_verified
+                ? 'That email is already verified.'
+                : data.email_verification_sent
+                    ? 'Verification email sent.'
+                    : 'Verification email could not be sent.';
+        } else {
+            status.textContent = 'SwarmPanel account updated.';
+        }
+    }
+    return true;
+}
 
 function galleryFormatBytes(bytes) {
     const value = Number(bytes || 0);
@@ -5154,6 +5345,31 @@ document.addEventListener('DOMContentLoaded', () => {
             if (event.key === 'Enter') loadUserDirectory();
         });
 
+    document.getElementById('refresh-swarm-accounts-admin')
+        ?.addEventListener('click', loadSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-limit-select')
+        ?.addEventListener('change', loadSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-search')
+        ?.addEventListener('input', renderSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-email-filter')
+        ?.addEventListener('change', renderSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-visibility-filter')
+        ?.addEventListener('change', renderSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-sort-select')
+        ?.addEventListener('change', renderSwarmAccountAdmin);
+    document.getElementById('swarm-accounts-clear-filters')
+        ?.addEventListener('click', () => {
+            const search = document.getElementById('swarm-accounts-search');
+            const emailFilter = document.getElementById('swarm-accounts-email-filter');
+            const visibility = document.getElementById('swarm-accounts-visibility-filter');
+            const sort = document.getElementById('swarm-accounts-sort-select');
+            if (search) search.value = '';
+            if (emailFilter) emailFilter.value = 'all';
+            if (visibility) visibility.value = 'all';
+            if (sort) sort.value = 'newest';
+            renderSwarmAccountAdmin();
+        });
+
     [
         'profile-display-name',
         'profile-avatar-url',
@@ -5284,6 +5500,85 @@ document.addEventListener('DOMContentLoaded', () => {
             if (mediaStatus) mediaStatus.value = 'all';
             if (sort) sort.value = 'newest';
             renderImageGalleryAdmin();
+        });
+
+    document.getElementById('accounts-tab')
+        ?.addEventListener('click', async (event) => {
+            if (!isAdminSession()) return;
+            const deleteAccount = event.target.closest('[data-swarm-account-delete]');
+            const editUsername = event.target.closest('[data-swarm-account-edit-username]');
+            const editDisplay = event.target.closest('[data-swarm-account-edit-display]');
+            const editEmail = event.target.closest('[data-swarm-account-edit-email]');
+            const editServer = event.target.closest('[data-swarm-account-edit-server]');
+            const editGuild = event.target.closest('[data-swarm-account-edit-guild]');
+            const resendEmail = event.target.closest('[data-swarm-account-resend-email]');
+            const emailVerified = event.target.closest('[data-swarm-account-email-verified]');
+            const publicProfile = event.target.closest('[data-swarm-account-public]');
+            try {
+                if (deleteAccount) {
+                    const accountId = deleteAccount.dataset.swarmAccountDelete;
+                    if (confirm(`Delete SwarmPanel account ${accountId}? This removes the login row and guild lock.`)) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/delete', { account_id: Number(accountId) });
+                    }
+                }
+                if (editUsername) {
+                    const accountId = editUsername.dataset.swarmAccountEditUsername;
+                    const current = editUsername.dataset.swarmAccountCurrentUsername || '';
+                    const username = prompt(`Set SwarmPanel username for account ${accountId}.`, current);
+                    if (username) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), username: username.trim() });
+                    }
+                }
+                if (editDisplay) {
+                    const accountId = editDisplay.dataset.swarmAccountEditDisplay;
+                    const current = editDisplay.dataset.swarmAccountCurrentDisplay || '';
+                    const displayName = prompt(`Set display name for SwarmPanel account ${accountId}. Leave blank to clear it.`, current);
+                    if (displayName !== null) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), display_name: displayName.trim() || null });
+                    }
+                }
+                if (editEmail) {
+                    const accountId = editEmail.dataset.swarmAccountEditEmail;
+                    const current = editEmail.dataset.swarmAccountCurrentEmail || '';
+                    const email = prompt(`Set email for SwarmPanel account ${accountId}. Leave blank to clear it.`, current);
+                    if (email !== null) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), email: email.trim() || null });
+                    }
+                }
+                if (editServer) {
+                    const accountId = editServer.dataset.swarmAccountEditServer;
+                    const current = editServer.dataset.swarmAccountCurrentServer || '';
+                    const serverName = prompt(`Set server name for SwarmPanel account ${accountId}. Leave blank to clear it.`, current);
+                    if (serverName !== null) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), server_name: serverName.trim() || null });
+                    }
+                }
+                if (editGuild) {
+                    const accountId = editGuild.dataset.swarmAccountEditGuild;
+                    const current = editGuild.dataset.swarmAccountCurrentGuild || '';
+                    const guildId = prompt(`Set the linked guild ID for SwarmPanel account ${accountId}. This is the login key for non-admin accounts.`, current);
+                    if (guildId !== null && guildId.trim()) {
+                        await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), guild_id: guildId.trim() });
+                    }
+                }
+                if (resendEmail) {
+                    const accountId = resendEmail.dataset.swarmAccountResendEmail;
+                    await postSwarmAccountAdminAction('/swarm-accounts/resend-verification', { account_id: Number(accountId) });
+                }
+                if (emailVerified) {
+                    const accountId = emailVerified.dataset.swarmAccountEmailVerified;
+                    const verified = emailVerified.dataset.swarmAccountVerified === '1';
+                    await postSwarmAccountAdminAction('/swarm-accounts/email-verified', { account_id: Number(accountId), verified });
+                }
+                if (publicProfile) {
+                    const accountId = publicProfile.dataset.swarmAccountPublic;
+                    const nextPublic = publicProfile.dataset.swarmAccountPublicNext === '1';
+                    await postSwarmAccountAdminAction('/swarm-accounts/update', { account_id: Number(accountId), public_profile: nextPublic });
+                }
+            } catch (err) {
+                const status = document.getElementById('swarm-accounts-admin-status');
+                if (status) status.textContent = `SwarmPanel Accounts Error: ${err instanceof Error ? err.message : String(err)}`;
+            }
         });
 
     document.getElementById('image-gallery-tab')
@@ -5495,7 +5790,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else if (event.key.toLowerCase() === 'e') {
             event.preventDefault();
             exportDashboardSnapshot();
-        } else if (event.key >= '1' && event.key <= '7') {
+        } else if (event.key >= '1' && event.key <= '8') {
             const tabs = Array.from(document.querySelectorAll('.swarm-tab'));
             const tab = tabs[Number(event.key) - 1];
             if (tab) activateSwarmTab(tab.dataset.tabTarget);

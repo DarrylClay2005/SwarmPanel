@@ -237,6 +237,25 @@ class SessionEmailCodeRequest(BaseModel):
     code: str
 
 
+class SwarmAccountDeleteRequest(BaseModel):
+    account_id: int
+
+
+class SwarmAccountUpdateRequest(BaseModel):
+    account_id: int
+    username: str | None = None
+    guild_id: str | int | None = None
+    email: str | None = None
+    display_name: str | None = None
+    public_profile: bool | None = None
+    server_name: str | None = None
+
+
+class SwarmAccountFlagRequest(BaseModel):
+    account_id: int
+    verified: bool
+
+
 class GalleryUserDeleteRequest(BaseModel):
     user_id: int
 
@@ -1101,6 +1120,70 @@ async def api_user_directory(request: Request):
     query = str(request.query_params.get("q") or "").strip()
     users = await db.search_account_profiles(query, 24)
     return {"ok": True, "query": query, "users": users}
+
+
+@app.get("/api/swarm-accounts/admin")
+async def api_swarm_accounts_admin(request: Request, query: str = "", limit: int = 100):
+    _require_admin_auth(request)
+    try:
+        return {"ok": True, "data": await db.get_account_admin_data(query=query, limit=limit)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        action_logger.error("Failed to fetch SwarmPanel account admin data: %s", exc)
+        raise HTTPException(status_code=503, detail=f"SwarmPanel account database unavailable: {exc}")
+
+
+@app.post("/api/swarm-accounts/update")
+async def api_swarm_accounts_update(request: Request, payload: SwarmAccountUpdateRequest):
+    _require_admin_auth(request)
+    updates = payload.model_dump(exclude={"account_id"}, exclude_unset=True)
+    try:
+        account = await db.update_account_admin(payload.account_id, updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not account:
+        raise HTTPException(status_code=404, detail="SwarmPanel account not found")
+    action_logger.warning("swarm_account_update account_id=%s fields=%s", payload.account_id, sorted(updates))
+    return {"ok": True, "account": account}
+
+
+@app.post("/api/swarm-accounts/email-verified")
+async def api_swarm_accounts_email_verified(request: Request, payload: SwarmAccountFlagRequest):
+    _require_admin_auth(request)
+    account = await db.set_account_email_verified_admin(payload.account_id, payload.verified)
+    if not account:
+        raise HTTPException(status_code=404, detail="SwarmPanel account not found")
+    action_logger.warning("swarm_account_email_verified account_id=%s verified=%s", payload.account_id, payload.verified)
+    return {"ok": True, "account": account}
+
+
+@app.post("/api/swarm-accounts/resend-verification")
+async def api_swarm_accounts_resend_verification(request: Request, payload: SwarmAccountDeleteRequest):
+    _require_admin_auth(request)
+    account = await db.get_account_admin(payload.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="SwarmPanel account not found")
+    if not account.get("email"):
+        raise HTTPException(status_code=400, detail="This SwarmPanel account does not have an email address.")
+    if account.get("email_verified_at"):
+        return {"ok": True, "email_verification_sent": False, "already_verified": True}
+    email_token = _verification_code()
+    account = await db.issue_account_email_verification_token_by_id(payload.account_id, email_token)
+    verification_sent = bool(account and send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token))
+    action_logger.warning("swarm_account_resend_verification account_id=%s sent=%s", payload.account_id, verification_sent)
+    return {"ok": verification_sent, "email_verification_sent": verification_sent, "already_verified": False}
+
+
+@app.post("/api/swarm-accounts/delete")
+async def api_swarm_accounts_delete(request: Request, payload: SwarmAccountDeleteRequest):
+    _require_admin_auth(request)
+    try:
+        await db.delete_account_admin(payload.account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    action_logger.warning("swarm_account_delete account_id=%s", payload.account_id)
+    return {"ok": True}
 
 
 @app.get("/api/health")

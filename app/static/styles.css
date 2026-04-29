@@ -3193,6 +3193,13 @@ body[data-active-tab="diagnostics"] .swarm-section-hero {
     var(--bg-panel);
 }
 
+body[data-active-tab="accounts"] .swarm-section-hero {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(249,226,175,0.14), transparent 30%),
+    radial-gradient(circle at 92% 18%, rgba(137,180,250,0.16), transparent 28%),
+    var(--bg-panel);
+}
+
 body[data-active-tab="invites"] .swarm-section-hero {
   background:
     radial-gradient(circle at 10% 16%, rgba(249,226,175,0.16), transparent 30%),

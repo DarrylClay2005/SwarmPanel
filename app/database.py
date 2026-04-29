@@ -619,7 +619,7 @@ class PanelDatabase:
         elif not isinstance(preferences, dict):
             preferences = {}
         profile["panel_preferences"] = preferences
-        for key in ("created_at", "last_login_at", "updated_at"):
+        for key in ("created_at", "last_login_at", "updated_at", "email_verified_at", "email_verification_sent_at"):
             value = profile.get(key)
             if hasattr(value, "isoformat"):
                 profile[key] = value.isoformat()
@@ -678,6 +678,245 @@ class PanelDatabase:
             (json.dumps(preferences, separators=(",", ":")), username, gid),
         )
         return await self.get_account_profile(username, gid)
+
+    async def get_account_admin(self, account_id: int) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            f"""
+            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at,
+                   display_name, avatar_url, bio, favorite_bot, theme_accent, public_profile,
+                   server_invite_url, server_name, server_icon_url, panel_preferences,
+                   created_at, last_login_at, updated_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE id = %s
+            LIMIT 1
+            """,
+            (_coerce_int(account_id, "account_id"),),
+        )
+        return self._serialize_account_profile(row) if row else None
+
+    async def get_account_admin_data(self, query: str = "", limit: int = 100) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        safe_limit = max(1, min(200, int(limit or 100)))
+        like = f"%{normalized_query}%"
+        summary_row = await self._fetchone(
+            f"""
+            SELECT
+                COUNT(*) AS total_accounts,
+                SUM(CASE WHEN email IS NOT NULL THEN 1 ELSE 0 END) AS accounts_with_email,
+                SUM(CASE WHEN email_verified_at IS NOT NULL THEN 1 ELSE 0 END) AS verified_emails,
+                SUM(CASE WHEN email IS NOT NULL AND email_verified_at IS NULL THEN 1 ELSE 0 END) AS pending_emails,
+                SUM(CASE WHEN public_profile = 1 THEN 1 ELSE 0 END) AS public_profiles
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            """,
+        ) or {}
+        rows = await self._fetchall(
+            f"""
+            SELECT id, username, guild_id, email, email_verified_at, email_verification_sent_at,
+                   display_name, favorite_bot, public_profile, server_name,
+                   created_at, last_login_at, updated_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE (
+                %s = ''
+                OR username LIKE %s
+                OR CAST(guild_id AS CHAR) LIKE %s
+                OR COALESCE(email, '') LIKE %s
+                OR COALESCE(display_name, '') LIKE %s
+                OR COALESCE(server_name, '') LIKE %s
+            )
+            ORDER BY COALESCE(updated_at, created_at) DESC, username ASC
+            LIMIT %s
+            """,
+            (normalized_query, like, like, like, like, like, safe_limit),
+        )
+        return {
+            "summary": {
+                "total_accounts": int(summary_row.get("total_accounts") or 0),
+                "accounts_with_email": int(summary_row.get("accounts_with_email") or 0),
+                "verified_emails": int(summary_row.get("verified_emails") or 0),
+                "pending_emails": int(summary_row.get("pending_emails") or 0),
+                "public_profiles": int(summary_row.get("public_profiles") or 0),
+            },
+            "users": [self._serialize_account_profile(row) for row in rows],
+            "query": normalized_query,
+            "limit": safe_limit,
+        }
+
+    async def update_account_admin(self, account_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
+        safe_account_id = _coerce_int(account_id, "account_id")
+        allowed = {"username", "guild_id", "email", "display_name", "public_profile", "server_name"}
+        cleaned: dict[str, Any] = {}
+        if "username" in updates:
+            cleaned["username"] = _normalize_account_username(updates.get("username"))
+        if "guild_id" in updates:
+            cleaned["guild_id"] = _coerce_int(updates.get("guild_id"), "guild_id")
+        if "email" in updates:
+            email = _normalize_email(updates.get("email"))
+            cleaned["email"] = email
+            cleaned["email_verified_at"] = None
+            cleaned["email_verification_token_hash"] = None
+            cleaned["email_verification_sent_at"] = None
+        if "display_name" in updates:
+            cleaned["display_name"] = str(updates.get("display_name") or "").strip()[:80] or None
+        if "public_profile" in updates:
+            cleaned["public_profile"] = 1 if updates.get("public_profile") else 0
+        if "server_name" in updates:
+            cleaned["server_name"] = str(updates.get("server_name") or "").strip()[:120] or None
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"Unsupported account fields: {', '.join(sorted(unknown))}")
+
+        await self._ensure_connected()
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await asyncio.wait_for(conn.begin(), timeout=15)
+                try:
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        SELECT id, username, guild_id, email
+                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (safe_account_id,),
+                    ), timeout=15)
+                    current = await asyncio.wait_for(cur.fetchone(), timeout=15)
+                    if not current:
+                        raise ValueError("SwarmPanel account not found.")
+
+                    next_username = cleaned.get("username", current["username"])
+                    next_guild_id = cleaned.get("guild_id", current["guild_id"])
+                    next_email = cleaned["email"] if "email" in updates else current.get("email")
+
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        SELECT id, username, guild_id, email
+                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                        WHERE id != %s AND (
+                            username = %s
+                            OR guild_id = %s
+                            OR (%s IS NOT NULL AND email = %s)
+                        )
+                        LIMIT 1
+                        """,
+                        (safe_account_id, next_username, next_guild_id, next_email, next_email),
+                    ), timeout=15)
+                    conflict = await asyncio.wait_for(cur.fetchone(), timeout=15)
+                    if conflict:
+                        if conflict.get("username") == next_username:
+                            raise ValueError("That username is already registered.")
+                        if next_email and conflict.get("email") == next_email:
+                            raise ValueError("That email is already registered.")
+                        raise ValueError("That guild ID is already registered to another account.")
+
+                    if cleaned:
+                        assignments = ", ".join(
+                            f"`{_validate_identifier(key, 'account column')}` = %s" for key in cleaned
+                        )
+                        await asyncio.wait_for(cur.execute(
+                            f"""
+                            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                            SET {assignments}
+                            WHERE id = %s
+                            """,
+                            (*cleaned.values(), safe_account_id),
+                        ), timeout=15)
+
+                    if next_guild_id != current["guild_id"]:
+                        await asyncio.wait_for(cur.execute(
+                            f"DELETE FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` WHERE guild_id = %s",
+                            (current["guild_id"],),
+                        ), timeout=15)
+                        await asyncio.wait_for(cur.execute(
+                            f"""
+                            INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (guild_id, username)
+                            VALUES (%s, %s)
+                            """,
+                            (next_guild_id, next_username),
+                        ), timeout=15)
+                    elif next_username != current["username"]:
+                        await asyncio.wait_for(cur.execute(
+                            f"""
+                            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}`
+                            SET username = %s
+                            WHERE guild_id = %s
+                            """,
+                            (next_username, next_guild_id),
+                        ), timeout=15)
+
+                    await asyncio.wait_for(conn.commit(), timeout=15)
+                except ValueError:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    raise
+                except Exception as exc:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    message = str(exc).lower()
+                    if "duplicate" in message or "1062" in message:
+                        if next_email and "email" in message:
+                            raise ValueError("That email is already registered.") from exc
+                        if "guild" in message:
+                            raise ValueError("That guild ID is already registered to another account.") from exc
+                        raise ValueError("That username is already registered.") from exc
+                    raise
+        return await self.get_account_admin(safe_account_id)
+
+    async def delete_account_admin(self, account_id: int) -> None:
+        safe_account_id = _coerce_int(account_id, "account_id")
+        await self._ensure_connected()
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await asyncio.wait_for(conn.begin(), timeout=15)
+                try:
+                    await asyncio.wait_for(cur.execute(
+                        f"""
+                        SELECT guild_id
+                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                        WHERE id = %s
+                        LIMIT 1
+                        """,
+                        (safe_account_id,),
+                    ), timeout=15)
+                    current = await asyncio.wait_for(cur.fetchone(), timeout=15)
+                    if not current:
+                        raise ValueError("SwarmPanel account not found.")
+                    await asyncio.wait_for(cur.execute(
+                        f"DELETE FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` WHERE id = %s",
+                        (safe_account_id,),
+                    ), timeout=15)
+                    await asyncio.wait_for(cur.execute(
+                        f"DELETE FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` WHERE guild_id = %s",
+                        (current["guild_id"],),
+                    ), timeout=15)
+                    await asyncio.wait_for(conn.commit(), timeout=15)
+                except ValueError:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    raise
+                except Exception:
+                    await asyncio.wait_for(conn.rollback(), timeout=15)
+                    raise
+
+    async def set_account_email_verified_admin(self, account_id: int, verified: bool) -> dict[str, Any] | None:
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email_verified_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END,
+                email_verification_token_hash = CASE WHEN %s THEN NULL ELSE email_verification_token_hash END
+            WHERE id = %s
+            """,
+            (1 if verified else 0, 1 if verified else 0, _coerce_int(account_id, "account_id")),
+        )
+        return await self.get_account_admin(account_id)
+
+    async def issue_account_email_verification_token_by_id(self, account_id: int, token: str) -> dict[str, Any] | None:
+        token_hash = _verification_token_hash(token)
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            SET email_verification_token_hash = %s, email_verification_sent_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND email IS NOT NULL AND email_verified_at IS NULL
+            """,
+            (token_hash, _coerce_int(account_id, "account_id")),
+        )
+        return await self.get_account_admin(account_id)
 
     async def search_account_profiles(self, query: str = "", limit: int = 24) -> list[dict[str, Any]]:
         normalized_query = str(query or "").strip()

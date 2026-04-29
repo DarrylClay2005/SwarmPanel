@@ -94,6 +94,7 @@
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
     <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
     <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
+    <button class="swarm-tab admin-only" data-tab-target="accounts-tab" type="button">Accounts</button>
     <button class="swarm-tab admin-only gallery-owner-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
@@ -344,6 +345,74 @@
           <div id="user-directory-summary" class="user-directory-summary"></div>
           <div id="user-directory-grid" class="user-directory-grid"></div>
         </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="accounts-tab">
+    <section class="panel admin-only">
+      <div class="section-title-row">
+        <div>
+          <h2>SwarmPanel Account Admin</h2>
+          <p class="muted">Admin-only recovery and account management for SwarmPanel logins.</p>
+        </div>
+        <button id="refresh-swarm-accounts-admin" type="button">Refresh Accounts</button>
+      </div>
+      <div class="invite-lockout-message">
+        SwarmPanel accounts do not store their own password hash right now.
+        Sign-in uses <strong>username + linked guild ID</strong>, so the closest recovery control is updating the linked guild ID and email state.
+      </div>
+      <div id="swarm-accounts-admin-status" class="status"></div>
+      <div class="diagnostic-grid" id="swarm-accounts-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="SwarmPanel account controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="swarm-accounts-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="swarm-accounts-search" type="search" placeholder="username, guild, email, server" />
+        </label>
+        <label class="control-field">
+          <span>Email State</span>
+          <select id="swarm-accounts-email-filter">
+            <option value="all">All</option>
+            <option value="verified">Verified</option>
+            <option value="pending">Pending</option>
+            <option value="missing">No Email</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Profile State</span>
+          <select id="swarm-accounts-visibility-filter">
+            <option value="all">All</option>
+            <option value="public">Public</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="swarm-accounts-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="recent-login">Recent Login</option>
+            <option value="email">Email Status</option>
+          </select>
+        </label>
+        <button id="swarm-accounts-clear-filters" type="button">Clear Filters</button>
+      </div>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead>
+            <tr><th>ID</th><th>Account</th><th>Login Key</th><th>Email</th><th>Profile</th><th>Activity</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="swarm-accounts-body"></tbody>
+        </table>
       </div>
     </section>
   </div>
