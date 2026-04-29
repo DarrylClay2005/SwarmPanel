@@ -1,6 +1,6 @@
 {
-  "panel_url": "https://setting-silent-landscape-link.trycloudflare.com",
-  "status": "live",
+  "panel_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8000", "http://localhost:8000", "http://192.168.12.188:8000"],
-  "updated_at": "2026-04-29T11:52:54-05:00"
+  "updated_at": "2026-04-29T13:19:11-05:00"
 }
