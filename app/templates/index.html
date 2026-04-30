@@ -3,13 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>SwarmPanel — Modern command deck</title>
-  <meta name="description" content="A modern live command deck for SwarmPanel diagnostics, controls, invites, users, and intel." />
+  <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=20260430-ux-pass" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260430-dynamic-overlap-v2" />
 </head>
-<body class="{% if not session_site_owner %}non-owner-session{% endif %}{% if not session_admin_mode and session_guild_id %} guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}" data-ui-revamp="2026">
-  <a class="skip-link" href="#overview-tab">Skip to dashboard</a>
+<body class="{% if not session_site_owner %}non-owner-session{% endif %}{% if not session_admin_mode and session_guild_id %} guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
     <h1>SwarmPanel</h1>
     <div class="topbar-actions">
@@ -844,6 +842,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=20260430-ux-pass"></script>
+  <script src="/static/final_app.js?v=20260430-dynamic-overlap-v2"></script>
 </body>
 </html>

@@ -5990,57 +5990,113 @@ setInterval(() => {
 }, 1000);
 
 // =====================================================================
-// 2026 UI/UX Revamp helpers: no API changes, visual state only.
+// 2026 Dynamic Scaling + Overlap Shield — SwarmPanel
+// Runtime-only UI guard. It does not change dashboard APIs, bot controls, auth, or DB logic.
 // =====================================================================
-(function installSwarmPanelUxRevamp() {
-  const ready = () => {
-    if (!document.body || document.body.dataset.uxRevamp === 'ready') return;
-    document.body.dataset.uxRevamp = 'ready';
-    document.body.classList.add('ux-revamp-ready');
+(function installSwarmPanelDynamicScalingShield() {
+    const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const WATCH_SELECTOR = [
+        '.topbar', '.topbar-actions', '.topbar-search', '.topbar-select', '.account-dropdown', '.app-shell',
+        '.swarm-tabs', '.swarm-tab', '.swarm-section', '.swarm-section-hero', '.overview-grid', '.overview-card',
+        '.diagnostic-grid', '.diagnostic-card', '.direct-control-grid', '.control-layout', '.control-grid',
+        '.control-room-layout', '.control-sidebar', '.control-side-card', '.control-context-card', '.control-actions',
+        '.quick-actions', '.card-actions', '.bot-actions', '.np-actions', '.admin-actions', '.form-actions',
+        '.alert-rule-actions', '.user-card-actions', '.invite-actions', '.gallery-admin-actions',
+        '.image-gallery-admin-actions', '.profile-actions', '.appearance-actions', '.remote-actions', '.login-actions',
+        '.cards', '#bot-cards', '#aria-card-container', '#now-playing-cards', '.bot-card', '.np-card',
+        '.worker-diagnostic-grid', '.worker-diagnostic-card', '.swarm-guild-grid', '.swarm-guild-card',
+        '.invite-bot-grid', '.invite-bot-card', '.user-directory-grid', '.user-card', '.appearance-grid',
+        '.appearance-card', '.appearance-preview-card', '.user-profile-grid', '.user-profile-shell',
+        '.user-directory-shell', '.alert-rule-grid', '.alert-rule-card', '.panel-directory-stack', '.table-wrap',
+        '.table-shell', '.log-feed', '.queue-list', '.login-card', '.form-grid', '.field-grid'
+    ].join(',');
 
-    const syncTabs = () => {
-      document.querySelectorAll('.swarm-tab').forEach((tab) => {
-        const active = tab.classList.contains('active');
-        tab.setAttribute('role', 'tab');
-        tab.setAttribute('aria-selected', active ? 'true' : 'false');
-        if (active) tab.setAttribute('aria-current', 'page');
-        else tab.removeAttribute('aria-current');
-      });
-    };
-    document.querySelectorAll('.swarm-tabs').forEach((tabs) => tabs.setAttribute('role', 'tablist'));
-    document.addEventListener('click', (event) => {
-      if (event.target?.closest?.('.swarm-tab')) setTimeout(syncTabs, 35);
-    }, { passive: true });
-    syncTabs();
-    setInterval(syncTabs, 1500);
+    let scheduled = false;
+    let observerReady = false;
 
-    const globalSearch = document.getElementById('global-panel-search');
-    document.addEventListener('keydown', (event) => {
-      const tag = document.activeElement?.tagName?.toLowerCase();
-      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !['input', 'textarea', 'select'].includes(tag)) {
-        if (globalSearch) { event.preventDefault(); globalSearch.focus(); globalSearch.select?.(); }
-      }
-    });
-
-    if ('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      const seen = new WeakSet();
-      const observer = new IntersectionObserver((entries) => {
-        entries.forEach((entry) => {
-          if (!entry.isIntersecting) return;
-          entry.target.classList.add('ux-visible');
-          observer.unobserve(entry.target);
-        });
-      }, { threshold: 0.08, rootMargin: '0px 0px -5% 0px' });
-      const scan = () => document.querySelectorAll('.panel, .overview-card, .bot-card, .np-card, .invite-bot-card, .user-card, .diagnostic-item, .error-entry, .metric-card, .control-side-card').forEach((el) => {
-        if (seen.has(el)) return;
-        seen.add(el);
-        el.classList.add('ux-reveal');
-        observer.observe(el);
-      });
-      scan();
-      new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+    function computeScale() {
+        const width = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
+        const height = Math.max(480, window.innerHeight || document.documentElement.clientHeight || 480);
+        return clamp(Math.min(width / 1440, height / 900) + 0.16, 0.76, 1.06);
     }
-  };
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, { once: true });
-  else ready();
+
+    function classifyViewport() {
+        const width = window.innerWidth || document.documentElement.clientWidth || 0;
+        if (width <= 560) return 'compact';
+        if (width <= 980) return 'narrow';
+        if (width >= 1600) return 'wide';
+        return 'normal';
+    }
+
+    function setScaleVars() {
+        const scale = computeScale();
+        document.documentElement.style.setProperty('--dynamic-ui-scale', scale.toFixed(3));
+        document.body?.setAttribute('data-ui-size', classifyViewport());
+    }
+
+    function visibleElement(el) {
+        if (!el || !(el instanceof HTMLElement)) return false;
+        if (!el.isConnected) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function markOverflow(root) {
+        const scope = root && root.querySelectorAll ? root : document;
+        const nodes = new Set();
+        if (scope instanceof HTMLElement && scope.matches(WATCH_SELECTOR)) nodes.add(scope);
+        scope.querySelectorAll?.(WATCH_SELECTOR).forEach((node) => nodes.add(node));
+        nodes.forEach((el) => {
+            if (!visibleElement(el)) return;
+            const horizontalOverflow = el.scrollWidth > Math.ceil(el.clientWidth + 2);
+            el.classList.toggle('ui-overflow-guard', horizontalOverflow);
+        });
+    }
+
+    function run(root) {
+        scheduled = false;
+        if (!document.body) return;
+        setScaleVars();
+        markOverflow(root || document);
+    }
+
+    function schedule(root) {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => run(root));
+    }
+
+    function boot() {
+        if (!document.body) return;
+        run(document);
+        window.addEventListener('resize', () => schedule(document), { passive: true });
+        window.addEventListener('orientationchange', () => schedule(document), { passive: true });
+        document.addEventListener('transitionend', (event) => schedule(event.target), { passive: true });
+
+        if ('ResizeObserver' in window && !observerReady) {
+            observerReady = true;
+            const resizeObserver = new ResizeObserver((entries) => {
+                for (const entry of entries) schedule(entry.target);
+            });
+            resizeObserver.observe(document.documentElement);
+            resizeObserver.observe(document.body);
+            document.querySelectorAll(WATCH_SELECTOR).forEach((node) => resizeObserver.observe(node));
+            new MutationObserver((mutations) => {
+                for (const mutation of mutations) {
+                    mutation.addedNodes.forEach((node) => {
+                        if (node instanceof HTMLElement) {
+                            if (node.matches(WATCH_SELECTOR)) resizeObserver.observe(node);
+                            node.querySelectorAll?.(WATCH_SELECTOR).forEach((child) => resizeObserver.observe(child));
+                        }
+                    });
+                }
+                schedule(document);
+            }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
+        } else {
+            new MutationObserver(() => schedule(document)).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
+        }
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
+    else boot();
 })();
