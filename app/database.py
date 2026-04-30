@@ -284,7 +284,17 @@ class PanelDatabase:
         )
         try:
             async with conn.cursor() as cur:
-                await cur.execute(f"CREATE DATABASE IF NOT EXISTS `{schema_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                await cur.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.schemata
+                    WHERE schema_name = %s
+                    LIMIT 1
+                    """,
+                    (schema_name,),
+                )
+                if not await cur.fetchone():
+                    await cur.execute(f"CREATE DATABASE `{schema_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
         finally:
             conn.close()
 
@@ -321,55 +331,76 @@ class PanelDatabase:
             raise RuntimeError("Database pool not initialized")
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                try:
+                async def table_exists(schema: str, table: str) -> bool:
                     await asyncio.wait_for(cur.execute(
                         """
-                        CREATE TABLE IF NOT EXISTS `discord_aria`.`aria_interactions` (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            guild_id BIGINT NULL,
-                            channel_id BIGINT NULL,
-                            user_id BIGINT NULL,
-                            user_name VARCHAR(150) NULL,
-                            interaction_type VARCHAR(32) NOT NULL DEFAULT 'chat',
-                            prompt_text TEXT,
-                            response_text TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                        """
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table),
                     ), timeout=15)
+                    return bool(await asyncio.wait_for(cur.fetchone(), timeout=15))
+
+                try:
+                    if not await table_exists("discord_aria", "aria_interactions"):
+                        await asyncio.wait_for(cur.execute(
+                            """
+                            CREATE TABLE `discord_aria`.`aria_interactions` (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                guild_id BIGINT NULL,
+                                channel_id BIGINT NULL,
+                                user_id BIGINT NULL,
+                                user_name VARCHAR(150) NULL,
+                                interaction_type VARCHAR(32) NOT NULL DEFAULT 'chat',
+                                prompt_text TEXT,
+                                response_text TEXT,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                            """
+                        ), timeout=15)
                 except Exception as exc:
                     logger.warning("Could not ensure discord_aria.aria_interactions: %s", exc)
                 try:
-                    await asyncio.wait_for(cur.execute(
-                        f"""
-                        CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            username VARCHAR(80) NOT NULL UNIQUE,
-                            guild_id BIGINT NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            last_login_at TIMESTAMP NULL DEFAULT NULL,
-                            INDEX idx_accountlogins_guild_id (guild_id)
-                        )
-                        """
-                    ), timeout=15)
+                    if not await table_exists(ACCOUNT_LOGIN_SCHEMA, ACCOUNT_LOGIN_TABLE):
+                        await asyncio.wait_for(cur.execute(
+                            f"""
+                            CREATE TABLE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                username VARCHAR(80) NOT NULL UNIQUE,
+                                guild_id BIGINT NOT NULL,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                last_login_at TIMESTAMP NULL DEFAULT NULL,
+                                INDEX idx_accountlogins_guild_id (guild_id)
+                            )
+                            """
+                        ), timeout=15)
                 except Exception as exc:
                     logger.warning("Could not ensure accountlogins.users: %s", exc)
                 try:
-                    await asyncio.wait_for(cur.execute(
-                        f"""
-                        CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (
-                            guild_id BIGINT NOT NULL PRIMARY KEY,
-                            username VARCHAR(80) NOT NULL,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                        """
-                    ), timeout=15)
+                    if not await table_exists(ACCOUNT_LOGIN_SCHEMA, ACCOUNT_GUILD_LOCK_TABLE):
+                        await asyncio.wait_for(cur.execute(
+                            f"""
+                            CREATE TABLE `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (
+                                guild_id BIGINT NOT NULL PRIMARY KEY,
+                                username VARCHAR(80) NOT NULL,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                            """
+                        ), timeout=15)
                     await asyncio.wait_for(cur.execute(
                         f"""
                         INSERT IGNORE INTO `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` (guild_id, username)
-                        SELECT guild_id, MIN(username)
-                        FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
-                        GROUP BY guild_id
+                        SELECT users.guild_id, users.username
+                        FROM (
+                            SELECT guild_id, MIN(username) AS username
+                            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                            GROUP BY guild_id
+                        ) AS users
+                        LEFT JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_GUILD_LOCK_TABLE}` locks
+                          ON locks.guild_id = users.guild_id
+                        WHERE locks.guild_id IS NULL
                         """
                     ), timeout=15)
                 except Exception as exc:
@@ -2068,13 +2099,14 @@ class PanelDatabase:
         table = _validate_identifier(table, "table")
         if schema in SYSTEM_SCHEMAS:
             raise ValueError(f"Refusing operation on system schema: {schema}")
+        safe_limit = max(1, min(int(limit or 100), 500))
 
         await self._ensure_connected()
 
         async with self.pool.acquire() as conn:
             # Use DictCursor so the frontend gets column names alongside the values
             async with conn.cursor(aiomysql.DictCursor) as cur:
-                await cur.execute(f"SELECT * FROM `{schema}`.`{table}` LIMIT %s", (limit,))
+                await cur.execute(f"SELECT * FROM `{schema}`.`{table}` LIMIT %s", (safe_limit,))
                 rows = await cur.fetchall()
                 
                 # Sanitize the data for JSON serialization

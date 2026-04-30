@@ -998,6 +998,11 @@ function safeHexColor(value, fallback = '#89b4fa') {
     return /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : fallback;
 }
 
+function safeClassToken(value, fallback = 'unknown') {
+    const raw = String(value || '').trim().toLowerCase();
+    return /^[a-z0-9_-]+$/.test(raw) ? raw : fallback;
+}
+
 function botMatchesQolFilter(bot) {
     if (!bot) return false;
     if (qolSettingsState.pinnedOnly && !pinnedBotsState.has(bot.key)) return false;
@@ -1761,10 +1766,12 @@ function renderInviteCatalog() {
     grid.innerHTML = bots.map(bot => {
         const permissions = Array.isArray(bot.permissions) ? bot.permissions : [];
         const connected = Boolean(bot.connected_to_session_guild);
-        const inviteUrl = bot.invite_url || '';
+        const inviteUrl = safePublicUrl(bot.invite_url);
+        const iconUrl = safePublicUrl(bot.icon_url);
+        const accent = safeHexColor(bot.accent, '#89b4fa');
         const initial = String(bot.display_name || bot.key || '?').slice(0, 1).toUpperCase();
-        const logo = bot.icon_url
-            ? `<img class="invite-bot-logo-img" src="${escapeHtml(bot.icon_url)}" alt="${escapeHtml(bot.display_name)} logo" loading="lazy" />`
+        const logo = iconUrl
+            ? `<img class="invite-bot-logo-img" src="${escapeHtml(iconUrl)}" alt="${escapeHtml(bot.display_name || bot.key)} logo" loading="lazy" />`
             : `<span>${escapeHtml(initial)}</span>`;
         const action = inviteUrl
             ? `<a class="invite-bot-button" href="${escapeHtml(inviteUrl)}" target="_blank" rel="noopener noreferrer">${connected ? 'Invite Again' : 'Invite Bot'}</a>`
@@ -1775,7 +1782,7 @@ function renderInviteCatalog() {
         const statusClass = connected ? 'invite-bot-status' : 'invite-bot-status invite-bot-status-needed';
 
         return `
-            <article class="invite-bot-card" style="--invite-accent: ${escapeHtml(bot.accent || '#89b4fa')};">
+            <article class="invite-bot-card" style="--invite-accent: ${accent};">
                 <div class="invite-bot-card-head">
                     <div class="invite-bot-logo">${logo}</div>
                     <div class="invite-bot-title">
@@ -2343,8 +2350,9 @@ function renderUserDirectory(users = userDirectoryState) {
         const profile = users[0];
         const activity = profile.activity || {};
         const topTrack = Array.isArray(activity.top_tracks) && activity.top_tracks.length ? activity.top_tracks[0] : null;
+        const accent = safeHexColor(profile.theme_accent, '#89b4fa');
         featured.innerHTML = `
-            <article class="user-directory-feature-card" style="--user-accent: ${escapeHtml(profile.theme_accent || '#89b4fa')};">
+            <article class="user-directory-feature-card" style="--user-accent: ${accent};">
                 <div class="user-directory-feature-card-head">
                     ${renderCircularAvatar(profile, 'user-card-avatar')}
                     <div>
@@ -2374,10 +2382,10 @@ function renderUserDirectory(users = userDirectoryState) {
         const activeSessions = Array.isArray(activity.active_sessions) ? activity.active_sessions : [];
         const serverIcon = safePublicUrl(profile.server_icon_url);
         const inviteUrl = safePublicUrl(profile.server_invite_url);
-        const accent = profile.theme_accent || '#89b4fa';
+        const accent = safeHexColor(profile.theme_accent, '#89b4fa');
         const serverName = profile.server_name || (profile.guild_id ? `Guild ${profile.guild_id}` : 'Linked server');
         return `
-            <article class="user-card" style="--user-accent: ${escapeHtml(accent)};">
+            <article class="user-card" style="--user-accent: ${accent};">
                 <div class="user-card-head">
                     ${renderCircularAvatar(profile)}
                     <div class="user-card-title">
@@ -2915,9 +2923,16 @@ function renderNowPlaying(sessions) {
         const progressPercent = formatProgressPercent(positionSeconds, s.duration_seconds || s.length_seconds || s.track_length_seconds);
         const positionKey = escapeHtml(getSessionRuntimeKey(s));
         const recoverySummary = summarizeRecoveryState(s);
-        const thumb = s.thumbnail || null;
+        const thumb = safePublicUrl(s.thumbnail);
+        const mediaSourceClass = safeClassToken(s.media_source, 'unknown');
+        const botDisplay = escapeHtml(s.bot_display || s.bot_key || 'Unknown bot');
+        const trackTitle = escapeHtml(s.title || 'Unknown Track');
+        const guildLabel = escapeHtml(s.guild_name || s.guild_id || 'Unknown guild');
+        const channelLabel = escapeHtml(s.channel_name || 'Unknown Channel');
+        const filterMode = escapeHtml(s.filter_mode || 'none');
+        const loopMode = escapeHtml(s.loop_mode || 'off');
         const sourceBadge = s.media_source_label
-            ? `<span class="np-stat np-source np-source-${s.media_source || 'unknown'}">${s.media_source_label}</span>`
+            ? `<span class="np-stat np-source np-source-${mediaSourceClass}">${escapeHtml(s.media_source_label)}</span>`
             : '';
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
@@ -2929,10 +2944,10 @@ function renderNowPlaying(sessions) {
         const thumbBg = `linear-gradient(135deg, ${accentColor}33, #101727)`;
 
         return `
-        <div class="np-card" style="--accent: ${accentColor};" data-bot="${s.bot_key}" data-guild="${s.guild_id}">
+        <div class="np-card" style="--accent: ${accentColor};" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}">
             <div class="np-thumb-wrap">
                 ${thumb
-                    ? `<img class="np-thumb-img" src="${thumb}" alt="Track thumbnail" loading="lazy" />`
+                    ? `<img class="np-thumb-img" src="${escapeHtml(thumb)}" alt="${trackTitle} thumbnail" loading="lazy" />`
                     : `<div class="np-thumb-placeholder" style="background: ${thumbBg};">
                            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="${accentColor}" stroke-width="1.5">
                                <path d="M9 18V5l12-2v13"/>
@@ -2945,13 +2960,13 @@ function renderNowPlaying(sessions) {
                 </div>
             </div>
             <div class="np-body">
-                <div class="np-bot-tag" style="color: var(--accent);">${s.bot_display}</div>
-                <div class="np-title" title="${s.title || ''}">${s.title || 'Unknown Track'}</div>
+                <div class="np-bot-tag" style="color: var(--accent);">${botDisplay}</div>
+                <div class="np-title" title="${trackTitle}">${trackTitle}</div>
                 <div class="np-location">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
-                    ${s.guild_name || s.guild_id}
+                    ${guildLabel}
                     <span class="np-dot">·</span>
-                    ${s.channel_name || 'Unknown Channel'}
+                    ${channelLabel}
                 </div>
                 <div class="np-stats-row">
                     <span class="np-stat">
@@ -2959,8 +2974,8 @@ function renderNowPlaying(sessions) {
                         <span data-position-key="${positionKey}">${pos}</span>
                     </span>
                     ${sourceBadge}
-                    ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${s.filter_mode}</span>` : ''}
-                    ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${s.loop_mode}</span>` : ''}
+                    ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${filterMode}</span>` : ''}
+                    ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${loopMode}</span>` : ''}
                     ${s.queue_count > 0 ? `<span class="np-stat">+${s.queue_count} queued</span>` : ''}
                     ${Number(s?.backup_queue_count || 0) > 0 ? `<span class="np-stat np-loop">backup:${Number(s.backup_queue_count)}</span>` : ''}
                 </div>
@@ -2970,22 +2985,22 @@ function renderNowPlaying(sessions) {
                 </div>
                 ${progressPercent !== null ? `<div class="np-progress"><span data-progress-key="${positionKey}" style="width:${progressPercent}%"></span></div>` : ''}
                 <div class="np-controls">
-                    <button class="np-btn" data-action="PAUSE" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Pause">
+                    <button class="np-btn" data-action="PAUSE" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Pause">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                     </button>
-                    <button class="np-btn" data-action="RESUME" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Resume">
+                    <button class="np-btn" data-action="RESUME" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Resume">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21"/></svg>
                     </button>
-                    <button class="np-btn" data-action="SKIP" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Skip">
+                    <button class="np-btn" data-action="SKIP" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Skip">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,4 15,12 5,20"/><rect x="16" y="4" width="3" height="16"/></svg>
                     </button>
-                    <button class="np-btn np-btn-stop" data-action="STOP" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Stop">
+                    <button class="np-btn np-btn-stop" data-action="STOP" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Stop">
                         <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
                     </button>
-                    <button class="np-btn" data-action="SHUFFLE" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Shuffle queue">
+                    <button class="np-btn" data-action="SHUFFLE" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Shuffle queue">
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
                     </button>
-                    <button class="np-btn np-btn-clear" data-action="CLEAR" data-bot="${s.bot_key}" data-guild="${s.guild_id}" title="Clear queue and current track">
+                    <button class="np-btn np-btn-clear" data-action="CLEAR" data-bot="${escapeHtml(s.bot_key)}" data-guild="${escapeHtml(s.guild_id)}" title="Clear queue and current track">
                         <span class="np-btn-label">Clear</span>
                     </button>
                 </div>
@@ -3036,7 +3051,8 @@ function renderBots(bots) {
         card.className = `bot-card${pinned ? ' bot-card-pinned' : ''}`;
         card.style.setProperty('--bot-accent', accent);
 
-        const initial = bot.display_name.charAt(0).toUpperCase();
+        const displayName = String(bot.display_name || bot.key || 'Bot');
+        const initial = displayName.charAt(0).toUpperCase();
         const rawHeartbeatStatus = String(bot.heartbeat_status || 'unknown').toLowerCase();
         const heartbeatStatusLabel = rawHeartbeatStatus === 'healthy' ? 'Healthy'
             : rawHeartbeatStatus === 'online' ? 'Online'
@@ -3052,10 +3068,10 @@ function renderBots(bots) {
                     <span style="color: ${accent};">${initial}</span>
                 </div>
                 <div class="bot-info">
-                    <div class="bot-name">${bot.display_name}</div>
+                    <div class="bot-name">${escapeHtml(displayName)}</div>
                     <div class="bot-status-row">
                         <span class="bot-status-dot" style="background:${statusMeta.color}; box-shadow: 0 0 6px ${statusMeta.color};"></span>
-                        <span class="bot-status-label" style="color:${statusMeta.color};">${statusMeta.label}</span>
+                        <span class="bot-status-label" style="color:${statusMeta.color};">${escapeHtml(statusMeta.label)}</span>
                     </div>
                 </div>
                 <button class="pin-bot-btn" type="button" data-pin-bot="${escapeHtml(bot.key)}" aria-pressed="${pinned ? 'true' : 'false'}">${pinned ? 'Pinned' : 'Pin'}</button>
@@ -3072,9 +3088,9 @@ function renderBots(bots) {
                 </div>
             </div>
             <div class="bot-meta-row">
-                <span class="bot-meta-pill">Heartbeat ${heartbeatLabel}</span>
-                <span class="bot-meta-pill">${heartbeatStatusLabel}</span>
-                ${activeSession ? `<span class="bot-meta-pill">${activeState?.icon || '•'} ${activeState?.label || 'Active'} · <span data-live-position="true" data-base-seconds="${Number(activeSession.position_seconds || 0)}" data-playing="${Boolean(activeSession.is_playing)}">${activePositionText}</span></span>` : ''}
+                <span class="bot-meta-pill">Heartbeat ${escapeHtml(heartbeatLabel)}</span>
+                <span class="bot-meta-pill">${escapeHtml(heartbeatStatusLabel)}</span>
+                ${activeSession ? `<span class="bot-meta-pill">${escapeHtml(activeState?.icon || '•')} ${escapeHtml(activeState?.label || 'Active')} · <span data-live-position="true" data-base-seconds="${Number(activeSession.position_seconds || 0)}" data-playing="${Boolean(activeSession.is_playing)}">${escapeHtml(activePositionText || '0:00')}</span></span>` : ''}
             </div>
             ${bot.kind === 'orchestrator' ? `
             <div class="bot-meta-row" style="margin-top: 10px; flex-direction: column; align-items: stretch; gap: 8px;">
@@ -3096,7 +3112,7 @@ function renderBots(bots) {
             ${bot.kind !== 'orchestrator' ? `
             <div class="bot-actions">
                 <button class="bot-action-btn bot-btn-restart admin-only"
-                    data-action="RESTART" data-bot="${bot.key}" data-guild="0">
+                    data-action="RESTART" data-bot="${escapeHtml(bot.key)}" data-guild="0">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>
                     Restart Node
                 </button>
@@ -3139,29 +3155,30 @@ function renderSessions(sessions) {
         const note = sessionNotesState[getSessionNoteKey(session.bot_key, session.guild_id)] || '';
         const durationLabel = formatDuration(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
         const positionKey = escapeHtml(getSessionRuntimeKey(session));
+        const mediaSourceClass = safeClassToken(session.media_source, 'unknown');
         row.innerHTML = `
-            <td data-label="Bot">${session.bot_display}</td>
-            <td data-label="Guild">${session.guild_name || session.guild_id}</td>
-            <td data-label="Channel">${channelLabel}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${session.home_channel_id}</div>` : ''}</td>
-            <td data-label="Status">${stateMeta.icon} ${stateMeta.label}</td>
-            <td data-label="Track">${trackLabel}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${session.media_source || 'unknown'}">${session.media_source_label}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${durationLabel}</div>` : ''}${note ? `<div class="session-note-chip">${escapeHtml(note.slice(0, 80))}</div>` : ''}</td>
-            <td data-label="Filter">${session.filter_mode || "none"}</td>
-            <td data-label="Loop">${normalizeLoopMode(session.loop_mode)}</td>
+            <td data-label="Bot">${escapeHtml(session.bot_display || session.bot_key || '')}</td>
+            <td data-label="Guild">${escapeHtml(session.guild_name || session.guild_id || '')}</td>
+            <td data-label="Channel">${escapeHtml(channelLabel)}${session.home_channel_id ? `<div class="muted" style="font-size:11px; margin-top:4px;">home:${escapeHtml(session.home_channel_id)}</div>` : ''}</td>
+            <td data-label="Status">${escapeHtml(stateMeta.icon)} ${escapeHtml(stateMeta.label)}</td>
+            <td data-label="Track">${escapeHtml(trackLabel)}${session.media_source_label ? ` <span class="tbl-source-badge tbl-source-${mediaSourceClass}">${escapeHtml(session.media_source_label)}</span>` : ""}${durationLabel !== '0:00' ? `<div class="muted" style="font-size:11px; margin-top:4px;">dur ${escapeHtml(durationLabel)}</div>` : ''}${note ? `<div class="session-note-chip">${escapeHtml(note.slice(0, 80))}</div>` : ''}</td>
+            <td data-label="Filter">${escapeHtml(session.filter_mode || "none")}</td>
+            <td data-label="Loop">${escapeHtml(normalizeLoopMode(session.loop_mode))}</td>
             <td data-label="Queue">${session.queue_count || 0}</td>
             <td data-label="Recovery">${escapeHtml(recoverySummary)}</td>
             <td data-label="Signals">${escapeHtml(signalSummary)}</td>
             <td data-label="Position" data-position-key="${positionKey}">${formatDuration(getDisplayPositionSeconds(session))}</td>
             <td data-label="Actions">
-                <button class="tbl-btn" data-action="PAUSE"  data-bot="${session.bot_key}" data-guild="${session.guild_id}">Pause</button>
-                <button class="tbl-btn" data-action="RESUME" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Resume</button>
-                <button class="tbl-btn" data-action="RECOVER" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Recover</button>
-                <button class="tbl-btn" data-action="SKIP"   data-bot="${session.bot_key}" data-guild="${session.guild_id}">Skip</button>
-                <button class="tbl-btn tbl-btn-stop" data-action="STOP" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Stop</button>
-                <button class="tbl-btn" data-action="SHUFFLE" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Shuffle</button>
-                <button class="tbl-btn" data-action="CLEAR" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Clear Queue + Track</button>
-                <button class="tbl-btn" data-action="LOOP" data-payload="off" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Off</button>
-                <button class="tbl-btn" data-action="LOOP" data-payload="song" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Song</button>
-                <button class="tbl-btn" data-action="LOOP" data-payload="queue" data-bot="${session.bot_key}" data-guild="${session.guild_id}">Loop Queue</button>
+                <button class="tbl-btn" data-action="PAUSE"  data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Pause</button>
+                <button class="tbl-btn" data-action="RESUME" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Resume</button>
+                <button class="tbl-btn" data-action="RECOVER" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Recover</button>
+                <button class="tbl-btn" data-action="SKIP"   data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Skip</button>
+                <button class="tbl-btn tbl-btn-stop" data-action="STOP" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Stop</button>
+                <button class="tbl-btn" data-action="SHUFFLE" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Shuffle</button>
+                <button class="tbl-btn" data-action="CLEAR" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Clear Queue + Track</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="off" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Loop Off</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="song" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Loop Song</button>
+                <button class="tbl-btn" data-action="LOOP" data-payload="queue" data-bot="${escapeHtml(session.bot_key)}" data-guild="${escapeHtml(session.guild_id)}">Loop Queue</button>
             </td>
         `;
         table.appendChild(row);
@@ -3269,10 +3286,10 @@ async function loadBotSelect() {
         updateInviteOnlyMode();
 
         const inventoryOptionsHtml = visibleBots
-            .map(b => `<option value="${b.key}">${b.display_name}</option>`)
+            .map(b => `<option value="${escapeHtml(b.key)}">${escapeHtml(b.display_name || b.key)}</option>`)
             .join('');
         const controlOptionsHtml = botCatalogState
-            .map(b => `<option value="${b.key}">${b.display_name}</option>`)
+            .map(b => `<option value="${escapeHtml(b.key)}">${escapeHtml(b.display_name || b.key)}</option>`)
             .join('');
         sel.innerHTML = inventoryOptionsHtml || '<option value="">No connected bots</option>';
         if (controlSel) controlSel.innerHTML = controlOptionsHtml || '<option value="">No connected music bots</option>';
@@ -3748,7 +3765,7 @@ function populateControlGuilds(options = {}) {
     }
 
     guildSel.innerHTML = guilds
-        .map(guild => `<option value="${guild.id}">${guild.name}</option>`)
+        .map(guild => `<option value="${escapeHtml(guild.id)}">${escapeHtml(guild.name || guild.id)}</option>`)
         .join('');
 
     guildSel.value = getPreferredGuildIdForBot(
@@ -3773,7 +3790,7 @@ function populateControlChannels() {
     const session = botKey && guild ? getBestControlSession(botKey, guild.id) : null;
 
     voiceSel.innerHTML = voiceChannels.length
-        ? voiceChannels.map(channel => `<option value="${channel.id}">${channel.name}</option>`).join('')
+        ? voiceChannels.map(channel => `<option value="${escapeHtml(channel.id)}">${escapeHtml(channel.name || channel.id)}</option>`).join('')
         : '<option value="">No voice channels found</option>';
 
     if (previousVoice && voiceChannels.some(channel => String(channel.id) === previousVoice)) {
@@ -5235,7 +5252,7 @@ async function loadDbSchemas() {
         const data = await res.json();
         dbSchemas = data.schemas || [];
         schemaSel.innerHTML = dbSchemas
-            .map(s => `<option value="${s.schema}">${s.schema}</option>`)
+            .map(s => `<option value="${escapeHtml(s.schema)}">${escapeHtml(s.schema)}</option>`)
             .join('');
         updateTableSelect();
     } catch (err) {
@@ -5251,7 +5268,7 @@ function updateTableSelect() {
     const schemaObj = dbSchemas.find(s => s.schema === schemaSel.value);
     const tables = schemaObj ? schemaObj.tables : [];
     tableSel.innerHTML = tables
-        .map(t => `<option value="${t.table_name}">${t.table_name} (~${t.estimated_rows} rows)</option>`)
+        .map(t => `<option value="${escapeHtml(t.table_name)}">${escapeHtml(t.table_name)} (~${escapeHtml(String(t.estimated_rows ?? 0))} rows)</option>`)
         .join('');
     updateConfirmText();
 }
@@ -5291,9 +5308,9 @@ async function viewTableData() {
         }
 
         const cols = Object.keys(rows[0]);
-        if (head) head.innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
+        if (head) head.innerHTML = `<tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
         if (body) body.innerHTML = rows.map(row =>
-            `<tr>${cols.map(c => `<td>${row[c] ?? ''}</td>`).join('')}</tr>`
+            `<tr>${cols.map(c => `<td>${escapeHtml(row[c] ?? '')}</td>`).join('')}</tr>`
         ).join('');
 
     } catch (err) {
