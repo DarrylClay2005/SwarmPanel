@@ -5988,3 +5988,59 @@ metricsRefreshLoop();
 setInterval(() => {
     renderLivePositionTick();
 }, 1000);
+
+// =====================================================================
+// 2026 UI/UX Revamp helpers: no API changes, visual state only.
+// =====================================================================
+(function installSwarmPanelUxRevamp() {
+  const ready = () => {
+    if (!document.body || document.body.dataset.uxRevamp === 'ready') return;
+    document.body.dataset.uxRevamp = 'ready';
+    document.body.classList.add('ux-revamp-ready');
+
+    const syncTabs = () => {
+      document.querySelectorAll('.swarm-tab').forEach((tab) => {
+        const active = tab.classList.contains('active');
+        tab.setAttribute('role', 'tab');
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        if (active) tab.setAttribute('aria-current', 'page');
+        else tab.removeAttribute('aria-current');
+      });
+    };
+    document.querySelectorAll('.swarm-tabs').forEach((tabs) => tabs.setAttribute('role', 'tablist'));
+    document.addEventListener('click', (event) => {
+      if (event.target?.closest?.('.swarm-tab')) setTimeout(syncTabs, 35);
+    }, { passive: true });
+    syncTabs();
+    setInterval(syncTabs, 1500);
+
+    const globalSearch = document.getElementById('global-panel-search');
+    document.addEventListener('keydown', (event) => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey && !['input', 'textarea', 'select'].includes(tag)) {
+        if (globalSearch) { event.preventDefault(); globalSearch.focus(); globalSearch.select?.(); }
+      }
+    });
+
+    if ('IntersectionObserver' in window && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const seen = new WeakSet();
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add('ux-visible');
+          observer.unobserve(entry.target);
+        });
+      }, { threshold: 0.08, rootMargin: '0px 0px -5% 0px' });
+      const scan = () => document.querySelectorAll('.panel, .overview-card, .bot-card, .np-card, .invite-bot-card, .user-card, .diagnostic-item, .error-entry, .metric-card, .control-side-card').forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        el.classList.add('ux-reveal');
+        observer.observe(el);
+      });
+      scan();
+      new MutationObserver(scan).observe(document.body, { childList: true, subtree: true });
+    }
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', ready, { once: true });
+  else ready();
+})();
