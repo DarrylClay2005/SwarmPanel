@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>SwarmPanel</title>
   <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
-  <link rel="stylesheet" href="/static/styles.css?v=24-owner-lock" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260430-ux-pass" />
 </head>
 <body class="{% if not session_site_owner %}non-owner-session{% endif %}{% if not session_admin_mode and session_guild_id %} guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
   <header class="topbar">
@@ -32,7 +32,9 @@
           <span id="topbar-profile-avatar" class="topbar-profile-avatar">{{ session_username[:1]|upper }}</span>
         </button>
         <div id="account-dropdown" class="account-dropdown" role="menu" hidden>
-          <button type="button" role="menuitem" data-account-tab="users-tab">Profile + Users</button>
+          <button type="button" role="menuitem" data-account-tab="appearance-tab">Panel Appearance</button>
+          <button type="button" role="menuitem" data-account-tab="profile-tab">Profile Settings</button>
+          <button type="button" role="menuitem" data-account-tab="users-tab">User Directory</button>
           <button type="button" role="menuitem" data-account-tab="controls-tab">Controls</button>
         </div>
       </div>
@@ -47,9 +49,19 @@
     <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
     <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
     <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
+    <button class="swarm-tab admin-only" data-tab-target="accounts-tab" type="button">Accounts</button>
     <button class="swarm-tab admin-only gallery-owner-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
     <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
   </nav>
+
+  <section class="panel swarm-section-hero" id="swarm-section-hero">
+    <div class="swarm-section-hero-copy">
+      <p id="swarm-section-eyebrow" class="swarm-section-eyebrow">Overview</p>
+      <h2 id="swarm-section-title">Swarm Command Deck</h2>
+      <p id="swarm-section-description" class="muted">Live command posture, alerting, sessions, and system visibility for the swarm.</p>
+    </div>
+    <div id="swarm-section-meta" class="swarm-section-meta"></div>
+  </section>
 
   <div class="swarm-tab-panel" id="invites-tab">
     <section class="panel deck-panel">
@@ -65,23 +77,29 @@
     </section>
   </div>
 
-  <div class="swarm-tab-panel" id="users-tab">
+  <div class="swarm-tab-panel" id="profile-tab">
     <section class="panel deck-panel">
       <div class="section-title-row">
         <div>
-          <h2>User Profile</h2>
+          <h2>Profile Settings</h2>
           <p class="muted">Build a public server card for the swarm directory.</p>
         </div>
-        <button id="refresh-user-directory" type="button">Refresh Users</button>
       </div>
       <div class="user-profile-shell">
         <aside class="user-profile-preview">
+          <div class="user-profile-banner">
+            <p class="swarm-section-eyebrow">Public Card</p>
+            <h3>Server Identity</h3>
+            <p class="muted">This is how your SwarmPanel account appears in the public directory.</p>
+          </div>
           <div id="user-avatar-preview" class="user-avatar-preview">S</div>
           <div>
             <h3 id="user-profile-preview-name">Swarm User</h3>
             <p id="user-profile-preview-server" class="muted">No server card yet.</p>
           </div>
           <div id="user-profile-preview-chips" class="user-chip-row"></div>
+          <div id="user-profile-preview-stats" class="user-profile-preview-stats"></div>
+          <div id="user-profile-preview-layout" class="user-chip-row"></div>
         </aside>
         <div class="user-profile-editor">
           <div id="user-profile-locked" class="invite-lockout-message" hidden></div>
@@ -131,17 +149,34 @@
             <span>Bio</span>
             <textarea id="profile-bio" maxlength="280" rows="3" placeholder="Short server vibe, music taste, or community note"></textarea>
           </label>
+          <div class="user-profile-grid">
+            <label class="control-field">
+              <span>Current Password</span>
+              <input id="profile-current-password" type="password" autocomplete="current-password" placeholder="Current password or legacy guild ID" />
+            </label>
+            <label class="control-field">
+              <span>New Password</span>
+              <input id="profile-new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+            </label>
+            <label class="control-field">
+              <span>Confirm Password</span>
+              <input id="profile-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat new password" />
+            </label>
+          </div>
           <div class="row">
             <button id="save-user-profile" type="button">Save Profile</button>
             <button id="save-panel-email" type="button">Save Email + Send Code</button>
             <button id="verify-panel-email-code" type="button">Verify Email Code</button>
             <button id="resend-panel-email-verification" type="button" hidden>Resend Email Verification</button>
+            <button id="change-panel-password" type="button">Change Password</button>
             <span id="user-profile-status" class="status"></span>
           </div>
         </div>
       </div>
     </section>
+  </div>
 
+  <div class="swarm-tab-panel" id="appearance-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
@@ -211,25 +246,144 @@
             <option value="reduced">Reduced</option>
           </select>
         </label>
+        <label class="control-field">
+          <span>Profile Layout</span>
+          <select id="panel-profile-layout">
+            <option value="spotlight">Spotlight</option>
+            <option value="studio">Studio</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>User Directory Layout</span>
+          <select id="panel-directory-layout">
+            <option value="grid">Grid</option>
+            <option value="magazine">Magazine</option>
+            <option value="stack">Stack</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Tab Style</span>
+          <select id="panel-tab-style">
+            <option value="pills">Pills</option>
+            <option value="underline">Underline</option>
+            <option value="minimal">Minimal</option>
+          </select>
+        </label>
+      </div>
+      <div class="appearance-preview-card">
+        <div class="appearance-preview-surface">
+          <div class="appearance-preview-head">
+            <span class="appearance-preview-dot"></span>
+            <strong>Live Preview</strong>
+          </div>
+          <div class="appearance-preview-body">
+            <div class="appearance-preview-card-block">
+              <span class="appearance-preview-label">Section</span>
+              <strong id="appearance-preview-title">Overview</strong>
+              <p id="appearance-preview-copy" class="muted">Preview your active color, layout, and tab styling together.</p>
+            </div>
+            <div id="appearance-preview-chips" class="user-chip-row"></div>
+          </div>
+        </div>
       </div>
       <div class="row">
         <button id="save-panel-preferences" type="button">Save Look</button>
         <span id="panel-preferences-status" class="status"></span>
       </div>
     </section>
+  </div>
 
+  <div class="swarm-tab-panel" id="users-tab">
     <section class="panel">
       <div class="section-title-row">
         <div>
           <h2>User Search</h2>
           <p class="muted">Find public swarm users, server cards, and music activity.</p>
         </div>
+        <button id="refresh-user-directory" type="button">Refresh Users</button>
       </div>
       <div class="row user-search-row">
         <input id="user-search-input" type="search" placeholder="Search users, servers, or favorite bots..." />
         <button id="user-search-button" type="button">Search</button>
       </div>
-      <div id="user-directory-grid" class="user-directory-grid"></div>
+      <div class="user-directory-shell">
+        <aside id="user-directory-featured" class="user-directory-featured">
+          <div class="control-context-empty">Run a search or refresh the directory to spotlight a public profile.</div>
+        </aside>
+        <div class="user-directory-main">
+          <div id="user-directory-summary" class="user-directory-summary"></div>
+          <div id="user-directory-grid" class="user-directory-grid"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="accounts-tab">
+    <section class="panel admin-only">
+      <div class="section-title-row">
+        <div>
+          <h2>SwarmPanel Account Admin</h2>
+          <p class="muted">Admin-only recovery and account management for SwarmPanel logins.</p>
+        </div>
+        <button id="refresh-swarm-accounts-admin" type="button">Refresh Accounts</button>
+      </div>
+      <div class="invite-lockout-message">
+        SwarmPanel accounts now use passwords while keeping guild IDs linked to each account.
+        Admins can reset passwords, update linked guild IDs, and manage email verification from here.
+      </div>
+      <div id="swarm-accounts-admin-status" class="status"></div>
+      <div class="diagnostic-grid" id="swarm-accounts-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="SwarmPanel account controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="swarm-accounts-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="swarm-accounts-search" type="search" placeholder="username, guild, email, server" />
+        </label>
+        <label class="control-field">
+          <span>Email State</span>
+          <select id="swarm-accounts-email-filter">
+            <option value="all">All</option>
+            <option value="verified">Verified</option>
+            <option value="pending">Pending</option>
+            <option value="missing">No Email</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Profile State</span>
+          <select id="swarm-accounts-visibility-filter">
+            <option value="all">All</option>
+            <option value="public">Public</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="swarm-accounts-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="recent-login">Recent Login</option>
+            <option value="email">Email Status</option>
+          </select>
+        </label>
+        <button id="swarm-accounts-clear-filters" type="button">Clear Filters</button>
+      </div>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead>
+            <tr><th>ID</th><th>Account</th><th>Login Key</th><th>Email</th><th>Profile</th><th>Activity</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="swarm-accounts-body"></tbody>
+        </table>
+      </div>
     </section>
   </div>
 
@@ -688,6 +842,6 @@
 
   </div>
 </main>
-  <script src="/static/final_app.js?v=23-admin-toggle"></script>
+  <script src="/static/final_app.js?v=20260430-ux-pass"></script>
 </body>
 </html>

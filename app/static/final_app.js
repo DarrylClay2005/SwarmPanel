@@ -64,6 +64,7 @@ let inviteOnlyMode = false;
 let panelAppStarted = false;
 let panelSessionChecked = false;
 let livePositionTickerStarted = false;
+let motionObserver = null;
 const MAX_EVENT_FEED_ENTRIES = 80;
 const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -135,6 +136,66 @@ const TAB_META = {
         description: 'Follow the live event stream and metrics surface without losing the operational context.',
     },
 };
+
+function prefersReducedPanelMotion() {
+    return document.body?.classList.contains('panel-motion-reduced') || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+}
+
+function ensurePanelMotionObserver() {
+    if (motionObserver || prefersReducedPanelMotion() || typeof IntersectionObserver === 'undefined') return motionObserver;
+    motionObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (!entry.isIntersecting) return;
+            entry.target.classList.add('is-visible');
+            motionObserver?.unobserve(entry.target);
+        });
+    }, { threshold: 0.14, rootMargin: '0px 0px -8% 0px' });
+    return motionObserver;
+}
+
+function getPanelMotionTargets(root = document) {
+    if (!root?.querySelectorAll) return [];
+    return root.querySelectorAll([
+        '.swarm-section-hero',
+        '.panel',
+        '.control-side-card',
+        '.overview-card',
+        '.alert-item',
+        '.bot-card',
+        '.np-card',
+        '.invite-bot-card',
+        '.user-card',
+        '.user-directory-feature-card',
+        '.user-directory-summary-card',
+        '.diagnostic-item',
+        '.worker-diagnostic-card',
+        '.swarm-guild-card',
+        '.capability-item',
+        '.gallery-summary-card',
+        '.error-entry',
+    ].join(','));
+}
+
+function hydratePanelMotion(root = document) {
+    const targets = Array.from(getPanelMotionTargets(root));
+    if (!targets.length) return;
+    if (prefersReducedPanelMotion()) {
+        targets.forEach(node => {
+            node.classList.remove('panel-reveal-ready');
+            node.classList.add('is-visible');
+            node.style.removeProperty('--panel-reveal-delay');
+        });
+        return;
+    }
+    const observer = ensurePanelMotionObserver();
+    targets.forEach((node, index) => {
+        if (node.dataset.motionReady === '1') return;
+        node.dataset.motionReady = '1';
+        node.classList.add('panel-reveal-ready');
+        node.style.setProperty('--panel-reveal-delay', `${Math.min(index, 12) * 32}ms`);
+        observer?.observe(node);
+    });
+}
 
 
 function getSessionRuntimeKey(session) {
