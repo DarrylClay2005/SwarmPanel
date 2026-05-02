@@ -1,6 +1,6 @@
 {
-  "panel_url": "https://flyer-sperm-nickel-entitled.trycloudflare.com",
-  "status": "live",
+  "panel_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8000", "http://localhost:8000", "http://192.168.12.188:8000"],
-  "updated_at": "2026-05-01T23:30:03-05:00"
+  "updated_at": "2026-05-02T00:09:04-05:00"
 }
