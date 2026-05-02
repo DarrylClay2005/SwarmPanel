@@ -2937,7 +2937,8 @@ function renderNowPlaying(sessions) {
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
             melodic: '#fab387', nexus: '#f38ba8', rhythm: '#94e2d5',
-            symphony: '#f9e2af', tunestream: '#b4befe'
+            symphony: '#f9e2af', tunestream: '#b4befe',
+            alucard: '#e06c75', sapphire: '#4fc3f7'
         };
         const accentColor = botColors[s.bot_key] || '#cba6f7';
 
@@ -3042,7 +3043,8 @@ function renderBots(bots) {
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
             melodic: '#fab387', nexus: '#f38ba8', rhythm: '#94e2d5',
-            symphony: '#f9e2af', tunestream: '#b4befe', aria: '#cba6f7'
+            symphony: '#f9e2af', tunestream: '#b4befe',
+            alucard: '#e06c75', sapphire: '#4fc3f7', aria: '#cba6f7'
         };
         const accent = botColors[bot.key] || '#89b4fa';
 
