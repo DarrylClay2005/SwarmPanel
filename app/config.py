@@ -66,7 +66,7 @@ def load_settings() -> Settings:
         bot_tokens=tokens,
         cors_allowed_origins=_env_csv("PANEL_CORS_ALLOWED_ORIGINS"),
         api_token_ttl_seconds=int(_env("PANEL_API_TOKEN_TTL_SECONDS", "43200")),
-        pages_public_url=_env("PANEL_PAGES_PUBLIC_URL", "https://darrylclay2005.github.io/SwarmPanel/"),
+        pages_public_url=_env("PANEL_PAGES_PUBLIC_URL", "https://heavenlyxenusvr.github.io/SwarmPanel/"),
         image_gallery_schema=_env("IMAGE_GALLERY_DB_SCHEMA") or _env("GALLERY_DB_SCHEMA", "image_gallery"),
         site_owner_email=(_env("SWARM_PANEL_SITE_OWNER_EMAIL") or _env("IMAGE_GALLERY_OWNER_EMAIL") or "heavenlyxenusvr@icloud.com").lower(),
         smtp_host=_env("PANEL_SMTP_HOST") or _env("SMTP_HOST"),
