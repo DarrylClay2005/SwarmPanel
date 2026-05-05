@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
-  <link rel="stylesheet" href="./app/static/styles.css?v=20260505-panel-refresh" />
+  <link rel="stylesheet" href="./app/static/styles.css?v=20260505-live-audit-v2" />
 </head>
 <body class="non-owner-session">
   <header class="topbar">
@@ -322,6 +322,29 @@
             <option value="minimal">Minimal</option>
           </select>
         </label>
+        <label class="control-field">
+          <span>Surface Opacity</span>
+          <input id="panel-surface-opacity" type="range" min="0.35" max="1" step="0.05" value="0.92" />
+        </label>
+        <label class="control-field">
+          <span>Surface Blur</span>
+          <input id="panel-surface-blur" type="range" min="0" max="36" step="1" value="18" />
+        </label>
+        <label class="control-field">
+          <span>Live Stream Cards</span>
+          <select id="panel-stream-card-style">
+            <option value="editorial">Editorial</option>
+            <option value="compact">Compact</option>
+            <option value="cinematic">Cinematic</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Dashboard Density</span>
+          <select id="panel-dashboard-density">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
       </div>
       <div class="appearance-preview-card">
         <div class="appearance-preview-surface">
@@ -473,28 +496,28 @@
       <div id="alert-center" class="alert-center"></div>
     </section>
 
-    <section class="panel" style="border-color: #cba6f7; background: linear-gradient(180deg, #181825 0%, #11111b 100%);">
+    <section class="panel live-stream-panel">
       <div class="section-title-row">
-        <h2 style="color: #cba6f7; display: flex; align-items: center; gap: 10px;">
-            <span style="display: inline-block; width: 12px; height: 12px; background: #a6e3a1; border-radius: 50%; box-shadow: 0 0 10px #a6e3a1; animation: pulseGlow 1.5s infinite;"></span>
-            🎵 Live Swarm Streams
+        <h2 class="live-panel-title">
+          <span class="live-panel-dot"></span>
+          <span>Live Swarm Streams</span>
         </h2>
-        <span class="muted" id="live-sync-status" style="font-size: 0.9rem; border: 1px solid #313244; padding: 4px 10px; border-radius: 12px; background: #1e1e2e;">Live Sync: 2s</span>
+        <span class="muted live-sync-pill" id="live-sync-status">Live Sync: 2s</span>
       </div>
       <p class="muted">Real-time media feeds across all active worker nodes.</p>
-      <div id="now-playing-cards" class="cards" style="grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; margin-top: 15px;"></div>
+      <div id="now-playing-cards" class="cards live-stream-grid"></div>
     </section>
 
-    <section class="panel">
+    <section class="panel live-dashboard-panel">
       <div class="section-title-row">
         <h2>Live Bot Dashboard</h2>
         <button id="refresh-dashboard" type="button">Refresh</button>
       </div>
       <p class="muted">What each bot is doing right now (status, track, channel, filter, queue).</p>
       <div id="dashboard-meta" class="muted"></div>
-      <h3 style="color: #cba6f7; margin-bottom: 8px; border-bottom: 1px solid #283042; padding-bottom: 5px;">👑 Swarm Orchestrator</h3>
+      <h3 class="live-dashboard-group live-dashboard-group-aria">Swarm Orchestrator</h3>
       <div id="aria-card-container" class="cards" style="margin-bottom: 25px;"></div>
-      <h3 style="color: #89b4fa; margin-bottom: 8px; border-bottom: 1px solid #283042; padding-bottom: 5px;">🎶 Swarm Worker Nodes</h3>
+      <h3 class="live-dashboard-group live-dashboard-group-workers">Swarm Worker Nodes</h3>
       <div id="bot-cards" class="cards"></div>
       <div class="table-wrap">
         <table class="sessions-table">
@@ -899,6 +922,6 @@
   <script>
     window.SWARM_PANEL_REMOTE_MODE = true;
   </script>
-  <script src="./app/static/final_app.js?v=23-admin-toggle"></script>
+  <script src="./app/static/final_app.js?v=20260505-live-audit-v2"></script>
 </body>
 </html>

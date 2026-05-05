@@ -36,6 +36,7 @@ let eventFeedEntries = [];
 let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
 let eventFeedPollTimer = null;
+let eventFeedHeartbeatTimer = null;
 let eventFeedConnectionState = 'offline';
 let eventFeedHistoryLoaded = false;
 let systemDiagnosticsState = null;
@@ -71,6 +72,8 @@ let livePositionTickerStarted = false;
 let motionObserver = null;
 const MAX_EVENT_FEED_ENTRIES = 80;
 const EVENT_FEED_POLL_INTERVAL_MS = 8000;
+const DASHBOARD_FALLBACK_ONLINE_INTERVAL_MS = 90000;
+const EVENT_FEED_HEARTBEAT_MS = 20000;
 const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const centralTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -88,6 +91,10 @@ const DEFAULT_PANEL_PREFERENCES = {
     profile_layout: 'spotlight',
     directory_layout: 'grid',
     tab_style: 'pills',
+    surface_opacity: 0.92,
+    surface_blur: 18,
+    stream_card_style: 'editorial',
+    dashboard_density: 'comfortable',
 };
 let swarmAccountAdminLoaded = false;
 let imageGalleryAdminLoaded = false;
@@ -1197,7 +1204,7 @@ function renderAppearancePreview(preferences = panelPreferencesState) {
     const copy = document.getElementById('appearance-preview-copy');
     const chips = document.getElementById('appearance-preview-chips');
     if (title) title.textContent = `${prefs.layout_mode[0].toUpperCase()}${prefs.layout_mode.slice(1)} layout`;
-    if (copy) copy.textContent = `Accent ${prefs.accent_color}, ${prefs.tab_style} tabs, ${prefs.profile_layout} profile cards, ${prefs.directory_layout} directory.`;
+    if (copy) copy.textContent = `${prefs.stream_card_style} live cards, ${prefs.dashboard_density} dashboard, ${Math.round(prefs.surface_opacity * 100)}% surface opacity, ${prefs.surface_blur}px blur.`;
     if (chips) {
         chips.innerHTML = [
             `Tabs ${prefs.tab_style}`,
@@ -1205,6 +1212,8 @@ function renderAppearancePreview(preferences = panelPreferencesState) {
             `Directory ${prefs.directory_layout}`,
             `Density ${prefs.density}`,
             `Motion ${prefs.motion}`,
+            `Live ${prefs.stream_card_style}`,
+            `Glass ${Math.round(prefs.surface_opacity * 100)}%`,
         ].map(item => `<span>${escapeHtml(item)}</span>`).join('');
     }
 }
@@ -1873,6 +1882,10 @@ function normalizePanelPreferences(preferences = {}) {
         profile_layout: pick(String(merged.profile_layout || ''), ['spotlight', 'studio', 'compact'], 'spotlight'),
         directory_layout: pick(String(merged.directory_layout || ''), ['grid', 'magazine', 'stack'], 'grid'),
         tab_style: pick(String(merged.tab_style || ''), ['pills', 'underline', 'minimal'], 'pills'),
+        surface_opacity: Math.max(0.35, Math.min(1, Number(merged.surface_opacity || DEFAULT_PANEL_PREFERENCES.surface_opacity))),
+        surface_blur: Math.max(0, Math.min(36, Number(merged.surface_blur || DEFAULT_PANEL_PREFERENCES.surface_blur))),
+        stream_card_style: pick(String(merged.stream_card_style || ''), ['editorial', 'compact', 'cinematic'], 'editorial'),
+        dashboard_density: pick(String(merged.dashboard_density || ''), ['comfortable', 'compact'], 'comfortable'),
     };
 }
 
@@ -1884,6 +1897,8 @@ function applyPanelPreferences(preferences = panelPreferencesState) {
     root.style.setProperty('--purple', prefs.accent_color);
     root.style.setProperty('--custom-bg-color', prefs.background_color);
     root.style.setProperty('--custom-bg-image', prefs.background_image_url ? `url("${prefs.background_image_url.replaceAll('"', '%22')}")` : 'none');
+    root.style.setProperty('--panel-surface-alpha', String(prefs.surface_opacity));
+    root.style.setProperty('--panel-surface-blur', `${prefs.surface_blur}px`);
 
     const body = document.body;
     const managedClasses = [
@@ -1896,6 +1911,8 @@ function applyPanelPreferences(preferences = panelPreferencesState) {
         'panel-profile-spotlight', 'panel-profile-studio', 'panel-profile-compact',
         'panel-directory-grid', 'panel-directory-magazine', 'panel-directory-stack',
         'panel-tabs-pills', 'panel-tabs-underline', 'panel-tabs-minimal',
+        'panel-stream-editorial', 'panel-stream-compact', 'panel-stream-cinematic',
+        'panel-dashboard-comfortable', 'panel-dashboard-compact',
     ];
     body.classList.remove(...managedClasses);
     body.classList.add(
@@ -1908,6 +1925,8 @@ function applyPanelPreferences(preferences = panelPreferencesState) {
         `panel-profile-${prefs.profile_layout}`,
         `panel-directory-${prefs.directory_layout}`,
         `panel-tabs-${prefs.tab_style}`,
+        `panel-stream-${prefs.stream_card_style}`,
+        `panel-dashboard-${prefs.dashboard_density}`,
     );
     return prefs;
 }
@@ -1927,6 +1946,10 @@ function renderPanelPreferenceInputs(preferences = panelPreferencesState) {
         'panel-profile-layout': prefs.profile_layout,
         'panel-directory-layout': prefs.directory_layout,
         'panel-tab-style': prefs.tab_style,
+        'panel-surface-opacity': String(prefs.surface_opacity),
+        'panel-surface-blur': String(prefs.surface_blur),
+        'panel-stream-card-style': prefs.stream_card_style,
+        'panel-dashboard-density': prefs.dashboard_density,
     };
     Object.entries(values).forEach(([id, value]) => {
         const element = document.getElementById(id);
@@ -1950,6 +1973,10 @@ function getPanelPreferencesFromInputs() {
         profile_layout: document.getElementById('panel-profile-layout')?.value,
         directory_layout: document.getElementById('panel-directory-layout')?.value,
         tab_style: document.getElementById('panel-tab-style')?.value,
+        surface_opacity: Number(document.getElementById('panel-surface-opacity')?.value || DEFAULT_PANEL_PREFERENCES.surface_opacity),
+        surface_blur: Number(document.getElementById('panel-surface-blur')?.value || DEFAULT_PANEL_PREFERENCES.surface_blur),
+        stream_card_style: document.getElementById('panel-stream-card-style')?.value,
+        dashboard_density: document.getElementById('panel-dashboard-density')?.value,
     });
 }
 
@@ -1974,6 +2001,10 @@ function setPanelPreferenceControlsDisabled(disabled) {
         'panel-profile-layout',
         'panel-directory-layout',
         'panel-tab-style',
+        'panel-surface-opacity',
+        'panel-surface-blur',
+        'panel-stream-card-style',
+        'panel-dashboard-density',
         'save-panel-preferences',
         'reset-panel-preferences',
     ].forEach(id => {
@@ -2505,70 +2536,78 @@ async function loadUserDirectory(query = null) {
 async function fetchDashboard() {
     try {
         const res = await fetch(`${API_BASE}/dashboard`);
-        lastDashboardFetchAt = Date.now();
         if (handle401(res)) return;
         const data = await res.json();
-
-        const bots = data.bots || [];
-        dashboardBotsState = bots;
-        updateInviteOnlyMode();
-
-        renderQolControls();
-        renderOverview(bots, data.generated_at);
-        renderBots(bots);
-
-        const sessionNow = Date.now();
-        const sessionMap = new Map();
-        const rememberSession = (session, fallbackBot = null) => {
-            if (!session) return;
-            const botKey = String(session.bot_key || fallbackBot?.key || '');
-            const guildKey = String(session.guild_id ?? '0');
-            if (!botKey) return;
-            const key = `${botKey}:${guildKey}`;
-            sessionMap.set(key, normalizeLiveSession({
-                ...sessionMap.get(key),
-                ...session,
-                bot_key: botKey,
-                bot_display: session.bot_display || fallbackBot?.display_name || session.bot_name || botKey,
-            }, sessionNow));
-        };
-
-        bots.forEach(bot => {
-            if (Array.isArray(bot.sessions)) {
-                bot.sessions.forEach(session => rememberSession(session, bot));
-            }
-        });
-        if (Array.isArray(data.sessions)) {
-            data.sessions.forEach(session => rememberSession(session, getDashboardBot(session.bot_key) || null));
-        }
-        const allSessions = Array.from(sessionMap.values());
-
-        liveSessionState = allSessions;
-        pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
-        renderSessions(allSessions.filter(session => isRuntimeSession(session)));
-        renderNowPlaying(allSessions);
-        renderAlertCenter();
-        syncControlSelectionsFromDashboard();
-        renderControlContext();
-        renderAriaCommandGuide();
-        renderSelectedBotCapabilities();
-        renderSelectedGuildMatrix();
-        if (isTabActive('controls-tab') && document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
-            fetchSelectedControlState({ silent: true });
-            fetchControlMatrix({ silent: true });
-        }
-
-        const meta = document.getElementById('dashboard-meta');
-        if (meta && data.generated_at) {
-            meta.textContent = `Last updated: ${formatCentralTimestamp(data.generated_at)}`;
-        }
-
-        updateLivePositionCounters();
-        renderSectionHero();
+        applyDashboardData(data);
 
     } catch (err) {
         console.error("❌ Dashboard fetch failed:", err);
     }
+}
+
+function applyDashboardData(data = {}, { fromSocket = false } = {}) {
+    lastDashboardFetchAt = Date.now();
+    const bots = data.bots || [];
+    dashboardBotsState = bots;
+    updateInviteOnlyMode();
+
+    renderQolControls();
+    renderOverview(bots, data.generated_at);
+    renderBots(bots);
+
+    const sessionNow = Date.now();
+    const sessionMap = new Map();
+    const previousSessions = new Map((liveSessionState || []).map(session => [`${session.bot_key}:${session.guild_id}`, session]));
+    const rememberSession = (session, fallbackBot = null) => {
+        if (!session) return;
+        const botKey = String(session.bot_key || fallbackBot?.key || '');
+        const guildKey = String(session.guild_id ?? '0');
+        if (!botKey) return;
+        const key = `${botKey}:${guildKey}`;
+        const existing = sessionMap.get(key) || previousSessions.get(key) || null;
+        sessionMap.set(key, normalizeLiveSession({
+            ...(existing || {}),
+            ...session,
+            bot_key: botKey,
+            bot_display: session.bot_display || fallbackBot?.display_name || existing?.bot_display || session.bot_name || botKey,
+            guild_name: session.guild_name || existing?.guild_name,
+            channel_name: session.channel_name || existing?.channel_name,
+            home_channel_name: session.home_channel_name || existing?.home_channel_name,
+        }, sessionNow));
+    };
+
+    bots.forEach(bot => {
+        if (Array.isArray(bot.sessions)) {
+            bot.sessions.forEach(session => rememberSession(session, bot));
+        }
+    });
+    if (Array.isArray(data.sessions)) {
+        data.sessions.forEach(session => rememberSession(session, getDashboardBot(session.bot_key) || null));
+    }
+    const allSessions = Array.from(sessionMap.values());
+
+    liveSessionState = allSessions;
+    pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
+    renderSessions(allSessions.filter(session => isRuntimeSession(session)));
+    renderNowPlaying(allSessions);
+    renderAlertCenter();
+    syncControlSelectionsFromDashboard();
+    renderControlContext();
+    renderAriaCommandGuide();
+    renderSelectedBotCapabilities();
+    renderSelectedGuildMatrix();
+    if (isTabActive('controls-tab') && document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }
+
+    const meta = document.getElementById('dashboard-meta');
+    if (meta && data.generated_at) {
+        meta.textContent = `${fromSocket ? 'Live pushed' : 'Last updated'} ${formatCentralTimestamp(data.generated_at)}`;
+    }
+
+    updateLivePositionCounters();
+    renderSectionHero();
 }
 
 async function fetchDiagnostics(force = false) {
@@ -2938,11 +2977,11 @@ function summarizeRecoveryState(session) {
     const homeChannel = session?.home_channel_id || session?.saved_home_channel_id || null;
     const recovering = Boolean(session?.recovering || session?.recovery_pending || session?.recovery_state === 'pending');
     const parts = [];
-    if (backupCount > 0) parts.push(`backup:${backupCount}`);
-    if (homeChannel) parts.push('home saved');
-    if (pendingDirect > 0) parts.push(`direct:${pendingDirect}`);
-    if (pendingOverrides > 0) parts.push(`override:${pendingOverrides}`);
-    if (recovering) parts.push('recovering');
+    if (backupCount > 0) parts.push(`${backupCount} backup track${backupCount === 1 ? '' : 's'} ready`);
+    if (homeChannel) parts.push('home anchor saved');
+    if (pendingDirect > 0) parts.push(`${pendingDirect} direct order${pendingDirect === 1 ? '' : 's'} queued`);
+    if (pendingOverrides > 0) parts.push(`${pendingOverrides} override${pendingOverrides === 1 ? '' : 's'} pending`);
+    if (recovering) parts.push('auto-recovery armed');
     return parts.length ? parts.join(' · ') : 'No recovery pressure';
 }
 
@@ -2951,11 +2990,11 @@ function summarizeSessionSignals(session) {
     const queue = Number(session?.queue_count || 0);
     const backup = Number(session?.backup_queue_count || 0);
     const state = describeSessionState(session).key;
-    if (queue > 0) signals.push(`${queue} queued`);
-    if (backup > 0) signals.push(`${backup} backup`);
-    if (session?.loop_mode && session.loop_mode !== 'off') signals.push(`loop:${session.loop_mode}`);
-    if (session?.filter_mode && session.filter_mode !== 'none') signals.push(`fx:${session.filter_mode}`);
-    if (state === 'recovering' || state === 'queued') signals.push('watching auto-restore');
+    if (queue > 0) signals.push(`${queue} in queue`);
+    if (backup > 0) signals.push(`${backup} backed up`);
+    if (session?.loop_mode && session.loop_mode !== 'off') signals.push(`${session.loop_mode} loop`);
+    if (session?.filter_mode && session.filter_mode !== 'none') signals.push(`${session.filter_mode} FX`);
+    if (state === 'recovering' || state === 'queued') signals.push('watching recovery');
     return signals.length ? signals.join(' · ') : 'steady';
 }
 
@@ -3034,9 +3073,9 @@ function renderNowPlaying(sessions) {
                     </span>
                     ${sourceBadge}
                     ${s.filter_mode && s.filter_mode !== 'none' ? `<span class="np-stat np-filter">${filterMode}</span>` : ''}
-                    ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">loop:${loopMode}</span>` : ''}
+                    ${s.loop_mode && s.loop_mode !== 'off' ? `<span class="np-stat np-loop">${loopMode} loop</span>` : ''}
                     ${s.queue_count > 0 ? `<span class="np-stat">+${s.queue_count} queued</span>` : ''}
-                    ${Number(s?.backup_queue_count || 0) > 0 ? `<span class="np-stat np-loop">backup:${Number(s.backup_queue_count)}</span>` : ''}
+                    ${Number(s?.backup_queue_count || 0) > 0 ? `<span class="np-stat np-loop">${Number(s.backup_queue_count)} backup</span>` : ''}
                 </div>
                 <div class="np-stats-row" style="margin-top:6px;">
                     <span class="np-stat" data-position-key="${positionKey}" data-position-full="1">${pos}${durationLabel !== '0:00' ? ` / ${durationLabel}` : ''}</span>
@@ -3097,6 +3136,10 @@ function renderBots(bots) {
         const activePositionText = activeSession
             ? formatDuration(currentLivePositionSeconds(activeSession.position_seconds || 0, Boolean(activeSession.is_playing)))
             : null;
+        const activeTrack = activeSession ? escapeHtml(String(activeSession.title || 'Untitled track')) : '';
+        const activeGuild = activeSession ? escapeHtml(String(activeSession.guild_name || activeSession.guild_id || 'Unknown guild')) : '';
+        const activeChannel = activeSession ? escapeHtml(String(activeSession.channel_name || 'Unknown channel')) : '';
+        const activeRecovery = activeSession ? escapeHtml(summarizeRecoveryState(activeSession)) : '';
 
         const botColors = {
             gws: '#cba6f7', harmonic: '#89b4fa', maestro: '#a6e3a1',
@@ -3152,6 +3195,12 @@ function renderBots(bots) {
                 <span class="bot-meta-pill">${escapeHtml(heartbeatStatusLabel)}</span>
                 ${activeSession ? `<span class="bot-meta-pill">${escapeHtml(activeState?.icon || '•')} ${escapeHtml(activeState?.label || 'Active')} · <span data-live-position="true" data-base-seconds="${Number(activeSession.position_seconds || 0)}" data-playing="${Boolean(activeSession.is_playing)}">${escapeHtml(activePositionText || '0:00')}</span></span>` : ''}
             </div>
+            ${activeSession ? `
+            <div class="bot-live-summary">
+                <div class="bot-live-title" title="${activeTrack}">${activeTrack}</div>
+                <div class="bot-live-meta">${activeGuild} · ${activeChannel}</div>
+                <div class="bot-live-recovery">${activeRecovery}</div>
+            </div>` : ''}
             ${bot.kind === 'orchestrator' ? `
             <div class="bot-meta-row" style="margin-top: 10px; flex-direction: column; align-items: stretch; gap: 8px;">
                 <span class="bot-meta-pill">Interactions ${bot.recent_interaction_count || 0}</span>
@@ -3617,12 +3666,29 @@ function stopEventFeedPolling() {
     eventFeedPollTimer = null;
 }
 
+function startEventFeedHeartbeat() {
+    if (eventFeedHeartbeatTimer) return;
+    eventFeedHeartbeatTimer = setInterval(() => {
+        if (!eventFeedSocket || eventFeedSocket.readyState !== WebSocket.OPEN) return;
+        try {
+            eventFeedSocket.send('ping');
+        } catch (_err) {}
+    }, EVENT_FEED_HEARTBEAT_MS);
+}
+
+function stopEventFeedHeartbeat() {
+    if (!eventFeedHeartbeatTimer) return;
+    clearInterval(eventFeedHeartbeatTimer);
+    eventFeedHeartbeatTimer = null;
+}
+
 function disconnectEventFeed() {
     if (eventFeedReconnectTimer) {
         clearTimeout(eventFeedReconnectTimer);
         eventFeedReconnectTimer = null;
     }
     stopEventFeedPolling();
+    stopEventFeedHeartbeat();
     if (eventFeedSocket) {
         try {
             eventFeedSocket.onclose = null;
@@ -3640,7 +3706,7 @@ function updateLiveSyncStatus() {
     const el = document.getElementById('live-sync-status');
     if (!el) return;
     if (eventFeedConnectionState === 'online') {
-        el.textContent = 'Live Sync: WebSocket';
+        el.textContent = 'Live Sync: WebSocket Live';
         el.style.color = '#a6e3a1';
         el.style.borderColor = '#a6e3a1';
     } else if (eventFeedConnectionState === 'connecting') {
@@ -3686,6 +3752,7 @@ async function connectEventFeed() {
     eventFeedSocket.onopen = () => {
         eventFeedConnectionState = 'online';
         stopEventFeedPolling();
+        startEventFeedHeartbeat();
         if (isTabActive('intel-tab')) {
             loadEventFeedHistory();
         }
@@ -3696,6 +3763,10 @@ async function connectEventFeed() {
     eventFeedSocket.onmessage = (event) => {
         try {
             const payload = JSON.parse(event.data);
+            if (payload?.type === 'dashboard_snapshot' && payload.data) {
+                applyDashboardData(payload.data, { fromSocket: true });
+                return;
+            }
             addEventFeedEntry(payload);
         } catch (err) {
             addEventFeedEntry({
@@ -3710,6 +3781,7 @@ async function connectEventFeed() {
 
     eventFeedSocket.onerror = () => {
         eventFeedConnectionState = 'offline';
+        stopEventFeedHeartbeat();
         startEventFeedPolling();
         renderEventFeed();
         updateLiveSyncStatus();
@@ -3718,6 +3790,7 @@ async function connectEventFeed() {
     eventFeedSocket.onclose = (event) => {
         eventFeedSocket = null;
         eventFeedConnectionState = 'offline';
+        stopEventFeedHeartbeat();
         startEventFeedPolling();
         renderEventFeed();
         updateLiveSyncStatus();
@@ -5627,6 +5700,10 @@ document.addEventListener('DOMContentLoaded', () => {
         'panel-profile-layout',
         'panel-directory-layout',
         'panel-tab-style',
+        'panel-surface-opacity',
+        'panel-surface-blur',
+        'panel-stream-card-style',
+        'panel-dashboard-density',
     ].forEach(id => {
         const eventName = id === 'panel-background-image-url' ? 'input' : 'change';
         document.getElementById(id)?.addEventListener(eventName, () => {
@@ -6051,8 +6128,14 @@ document.addEventListener('DOMContentLoaded', () => {
 // 🔄 AUTO REFRESH
 // ================================
 async function dashboardRefreshLoop() {
-    if (panelAppStarted && !qolSettingsState.refreshPaused && isPanelDocumentVisible()) await fetchDashboard();
-    dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, Math.max(3000, Number(qolSettingsState.refreshIntervalMs || 5000)));
+    const preferredInterval = Math.max(3000, Number(qolSettingsState.refreshIntervalMs || 5000));
+    const onlineInterval = Math.max(DASHBOARD_FALLBACK_ONLINE_INTERVAL_MS, preferredInterval * 6);
+    const nextDelay = eventFeedConnectionState === 'online' ? onlineInterval : preferredInterval;
+    if (panelAppStarted && !qolSettingsState.refreshPaused && isPanelDocumentVisible()) {
+        const shouldFetch = eventFeedConnectionState !== 'online' || (Date.now() - lastDashboardFetchAt) >= onlineInterval;
+        if (shouldFetch) await fetchDashboard();
+    }
+    dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, nextDelay);
 }
 
 async function diagnosticsRefreshLoop() {

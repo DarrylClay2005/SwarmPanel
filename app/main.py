@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 import html
 import json
 import logging
@@ -74,6 +75,8 @@ PANEL_MOTION_MODES = {"standard", "reduced"}
 PANEL_PROFILE_LAYOUT_MODES = {"spotlight", "studio", "compact"}
 PANEL_DIRECTORY_LAYOUT_MODES = {"grid", "magazine", "stack"}
 PANEL_TAB_STYLE_MODES = {"pills", "underline", "minimal"}
+PANEL_STREAM_CARD_MODES = {"editorial", "compact", "cinematic"}
+PANEL_DASHBOARD_DENSITY_MODES = {"comfortable", "compact"}
 DISCORD_INVITE_HOSTS = {
     "discord.gg",
     "www.discord.gg",
@@ -338,6 +341,10 @@ class PanelPreferencesUpdateRequest(BaseModel):
     profile_layout: str | None = None
     directory_layout: str | None = None
     tab_style: str | None = None
+    surface_opacity: float | None = None
+    surface_blur: int | None = None
+    stream_card_style: str | None = None
+    dashboard_density: str | None = None
 
 
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
@@ -635,6 +642,10 @@ def _clean_panel_preferences(payload: PanelPreferencesUpdateRequest) -> dict[str
         "profile_layout": "spotlight",
         "directory_layout": "grid",
         "tab_style": "pills",
+        "surface_opacity": 0.92,
+        "surface_blur": 18,
+        "stream_card_style": "editorial",
+        "dashboard_density": "comfortable",
     }
     if "accent_color" in raw:
         preferences["accent_color"] = _normalize_profile_accent(raw.get("accent_color")) or "#89b4fa"
@@ -660,7 +671,135 @@ def _clean_panel_preferences(payload: PanelPreferencesUpdateRequest) -> dict[str
         preferences["directory_layout"] = _normalize_choice(raw.get("directory_layout"), "Directory layout", PANEL_DIRECTORY_LAYOUT_MODES, "grid")
     if "tab_style" in raw:
         preferences["tab_style"] = _normalize_choice(raw.get("tab_style"), "Tab style", PANEL_TAB_STYLE_MODES, "pills")
+    if "surface_opacity" in raw:
+        try:
+            opacity = float(raw.get("surface_opacity"))
+        except (TypeError, ValueError):
+            raise ValueError("Surface opacity must be a number between 0.35 and 1.0") from None
+        preferences["surface_opacity"] = max(0.35, min(opacity, 1.0))
+    if "surface_blur" in raw:
+        try:
+            blur = int(raw.get("surface_blur"))
+        except (TypeError, ValueError):
+            raise ValueError("Surface blur must be an integer between 0 and 36") from None
+        preferences["surface_blur"] = max(0, min(blur, 36))
+    if "stream_card_style" in raw:
+        preferences["stream_card_style"] = _normalize_choice(raw.get("stream_card_style"), "Stream card style", PANEL_STREAM_CARD_MODES, "editorial")
+    if "dashboard_density" in raw:
+        preferences["dashboard_density"] = _normalize_choice(raw.get("dashboard_density"), "Dashboard density", PANEL_DASHBOARD_DENSITY_MODES, "comfortable")
     return preferences
+
+
+async def _load_dashboard_base_snapshot() -> dict[str, Any]:
+    try:
+        return await db.get_dashboard_data()
+    except Exception as exc:
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "db_error": str(exc),
+            "bots": [
+                {
+                    "key": bot.key,
+                    "display_name": bot.display_name,
+                    "kind": bot.kind,
+                    "schema": bot.db_schema,
+                    "status": "db-unavailable",
+                    "heartbeat_age_seconds": None,
+                    "heartbeat_status": "unknown",
+                    "active_playing_count": 0,
+                    "known_guild_count": 0,
+                    "sessions": [],
+                }
+                for bot in ALL_BOTS
+            ],
+        }
+
+
+def _dashboard_scope_cache_key(auth: dict[str, Any]) -> str:
+    scoped_guild_id = _scoped_guild_id(auth)
+    if scoped_guild_id:
+        return f"guild:{scoped_guild_id}"
+    return "admin" if _is_admin_auth(auth) else f"session:{str(auth.get('username') or auth.get('id') or 'default')}"
+
+
+async def _build_dashboard_payload(auth: dict[str, Any], *, enrich_discord: bool) -> dict[str, Any]:
+    scoped_guild_id = _scoped_guild_id(auth)
+    data = copy.deepcopy(await _load_dashboard_base_snapshot())
+
+    if scoped_guild_id:
+        visible_bot_keys = {bot.key for bot in await _visible_music_bots_for_auth(auth)}
+        scoped_bots = []
+        for bot in data.get("bots", []):
+            if bot.get("kind") != "music" or bot.get("key") not in visible_bot_keys:
+                continue
+            sessions = [
+                session for session in bot.get("sessions", [])
+                if str(session.get("guild_id")) == scoped_guild_id
+            ]
+            bot["sessions"] = sessions
+            bot["known_guild_count"] = 1
+            bot["guild_count"] = 1
+            bot["active_playing_count"] = sum(1 for session in sessions if session.get("is_playing"))
+            scoped_bots.append(bot)
+        data["bots"] = scoped_bots
+
+    flattened_sessions: list[dict[str, Any]] = []
+    seen_session_keys: set[tuple[str, str]] = set()
+    for bot in data.get("bots", []):
+        bot.setdefault("name", bot.get("display_name"))
+        bot.setdefault("guild_count", bot.get("known_guild_count", 0))
+        if enrich_discord:
+            token = settings.bot_tokens.get(bot["key"], "")
+            bot["discord"] = {"token_configured": bool(token)}
+            if token:
+                try:
+                    bot["discord"]["identity"] = await discord_service.fetch_identity(token)
+                except Exception as exc:
+                    bot["discord"]["error"] = str(exc)
+        sessions = bot.get("sessions", [])
+        for session in sessions:
+            session.setdefault("bot_key", bot.get("key"))
+            session.setdefault("bot_name", bot.get("display_name"))
+            session.setdefault("bot_display", bot.get("display_name"))
+            session_key = (str(session.get("bot_key") or bot.get("key")), str(session.get("guild_id") or "0"))
+            if session_key in seen_session_keys:
+                continue
+            seen_session_keys.add(session_key)
+            flattened_sessions.append(session)
+        if not enrich_discord or not sessions:
+            continue
+        token = settings.bot_tokens.get(bot["key"], "")
+        if not token:
+            continue
+        placements = []
+        for session in sessions:
+            guild_id = str(session["guild_id"])
+            if session.get("channel_id"):
+                placements.append((guild_id, str(session["channel_id"])))
+            if session.get("home_channel_id"):
+                placements.append((guild_id, str(session["home_channel_id"])))
+        try:
+            name_map = await discord_service.resolve_guild_channel_names(token, placements)
+            for session in sessions:
+                guild_id = str(session["guild_id"])
+                channel_key = (guild_id, str(session["channel_id"])) if session.get("channel_id") else None
+                home_key = (guild_id, str(session["home_channel_id"])) if session.get("home_channel_id") else None
+
+                channel_names = name_map.get(channel_key) if channel_key else None
+                if channel_names:
+                    session["guild_name"] = channel_names.get("guild_name")
+                    session["channel_name"] = channel_names.get("channel_name")
+
+                home_names = name_map.get(home_key) if home_key else None
+                if home_names:
+                    session["guild_name"] = session.get("guild_name") or home_names.get("guild_name")
+                    session["home_channel_name"] = home_names.get("channel_name")
+        except Exception as exc:
+            bot.setdefault("discord", {})
+            bot["discord"]["name_resolution_error"] = str(exc)
+
+    data["sessions"] = flattened_sessions
+    return data
 
 
 async def _require_bot_guild_access(auth: dict[str, Any], bot_key: str, guild_id: str | int) -> None:
@@ -1400,101 +1539,7 @@ async def list_bots(request: Request):
 @app.get("/api/dashboard")
 async def dashboard_data(request: Request):
     auth = _require_api_auth(request)
-    scoped_guild_id = _scoped_guild_id(auth)
-    try:
-        data = await db.get_dashboard_data()
-    except Exception as exc:
-        data = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "db_error": str(exc),
-            "bots": [
-                {
-                    "key": bot.key,
-                    "display_name": bot.display_name,
-                    "kind": bot.kind,
-                    "schema": bot.db_schema,
-                    "status": "db-unavailable",
-                    "heartbeat_age_seconds": None,
-                    "heartbeat_status": "unknown",
-                    "active_playing_count": 0,
-                    "known_guild_count": 0,
-                    "sessions": [],
-                }
-                for bot in ALL_BOTS
-            ],
-        }
-
-    if scoped_guild_id:
-        visible_bot_keys = {bot.key for bot in await _visible_music_bots_for_auth(auth)}
-        scoped_bots = []
-        for bot in data.get("bots", []):
-            if bot.get("kind") != "music" or bot.get("key") not in visible_bot_keys:
-                continue
-            sessions = [
-                session for session in bot.get("sessions", [])
-                if str(session.get("guild_id")) == scoped_guild_id
-            ]
-            bot["sessions"] = sessions
-            bot["known_guild_count"] = 1
-            bot["guild_count"] = 1
-            bot["active_playing_count"] = sum(1 for session in sessions if session.get("is_playing"))
-            scoped_bots.append(bot)
-        data["bots"] = scoped_bots
-
-    flattened_sessions: list[dict[str, Any]] = []
-    seen_session_keys: set[tuple[str, str]] = set()
-    for bot in data["bots"]:
-        bot.setdefault("name", bot.get("display_name"))
-        bot.setdefault("guild_count", bot.get("known_guild_count", 0))
-        token = settings.bot_tokens.get(bot["key"], "")
-        bot["discord"] = {"token_configured": bool(token)}
-        if not token:
-            continue
-
-        try:
-            bot["discord"]["identity"] = await discord_service.fetch_identity(token)
-        except Exception as exc:
-            bot["discord"]["error"] = str(exc)
-
-        sessions = bot.get("sessions", [])
-        for session in sessions:
-            session.setdefault("bot_key", bot.get("key"))
-            session.setdefault("bot_name", bot.get("display_name"))
-            session_key = (str(session.get("bot_key") or bot.get("key")), str(session.get("guild_id") or "0"))
-            if session_key in seen_session_keys:
-                continue
-            seen_session_keys.add(session_key)
-            flattened_sessions.append(session)
-        if not sessions:
-            continue
-        placements = []
-        for session in sessions:
-            guild_id = str(session["guild_id"])
-            if session.get("channel_id"):
-                placements.append((guild_id, str(session["channel_id"])))
-            if session.get("home_channel_id"):
-                placements.append((guild_id, str(session["home_channel_id"])))
-        try:
-            name_map = await discord_service.resolve_guild_channel_names(token, placements)
-            for session in sessions:
-                guild_id = str(session["guild_id"])
-                channel_key = (guild_id, str(session["channel_id"])) if session.get("channel_id") else None
-                home_key = (guild_id, str(session["home_channel_id"])) if session.get("home_channel_id") else None
-
-                channel_names = name_map.get(channel_key) if channel_key else None
-                if channel_names:
-                    session["guild_name"] = channel_names.get("guild_name")
-                    session["channel_name"] = channel_names.get("channel_name")
-
-                home_names = name_map.get(home_key) if home_key else None
-                if home_names:
-                    session["guild_name"] = session.get("guild_name") or home_names.get("guild_name")
-                    session["home_channel_name"] = home_names.get("channel_name")
-        except Exception as exc:
-            bot["discord"]["name_resolution_error"] = str(exc)
-
-    data["sessions"] = flattened_sessions
-    return data
+    return await _build_dashboard_payload(auth, enrich_discord=True)
 
 
 @app.get("/api/system-diagnostics")
@@ -1964,9 +2009,10 @@ async def api_bot_control_legacy(request: Request, req: BotControlRequest):
 @app.post("/api/bot-control")
 async def api_bot_control_legacy_alt(request: Request, req: BotControlRequest):
     return await api_bot_control(request, req)
-active_connections=[]
+active_connections: list[dict[str, Any]] = []
 bot_health={}
 recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
+dashboard_broadcast_task: asyncio.Task[Any] | None = None
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -1982,26 +2028,69 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=4401)
         return
     await websocket.accept()
-    active_connections.append(websocket)
+    connection = {"websocket": websocket, "auth": auth, "last_dashboard_digest": None}
+    active_connections.append(connection)
+    _ensure_dashboard_broadcast_loop()
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         try:
-            active_connections.remove(websocket)
+            active_connections.remove(connection)
         except ValueError:
             pass
 
+
+def _ensure_dashboard_broadcast_loop() -> None:
+    global dashboard_broadcast_task
+    if dashboard_broadcast_task and not dashboard_broadcast_task.done():
+        return
+    dashboard_broadcast_task = asyncio.create_task(_dashboard_broadcast_loop())
+
+
+async def _dashboard_broadcast_loop() -> None:
+    global dashboard_broadcast_task
+    interval_seconds = max(1.0, float(os.getenv("SWARM_WS_DASHBOARD_INTERVAL_SECONDS", "2") or "2"))
+    try:
+        while active_connections:
+            payload_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+            dead_connections: list[dict[str, Any]] = []
+            for connection in list(active_connections):
+                websocket = connection.get("websocket")
+                auth = connection.get("auth") or {}
+                scope_key = _dashboard_scope_cache_key(auth)
+                if scope_key not in payload_cache:
+                    snapshot = await _build_dashboard_payload(auth, enrich_discord=False)
+                    payload = {"type": "dashboard_snapshot", "data": snapshot}
+                    payload_cache[scope_key] = (json.dumps(payload, sort_keys=True, separators=(",", ":")), payload)
+                digest, payload = payload_cache[scope_key]
+                if connection.get("last_dashboard_digest") == digest:
+                    continue
+                try:
+                    await websocket.send_text(json.dumps(payload))
+                    connection["last_dashboard_digest"] = digest
+                except Exception:
+                    dead_connections.append(connection)
+            for connection in dead_connections:
+                try:
+                    active_connections.remove(connection)
+                except ValueError:
+                    pass
+            await asyncio.sleep(interval_seconds)
+    finally:
+        dashboard_broadcast_task = None
+
 async def broadcast(data: dict):
     dead=[]
-    for ws in list(active_connections):
+    for connection in list(active_connections):
+        ws = connection.get("websocket")
         try:
             await ws.send_text(json.dumps(data))
         except Exception:
-            dead.append(ws)
-    for ws in dead:
+            dead.append(connection)
+    for connection in dead:
         try:
-            active_connections.remove(ws)
+            active_connections.remove(connection)
         except ValueError:
             pass
 
