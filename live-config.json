@@ -1,6 +1,6 @@
 {
-  "panel_url": "https://day-castle-concern-ideas.trycloudflare.com",
-  "status": "live",
+  "panel_url": "",
+  "status": "offline",
   "local_urls": ["http://127.0.0.1:8000", "http://localhost:8000", "http://192.168.12.188:8000"],
-  "updated_at": "2026-05-02T01:32:59-05:00"
+  "updated_at": "2026-05-04T22:49:26-05:00"
 }
