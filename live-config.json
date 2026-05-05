@@ -1,6 +1,6 @@
 {
-  "panel_url": "",
-  "status": "offline",
+  "panel_url": "https://hey-rankings-visibility-ireland.trycloudflare.com",
+  "status": "live",
   "local_urls": ["http://127.0.0.1:8000", "http://localhost:8000", "http://192.168.12.188:8000"],
-  "updated_at": "2026-05-04T23:01:24-05:00"
+  "updated_at": "2026-05-04T23:01:30-05:00"
 }
