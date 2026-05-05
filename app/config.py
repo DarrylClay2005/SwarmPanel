@@ -38,6 +38,7 @@ class Settings:
     session_secret: str
     bot_tokens: dict[str, str]
     cors_allowed_origins: list[str]
+    trusted_hosts: list[str]
     api_token_ttl_seconds: int
     pages_public_url: str
     image_gallery_schema: str
@@ -49,6 +50,7 @@ class Settings:
     smtp_from_email: str
     smtp_use_tls: bool
     shared_music_env_file: str
+    session_https_only: bool
 
 
 def load_settings() -> Settings:
@@ -66,6 +68,7 @@ def load_settings() -> Settings:
         session_secret=session_secret,
         bot_tokens=tokens,
         cors_allowed_origins=_env_csv("PANEL_CORS_ALLOWED_ORIGINS"),
+        trusted_hosts=_env_csv("PANEL_TRUSTED_HOSTS"),
         api_token_ttl_seconds=int(_env("PANEL_API_TOKEN_TTL_SECONDS", "43200")),
         pages_public_url=_env("PANEL_PAGES_PUBLIC_URL", "https://heavenlyxenusvr.github.io/SwarmPanel/"),
         image_gallery_schema=_env("IMAGE_GALLERY_DB_SCHEMA") or _env("GALLERY_DB_SCHEMA", "image_gallery"),
@@ -77,6 +80,7 @@ def load_settings() -> Settings:
         smtp_from_email=_env("PANEL_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("PANEL_SMTP_USERNAME") or _env("SMTP_USERNAME"),
         smtp_use_tls=(_env("PANEL_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
         shared_music_env_file=_env("PANEL_SHARED_MUSIC_ENV_FILE", str(Path(__file__).resolve().parents[2] / "Music" / ".env")),
+        session_https_only=_env_bool("PANEL_SESSION_HTTPS_ONLY", False),
     )
     validate_settings(settings)
     return settings

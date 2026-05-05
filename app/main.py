@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .auth import (
     SESSION_ADMIN_MODE_KEY,
@@ -77,6 +78,7 @@ PANEL_DIRECTORY_LAYOUT_MODES = {"grid", "magazine", "stack"}
 PANEL_TAB_STYLE_MODES = {"pills", "underline", "minimal"}
 PANEL_STREAM_CARD_MODES = {"editorial", "compact", "cinematic"}
 PANEL_DASHBOARD_DENSITY_MODES = {"comfortable", "compact"}
+AUTH_RATE_BUCKETS: dict[str, list[float]] = {}
 DISCORD_INVITE_HOSTS = {
     "discord.gg",
     "www.discord.gg",
@@ -181,6 +183,118 @@ def _image_gallery_verification_url(request: Request, token: str) -> str:
 
 def _verification_code() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else "unknown")
+
+
+def _rate_limit_auth(key: str, *, limit: int, window_seconds: int) -> None:
+    now = datetime.now(timezone.utc).timestamp()
+    bucket = [t for t in AUTH_RATE_BUCKETS.get(key, []) if now - t < window_seconds]
+    if len(bucket) >= limit:
+        raise HTTPException(status_code=429, detail="Too many authentication attempts. Try again later.")
+    bucket.append(now)
+    AUTH_RATE_BUCKETS[key] = bucket
+
+
+def _normalize_origin(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _allowed_browser_origins() -> set[str]:
+    origins = {
+        _normalize_origin(settings.pages_public_url),
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8788",
+        "http://localhost:8788",
+    }
+    origins.update(_normalize_origin(origin) for origin in settings.cors_allowed_origins)
+    return {origin for origin in origins if origin}
+
+
+def _trusted_hosts() -> list[str]:
+    if settings.trusted_hosts:
+        return list(dict.fromkeys(settings.trusted_hosts))
+    hosts = {
+        "localhost",
+        "127.0.0.1",
+        "host.docker.internal",
+        "*.trycloudflare.com",
+        "*.pinggy-free.link",
+        "*.serveousercontent.com",
+        "*.lhr.life",
+    }
+    for origin in _allowed_browser_origins():
+        try:
+            parsed = urlparse(origin)
+        except Exception:
+            continue
+        if parsed.hostname:
+            hosts.add(parsed.hostname)
+    return sorted(hosts)
+
+
+def _request_origin(request: Request) -> str:
+    origin = _normalize_origin(request.headers.get("origin"))
+    if origin:
+        return origin
+    return _normalize_origin(request.headers.get("referer"))
+
+
+def _ensure_allowed_browser_origin(request: Request) -> None:
+    origin = _request_origin(request)
+    if not origin:
+        return
+    current = _normalize_origin(str(request.base_url))
+    if origin == current or origin in _allowed_browser_origins():
+        return
+    raise HTTPException(status_code=403, detail="Blocked cross-origin request.")
+
+
+def _ensure_allowed_websocket_origin(websocket: WebSocket) -> bool:
+    origin = _normalize_origin(websocket.headers.get("origin"))
+    if not origin:
+        return True
+    current = _normalize_origin(str(websocket.base_url))
+    return origin == current or origin in _allowed_browser_origins()
+
+
+def _security_headers(request: Request, response: JSONResponse | HTMLResponse | RedirectResponse) -> None:
+    csp = "; ".join([
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' blob: data: https:",
+        "font-src 'self' data: https://fonts.gstatic.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "script-src 'self' 'unsafe-inline'",
+        "connect-src 'self' https: http: ws: wss:",
+    ])
+    response.headers.setdefault("Content-Security-Policy", csp)
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.url.path in {"/", "/login"} or request.url.path.startswith("/api/session"):
+        response.headers.setdefault("Cache-Control", "no-store")
 
 
 def _wants_json(request: Request) -> bool:
@@ -471,6 +585,7 @@ def _require_guild_scope(auth: dict[str, Any], guild_id: str | int | None) -> No
 
 
 def _set_admin_session(request: Request, username: str) -> None:
+    request.session.clear()
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "admin"
@@ -487,6 +602,7 @@ def _set_account_session(
     admin_mode: bool = False,
     site_owner: bool = False,
 ) -> None:
+    request.session.clear()
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "account"
@@ -925,17 +1041,36 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="SwarmPanel", version="1.0.0", lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_trusted_hosts())
 if settings.cors_allowed_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     )
-app.add_middleware(SessionMiddleware, secret_key=settings.session_secret, max_age=60 * 60 * 12)
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=settings.session_secret,
+    max_age=60 * 60 * 12,
+    same_site="lax",
+    https_only=settings.session_https_only,
+)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+@app.middleware("http")
+async def browser_origin_and_headers(request: Request, call_next):
+    try:
+        if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            _ensure_allowed_browser_origin(request)
+        response = await call_next(request)
+    except HTTPException as exc:
+        response = JSONResponse({"detail": exc.detail or "Request blocked"}, status_code=exc.status_code)
+    _security_headers(request, response)
+    return response
 
 
 def _redirect_login() -> RedirectResponse:
@@ -956,6 +1091,8 @@ async def login_submit(
     password: str = Form(""),
     guild_id: str = Form(""),
 ):
+    ip = _client_ip(request)
+    _rate_limit_auth(f"login-form:{ip}:{str(username or '').strip().lower()[:80]}", limit=12, window_seconds=900)
     auth = await _authenticate_login(username, password, guild_id)
     if auth:
         if auth["role"] == "admin":
@@ -979,6 +1116,8 @@ async def register_submit(
     password: str = Form(...),
     email: str = Form(""),
 ):
+    ip = _client_ip(request)
+    _rate_limit_auth(f"register-form:{ip}", limit=8, window_seconds=3600)
     email_token = _verification_code() if email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
@@ -991,10 +1130,11 @@ async def register_submit(
             status_code=400,
         )
     except Exception as exc:
+        action_logger.warning("SwarmPanel registration failed for %s: %s", username, exc)
         return templates.TemplateResponse(
             request,
             "login.html",
-            {"error": None, "register_error": f"Registration failed: {exc}"},
+            {"error": None, "register_error": "Registration failed. Please try again in a moment."},
             status_code=503,
         )
 
@@ -1074,6 +1214,8 @@ async def api_session_status(request: Request):
 
 @app.post("/api/session/login")
 async def api_session_login(request: Request, payload: SessionLoginRequest):
+    ip = _client_ip(request)
+    _rate_limit_auth(f"login-api:{ip}:{str(payload.username or '').strip().lower()[:80]}", limit=15, window_seconds=900)
     auth = await _authenticate_login(payload.username, payload.password, payload.guild_id)
     if not auth:
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -1109,6 +1251,8 @@ async def api_session_login(request: Request, payload: SessionLoginRequest):
 
 @app.post("/api/session/register")
 async def api_session_register(request: Request, payload: SessionRegisterRequest):
+    ip = _client_ip(request)
+    _rate_limit_auth(f"register-api:{ip}", limit=10, window_seconds=3600)
     email_token = _verification_code() if payload.email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(payload.guild_id)
@@ -1203,6 +1347,7 @@ async def api_verify_session_email(request: Request, token: str):
 @app.post("/api/session/resend-verification")
 async def api_resend_session_verification(request: Request):
     auth = _require_api_auth(request)
+    _rate_limit_auth(f"session-email-resend:{str(auth.get('username') or '').lower()}", limit=8, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -1223,6 +1368,7 @@ async def api_resend_session_verification(request: Request):
 @app.post("/api/session/email")
 async def api_update_session_email(request: Request, payload: SessionEmailUpdateRequest):
     auth = _require_api_auth(request)
+    _rate_limit_auth(f"session-email-update:{str(auth.get('username') or '').lower()}", limit=8, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -1243,6 +1389,7 @@ async def api_update_session_email(request: Request, payload: SessionEmailUpdate
 @app.post("/api/session/email/verify")
 async def api_verify_session_email_code(request: Request, payload: SessionEmailCodeRequest):
     auth = _require_api_auth(request)
+    _rate_limit_auth(f"session-email-verify:{str(auth.get('username') or '').lower()}", limit=20, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -2016,6 +2163,9 @@ dashboard_broadcast_task: asyncio.Task[Any] | None = None
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if not _ensure_allowed_websocket_origin(websocket):
+        await websocket.close(code=4403)
+        return
     token = websocket.query_params.get("token")
     auth = verify_api_token(token, settings.session_secret, settings.api_token_ttl_seconds)
     if not auth:
