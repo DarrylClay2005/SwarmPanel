@@ -23,6 +23,7 @@ let inviteCatalogState = [];
 let userProfileState = { profile: null, editable: false, favoriteBotOptions: [] };
 let userDirectoryState = [];
 let userDirectoryRequestId = 0;
+let userDirectoryLoaded = false;
 let panelPreferencesState = {};
 let controlInventoryState = null;
 let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
@@ -36,8 +37,11 @@ let eventFeedSocket = null;
 let eventFeedReconnectTimer = null;
 let eventFeedPollTimer = null;
 let eventFeedConnectionState = 'offline';
+let eventFeedHistoryLoaded = false;
 let systemDiagnosticsState = null;
+let diagnosticsLoaded = false;
 let metricsSnapshotState = null;
+let metricsLoaded = false;
 let controlRefreshTimer = null;
 let pinnedBotsState = new Set();
 let commandPresetsState = [];
@@ -66,6 +70,7 @@ let panelSessionChecked = false;
 let livePositionTickerStarted = false;
 let motionObserver = null;
 const MAX_EVENT_FEED_ENTRIES = 80;
+const EVENT_FEED_POLL_INTERVAL_MS = 8000;
 const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const centralTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -84,6 +89,10 @@ const DEFAULT_PANEL_PREFERENCES = {
     directory_layout: 'grid',
     tab_style: 'pills',
 };
+let swarmAccountAdminLoaded = false;
+let imageGalleryAdminLoaded = false;
+let imageGalleryTablesLoaded = false;
+let dbSchemasLoaded = false;
 const TAB_META = {
     'overview-tab': {
         eyebrow: 'Overview',
@@ -578,10 +587,18 @@ async function refreshPanelAfterModeSwitch() {
     dashboardBotsState = [];
     botCatalogState = [];
     inviteCatalogState = [];
+    userDirectoryLoaded = false;
     controlInventoryState = null;
     clearControlMatrixState();
     clearSelectedControlState();
     resetControlInventorySelectors();
+    swarmAccountAdminLoaded = false;
+    imageGalleryAdminLoaded = false;
+    imageGalleryTablesLoaded = false;
+    dbSchemasLoaded = false;
+    eventFeedHistoryLoaded = false;
+    diagnosticsLoaded = false;
+    metricsLoaded = false;
     if (!isAdminSession()) {
         disconnectEventFeed();
         systemDiagnosticsState = null;
@@ -592,18 +609,11 @@ async function refreshPanelAfterModeSwitch() {
         loadBotSelect(),
         loadUserProfile(),
         loadPanelPreferences(),
-        loadUserDirectory(),
     ]);
     if (isAdminSession()) {
-        await Promise.allSettled([
-            fetchDiagnostics(),
-            loadSwarmAccountAdmin(),
-            loadDbSchemas(),
-            loadImageGalleryAdmin(),
-            loadEventFeedHistory(),
-        ]);
         connectEventFeed();
     }
+    await hydrateActiveTabData(getActiveTabId(), { force: true });
 }
 
 async function setAdminMode(enabled) {
@@ -957,8 +967,8 @@ function ensureLivePositionTicker() {
     if (livePositionTickerStarted) return;
     livePositionTickerStarted = true;
     setInterval(() => {
-        if (!panelAppStarted) return;
-        updateLivePositionCounters();
+        if (!panelAppStarted || !isPanelDocumentVisible()) return;
+        renderLivePositionTick();
     }, 1000);
 }
 
@@ -1076,6 +1086,58 @@ function getActiveTabId() {
     return document.querySelector('.swarm-tab-panel.active')?.id || resolveAllowedTab(readStoredValue(ACTIVE_TAB_KEY) || 'overview-tab');
 }
 
+function isPanelDocumentVisible() {
+    return !document.hidden;
+}
+
+function isTabActive(...targets) {
+    const active = getActiveTabId();
+    return targets.includes(active);
+}
+
+async function hydrateActiveTabData(target = getActiveTabId(), { force = false } = {}) {
+    const nextTarget = resolveAllowedTab(target);
+    if (nextTarget === 'users-tab' && (force || !userDirectoryLoaded)) {
+        await loadUserDirectory();
+        return;
+    }
+    if (!isAdminSession()) return;
+    if (nextTarget === 'diagnostics-tab' && (force || !diagnosticsLoaded)) {
+        await fetchDiagnostics(force);
+        return;
+    }
+    if (nextTarget === 'controls-tab' && (force || !dbSchemasLoaded)) {
+        await loadDbSchemas();
+    }
+    if (nextTarget === 'controls-tab') {
+        if (document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+            await Promise.allSettled([
+                fetchSelectedControlState({ silent: true }),
+                fetchControlMatrix({ silent: true }),
+            ]);
+        }
+        return;
+    }
+    if (nextTarget === 'accounts-tab' && (force || !swarmAccountAdminLoaded)) {
+        await loadSwarmAccountAdmin();
+        return;
+    }
+    if (nextTarget === 'image-gallery-tab') {
+        if (isImageGalleryOwnerSession() && (force || !imageGalleryAdminLoaded || !imageGalleryTablesLoaded)) {
+            await loadImageGalleryAdmin();
+        }
+        return;
+    }
+    if (nextTarget === 'intel-tab') {
+        if (force || !eventFeedHistoryLoaded) {
+            await loadEventFeedHistory();
+        }
+        if (force || !metricsLoaded) {
+            await fetchMetrics();
+        }
+    }
+}
+
 function renderSectionHero(target = getActiveTabId()) {
     const meta = TAB_META[target] || TAB_META['overview-tab'];
     const pills = [];
@@ -1161,6 +1223,11 @@ function activateSwarmTab(target, { persist = true } = {}) {
         const nextHash = `#${nextTarget}`;
         if (window.location.hash !== nextHash) history.replaceState(null, '', nextHash);
     }
+    queueMicrotask(() => {
+        hydrateActiveTabData(nextTarget).catch(err => {
+            console.warn('⚠️ Failed to hydrate tab data:', err);
+        });
+    });
 }
 
 function initTabs() {
@@ -1449,39 +1516,25 @@ async function startPanelApplication() {
 
     if (panelAppStarted) {
         fetchDashboard();
-        if (isAdminSession()) {
-            fetchDiagnostics();
-        }
         loadBotSelect();
         loadUserProfile();
         loadPanelPreferences();
-        loadUserDirectory();
         if (isAdminSession()) {
-            loadSwarmAccountAdmin();
-            loadDbSchemas();
-            loadImageGalleryAdmin();
-            loadEventFeedHistory();
             connectEventFeed();
         }
+        hydrateActiveTabData(getActiveTabId(), { force: true });
         return true;
     }
 
     panelAppStarted = true;
     fetchDashboard();
-    if (isAdminSession()) {
-        fetchDiagnostics();
-    }
     loadBotSelect();
     loadUserProfile();
     loadPanelPreferences();
-    loadUserDirectory();
     if (isAdminSession()) {
-        loadSwarmAccountAdmin();
-        loadDbSchemas();
-        loadImageGalleryAdmin();
-        loadEventFeedHistory();
         connectEventFeed();
     }
+    hydrateActiveTabData(getActiveTabId(), { force: true });
     return true;
 }
 
@@ -2437,8 +2490,10 @@ async function loadUserDirectory(query = null) {
         }
         if (requestId !== userDirectoryRequestId) return;
         userDirectoryState = Array.isArray(data.users) ? data.users : [];
+        userDirectoryLoaded = true;
         renderUserDirectory(userDirectoryState);
     } catch (err) {
+        userDirectoryLoaded = false;
         if (grid) grid.innerHTML = `<div class="control-context-empty">User directory failed: ${escapeHtml(err instanceof Error ? err.message : String(err))}</div>`;
         renderSectionHero();
     }
@@ -2498,7 +2553,7 @@ async function fetchDashboard() {
         renderAriaCommandGuide();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
-        if (document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+        if (isTabActive('controls-tab') && document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
             fetchSelectedControlState({ silent: true });
             fetchControlMatrix({ silent: true });
         }
@@ -2526,16 +2581,17 @@ async function fetchDiagnostics(force = false) {
         }
 
         systemDiagnosticsState = data;
+        diagnosticsLoaded = true;
         renderDiagnosticsSummary(data);
         renderSharedRuntimeCard(data);
         renderAriaDiagnosticCard(data);
         renderWorkerDiagnosticGrid(data);
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
-        fetchMetrics();
         renderSectionHero();
     } catch (err) {
         systemDiagnosticsState = null;
+        diagnosticsLoaded = false;
         renderControlContext();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
@@ -2554,10 +2610,12 @@ async function fetchMetrics() {
             throw new Error(data.detail || data.db_error || 'Metrics request failed');
         }
         metricsSnapshotState = data;
+        metricsLoaded = true;
         renderMetricsDashboard(data);
         renderSectionHero();
     } catch (err) {
         metricsSnapshotState = null;
+        metricsLoaded = false;
         renderMetricsDashboard({ error: String(err), totals: {}, bots: [] });
         renderSectionHero();
         console.error('❌ Metrics fetch failed:', err);
@@ -3486,7 +3544,7 @@ function renderEventFeed() {
 
     if (!items.length) {
         out.innerHTML = `<div class="error-feed-empty">Feed: ${escapeHtml(connectionLabel)}<br><br>No matching live events yet.</div>`;
-        renderOverview(dashboardBotsState);
+        renderSectionHero();
         return;
     }
 
@@ -3505,7 +3563,7 @@ function renderEventFeed() {
             <div class="error-entry-body">${escapeHtml(entry.description || '')}</div>
         </article>`;
     }).join('');
-    renderOverview(dashboardBotsState);
+    renderSectionHero();
 }
 
 async function loadEventFeedHistory() {
@@ -3514,6 +3572,7 @@ async function loadEventFeedHistory() {
         if (handle401(res)) return;
         const data = await res.json();
         if (!res.ok) {
+            eventFeedHistoryLoaded = false;
             eventFeedEntries = [{
                 level: 'error',
                 title: 'Event Feed Failed',
@@ -3529,8 +3588,10 @@ async function loadEventFeedHistory() {
             .map(normalizeEventFeedEntry)
             .filter(Boolean)
             .slice(-MAX_EVENT_FEED_ENTRIES);
+        eventFeedHistoryLoaded = true;
         renderEventFeed();
     } catch (err) {
+        eventFeedHistoryLoaded = false;
         eventFeedEntries = [{
             level: 'error',
             title: 'Event Feed Failed',
@@ -3545,8 +3606,9 @@ async function loadEventFeedHistory() {
 function startEventFeedPolling() {
     if (eventFeedPollTimer) return;
     eventFeedPollTimer = setInterval(() => {
+        if (!panelAppStarted || !isPanelDocumentVisible() || !isTabActive('intel-tab')) return;
         loadEventFeedHistory();
-    }, 8000);
+    }, EVENT_FEED_POLL_INTERVAL_MS);
 }
 
 function stopEventFeedPolling() {
@@ -3571,6 +3633,7 @@ function disconnectEventFeed() {
         eventFeedSocket = null;
     }
     eventFeedConnectionState = 'offline';
+    updateLiveSyncStatus();
 }
 
 function updateLiveSyncStatus() {
@@ -3585,7 +3648,7 @@ function updateLiveSyncStatus() {
         el.style.color = '#fab387';
         el.style.borderColor = '#fab387';
     } else {
-        el.textContent = 'Live Sync: Polling 5s';
+        el.textContent = `Live Sync: Polling ${Math.round(EVENT_FEED_POLL_INTERVAL_MS / 1000)}s`;
         el.style.color = '#89b4fa';
         el.style.borderColor = '#89b4fa';
     }
@@ -3602,6 +3665,7 @@ async function connectEventFeed() {
         eventFeedConnectionState = 'offline';
         startEventFeedPolling();
         renderEventFeed();
+        updateLiveSyncStatus();
         return;
     }
     if (eventFeedSocket && (eventFeedSocket.readyState === WebSocket.OPEN || eventFeedSocket.readyState === WebSocket.CONNECTING)) {
@@ -3622,7 +3686,9 @@ async function connectEventFeed() {
     eventFeedSocket.onopen = () => {
         eventFeedConnectionState = 'online';
         stopEventFeedPolling();
-        loadEventFeedHistory();
+        if (isTabActive('intel-tab')) {
+            loadEventFeedHistory();
+        }
         renderEventFeed();
         updateLiveSyncStatus();
     };
@@ -4890,9 +4956,11 @@ async function loadSwarmAccountAdmin() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || 'SwarmPanel account request failed');
         swarmAccountAdminState.payload = data.data || {};
+        swarmAccountAdminLoaded = true;
         renderSwarmAccountAdmin();
         if (status) status.textContent = 'SwarmPanel accounts loaded.';
     } catch (err) {
+        swarmAccountAdminLoaded = false;
         if (status) status.textContent = `SwarmPanel Accounts Error: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
         setSwarmAccountLoading(false);
@@ -5164,10 +5232,12 @@ async function loadImageGalleryAdmin() {
         if (!res.ok) throw new Error(data.detail || 'Image Gallery request failed');
         const payload = data.data || {};
         imageGalleryAdminState.payload = payload;
+        imageGalleryAdminLoaded = true;
         renderImageGalleryAdmin();
         if (status) status.textContent = 'Image Gallery data loaded.';
         await loadImageGalleryTables();
     } catch (err) {
+        imageGalleryAdminLoaded = false;
         if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
     } finally {
         setImageGalleryLoading(false);
@@ -5186,11 +5256,13 @@ async function loadImageGalleryTables() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Image Gallery table request failed');
         imageGalleryTables = data.tables || [];
+        imageGalleryTablesLoaded = true;
         tableSelect.innerHTML = imageGalleryTables.length
             ? imageGalleryTables.map(table => `<option value="${escapeHtml(table.table_name)}">${escapeHtml(table.table_name)} (~${escapeHtml(table.estimated_rows ?? 0)} rows)</option>`).join('')
             : '<option value="">No tables found</option>';
         if (status) status.textContent = `${imageGalleryTables.length} Image Gallery tables loaded from ${data.schema || 'image_gallery'}.`;
     } catch (err) {
+        imageGalleryTablesLoaded = false;
         if (status) status.textContent = `Image Gallery Tables Error: ${err instanceof Error ? err.message : String(err)}`;
     }
 }
@@ -5253,11 +5325,13 @@ async function loadDbSchemas() {
         if (handle401(res)) return;
         const data = await res.json();
         dbSchemas = data.schemas || [];
+        dbSchemasLoaded = true;
         schemaSel.innerHTML = dbSchemas
             .map(s => `<option value="${escapeHtml(s.schema)}">${escapeHtml(s.schema)}</option>`)
             .join('');
         updateTableSelect();
     } catch (err) {
+        dbSchemasLoaded = false;
         if (status) status.textContent = `DB Error: ${err}`;
         console.error("❌ Failed to load DB schemas:", err);
     }
@@ -5951,6 +6025,13 @@ document.addEventListener('DOMContentLoaded', () => {
         const target = window.location.hash?.replace(/^#/, '');
         if (target) activateSwarmTab(target, { persist: false });
     });
+    document.addEventListener('visibilitychange', () => {
+        if (!panelAppStarted || !isPanelDocumentVisible()) return;
+        renderLivePositionTick();
+        hydrateActiveTabData(getActiveTabId()).catch(err => {
+            console.warn('⚠️ Failed to refresh active tab after visibility change:', err);
+        });
+    });
 
     document.getElementById('remote-login-button')
         ?.addEventListener('click', loginRemotePanel);
@@ -5970,26 +6051,23 @@ document.addEventListener('DOMContentLoaded', () => {
 // 🔄 AUTO REFRESH
 // ================================
 async function dashboardRefreshLoop() {
-    if (panelAppStarted && !qolSettingsState.refreshPaused) await fetchDashboard();
+    if (panelAppStarted && !qolSettingsState.refreshPaused && isPanelDocumentVisible()) await fetchDashboard();
     dashboardRefreshTimer = setTimeout(dashboardRefreshLoop, Math.max(3000, Number(qolSettingsState.refreshIntervalMs || 5000)));
 }
 
 async function diagnosticsRefreshLoop() {
-    if (panelAppStarted && isAdminSession()) await fetchDiagnostics();
+    if (panelAppStarted && isAdminSession() && isPanelDocumentVisible() && isTabActive('diagnostics-tab')) await fetchDiagnostics();
     diagnosticsRefreshTimer = setTimeout(diagnosticsRefreshLoop, 60000);
 }
 
 async function metricsRefreshLoop() {
-    if (panelAppStarted && isAdminSession()) await fetchMetrics();
+    if (panelAppStarted && isAdminSession() && isPanelDocumentVisible() && isTabActive('intel-tab')) await fetchMetrics();
     metricsRefreshTimer = setTimeout(metricsRefreshLoop, 15000);
 }
 
 dashboardRefreshLoop();
 diagnosticsRefreshLoop();
 metricsRefreshLoop();
-setInterval(() => {
-    renderLivePositionTick();
-}, 1000);
 
 // =====================================================================
 // 2026 Dynamic Scaling + Overlap Shield — SwarmPanel

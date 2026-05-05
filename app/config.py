@@ -48,6 +48,7 @@ class Settings:
     smtp_password: str
     smtp_from_email: str
     smtp_use_tls: bool
+    shared_music_env_file: str
 
 
 def load_settings() -> Settings:
@@ -75,6 +76,7 @@ def load_settings() -> Settings:
         smtp_password=_env("PANEL_SMTP_PASSWORD") or _env("SMTP_PASSWORD"),
         smtp_from_email=_env("PANEL_SMTP_FROM_EMAIL") or _env("SMTP_FROM_EMAIL") or _env("PANEL_SMTP_USERNAME") or _env("SMTP_USERNAME"),
         smtp_use_tls=(_env("PANEL_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
+        shared_music_env_file=_env("PANEL_SHARED_MUSIC_ENV_FILE", str(Path(__file__).resolve().parents[2] / "Music" / ".env")),
     )
     validate_settings(settings)
     return settings

@@ -30,6 +30,7 @@ class DiscordInventoryService:
         self.session: aiohttp.ClientSession | None = None
         self.cache = {}
         self.cache_ttl = 300.0  # 5-minute memory cache
+        self.cache_max_entries = 512
 
     async def connect(self) -> None:
         if self.session:
@@ -81,13 +82,23 @@ class DiscordInventoryService:
         import time
         param_key = tuple(sorted(params.items())) if params else ()
         cache_key = f"{token}:{path}:{param_key}"
-        
+
         now = time.time()
-        if cache_key in self.cache:
-            data, exp = self.cache[cache_key]
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            data, exp = cached
             if now < exp:
                 return data
-                
+            self.cache.pop(cache_key, None)
+
+        if len(self.cache) >= self.cache_max_entries:
+            expired = [key for key, (_data, exp) in self.cache.items() if now >= exp]
+            for key in expired:
+                self.cache.pop(key, None)
+            if len(self.cache) >= self.cache_max_entries:
+                oldest_key = min(self.cache.items(), key=lambda item: item[1][1])[0]
+                self.cache.pop(oldest_key, None)
+
         data = await self._request_json(token, "GET", path, params=params)
         self.cache[cache_key] = (data, now + self.cache_ttl)
         return data

@@ -21,7 +21,8 @@ from .discord_api import DiscordInventoryService
 
 logger = logging.getLogger("swarm_panel")
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SHARED_ENV_FILE = REPO_ROOT / "DC" / ".env"
+DEFAULT_SHARED_ENV_FILE = REPO_ROOT / "Music" / ".env"
+LEGACY_SHARED_ENV_FILE = REPO_ROOT / "DC" / ".env"
 DIAGNOSTICS_CACHE_TTL_SECONDS = 90
 CENTRAL_TZ = ZoneInfo("America/Chicago")
 
@@ -87,6 +88,15 @@ class RuntimeDiagnosticsService:
             return snapshot
 
     def _resolve_shared_env_path(self) -> Path:
+        configured = str(getattr(self.settings, "shared_music_env_file", "") or "").strip()
+        candidates = [
+            Path(configured).expanduser() if configured else None,
+            DEFAULT_SHARED_ENV_FILE,
+            LEGACY_SHARED_ENV_FILE,
+        ]
+        for candidate in candidates:
+            if candidate and candidate.is_file():
+                return candidate
         return DEFAULT_SHARED_ENV_FILE
 
     def _load_shared_env(self) -> tuple[Path, dict[str, str]]:
