@@ -2200,7 +2200,7 @@ def _ensure_dashboard_broadcast_loop() -> None:
 
 async def _dashboard_broadcast_loop() -> None:
     global dashboard_broadcast_task
-    interval_seconds = max(1.0, float(os.getenv("SWARM_WS_DASHBOARD_INTERVAL_SECONDS", "2") or "2"))
+    interval_seconds = max(1.0, float(os.getenv("SWARM_WS_DASHBOARD_INTERVAL_SECONDS", "4") or "4"))
     try:
         while active_connections:
             payload_cache: dict[str, tuple[str, dict[str, Any]]] = {}

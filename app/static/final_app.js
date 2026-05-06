@@ -57,8 +57,11 @@ let liveSessionPositionCache = new Map();
 let dashboardRefreshTimer = null;
 let diagnosticsRefreshTimer = null;
 let metricsRefreshTimer = null;
+let dashboardRenderSignature = '';
+let lastDashboardFullRenderAt = 0;
 const LIVE_POSITION_CACHE_MAX = 300;
 const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
+const DASHBOARD_FORCED_RENDER_MS = 30000;
 let remotePanelOrigin = '';
 let remotePanelToken = '';
 let remotePanelUsername = '';
@@ -100,6 +103,22 @@ let swarmAccountAdminLoaded = false;
 let imageGalleryAdminLoaded = false;
 let imageGalleryTablesLoaded = false;
 let dbSchemasLoaded = false;
+
+function debounce(fn, wait = 180) {
+    let timer = null;
+    return (...args) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn(...args), wait);
+    };
+}
+
+function isLowPowerDevice() {
+    const cores = Number(navigator.hardwareConcurrency || 0);
+    const memory = Number(navigator.deviceMemory || 0);
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    const reducedData = navigator.connection?.saveData;
+    return Boolean(reducedMotion || reducedData || (cores && cores <= 4) || (memory && memory <= 4));
+}
 const TAB_META = {
     'overview-tab': {
         eyebrow: 'Overview',
@@ -2545,15 +2564,48 @@ async function fetchDashboard() {
     }
 }
 
+function dashboardStableSignature(data = {}) {
+    const compactSession = (session = {}) => ({
+        bot_key: session.bot_key || '',
+        guild_id: String(session.guild_id ?? ''),
+        channel_id: String(session.channel_id ?? ''),
+        home_channel_id: String(session.home_channel_id ?? ''),
+        title: session.title || '',
+        is_playing: Boolean(session.is_playing),
+        is_paused: Boolean(session.is_paused),
+        queue_count: Number(session.queue_count || 0),
+        backup_queue_count: Number(session.backup_queue_count || 0),
+        loop_mode: session.loop_mode || '',
+        filter_mode: session.filter_mode || '',
+        media_source: session.media_source || '',
+        recovery_pending: Boolean(session.recovery_pending),
+        recovery_attempts: Number(session.recovery_attempts || 0),
+        last_error: session.last_error || '',
+    });
+    const compactBot = (bot = {}) => ({
+        key: bot.key || '',
+        kind: bot.kind || '',
+        status: bot.status || '',
+        heartbeat_status: bot.heartbeat_status || '',
+        known_guild_count: Number(bot.known_guild_count || 0),
+        active_playing_count: Number(bot.active_playing_count || 0),
+        recent_interaction_count: Number(bot.recent_interaction_count || 0),
+        medic_summary: bot.medic_summary || null,
+        sessions: (bot.sessions || []).map(compactSession),
+    });
+    return JSON.stringify({
+        bots: (data.bots || []).map(compactBot),
+        sessions: (data.sessions || []).map(compactSession),
+    });
+}
+
 function applyDashboardData(data = {}, { fromSocket = false } = {}) {
     lastDashboardFetchAt = Date.now();
     const bots = data.bots || [];
+    const nextSignature = dashboardStableSignature(data);
+    const now = Date.now();
+    const fullRenderDue = nextSignature !== dashboardRenderSignature || (now - lastDashboardFullRenderAt) >= DASHBOARD_FORCED_RENDER_MS;
     dashboardBotsState = bots;
-    updateInviteOnlyMode();
-
-    renderQolControls();
-    renderOverview(bots, data.generated_at);
-    renderBots(bots);
 
     const sessionNow = Date.now();
     const sessionMap = new Map();
@@ -2588,17 +2640,26 @@ function applyDashboardData(data = {}, { fromSocket = false } = {}) {
 
     liveSessionState = allSessions;
     pruneLiveSessionPositionCache(new Set(allSessions.map(getSessionRuntimeKey)), sessionNow);
-    renderSessions(allSessions.filter(session => isRuntimeSession(session)));
-    renderNowPlaying(allSessions);
-    renderAlertCenter();
-    syncControlSelectionsFromDashboard();
-    renderControlContext();
-    renderAriaCommandGuide();
-    renderSelectedBotCapabilities();
-    renderSelectedGuildMatrix();
-    if (isTabActive('controls-tab') && document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
-        fetchSelectedControlState({ silent: true });
-        fetchControlMatrix({ silent: true });
+
+    if (fullRenderDue) {
+        dashboardRenderSignature = nextSignature;
+        lastDashboardFullRenderAt = now;
+        updateInviteOnlyMode();
+        renderQolControls();
+        renderOverview(bots, data.generated_at);
+        renderBots(bots);
+        renderSessions(allSessions.filter(session => isRuntimeSession(session)));
+        renderNowPlaying(allSessions);
+        renderAlertCenter();
+        syncControlSelectionsFromDashboard();
+        renderControlContext();
+        renderAriaCommandGuide();
+        renderSelectedBotCapabilities();
+        renderSelectedGuildMatrix();
+        if (isTabActive('controls-tab') && document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
+            fetchSelectedControlState({ silent: true });
+            fetchControlMatrix({ silent: true });
+        }
     }
 
     const meta = document.getElementById('dashboard-meta');
@@ -2607,7 +2668,7 @@ function applyDashboardData(data = {}, { fromSocket = false } = {}) {
     }
 
     updateLivePositionCounters();
-    renderSectionHero();
+    if (fullRenderDue) renderSectionHero();
 }
 
 async function fetchDiagnostics(force = false) {
@@ -3561,7 +3622,11 @@ function addEventFeedEntry(entry) {
     if (eventFeedEntries.length > MAX_EVENT_FEED_ENTRIES) {
         eventFeedEntries = eventFeedEntries.slice(-MAX_EVENT_FEED_ENTRIES);
     }
-    renderEventFeed();
+    if (isTabActive('intel-tab')) {
+        renderEventFeed();
+    } else {
+        updateLiveSyncStatus();
+    }
 }
 
 function renderEventFeed() {
@@ -5529,6 +5594,30 @@ async function truncateSchema() {
 // ================================
 document.addEventListener('DOMContentLoaded', () => {
     loadLocalQolState();
+    document.body.classList.toggle('panel-low-power', isLowPowerDevice());
+    const debouncedSetOverviewFilter = debounce(value => setOverviewFilter(value), 160);
+    const debouncedRenderSwarmAccounts = debounce(renderSwarmAccountAdmin, 180);
+    const debouncedRenderInventory = debounce(renderInventoryBrowser, 180);
+    const debouncedRenderImageGallery = debounce(renderImageGalleryAdmin, 180);
+    const debouncedRenderProfilePreview = debounce(() => {
+        const profile = {
+            ...(userProfileState.profile || {}),
+            display_name: document.getElementById('profile-display-name')?.value || '',
+            avatar_url: document.getElementById('profile-avatar-url')?.value || '',
+            server_name: document.getElementById('profile-server-name')?.value || '',
+            server_icon_url: document.getElementById('profile-server-icon-url')?.value || '',
+            server_invite_url: document.getElementById('profile-server-invite-url')?.value || '',
+            favorite_bot: document.getElementById('profile-favorite-bot')?.value || '',
+            theme_accent: document.getElementById('profile-theme-accent')?.value || '#89b4fa',
+            public_profile: Boolean(document.getElementById('profile-public-profile')?.checked),
+            bio: document.getElementById('profile-bio')?.value || '',
+        };
+        renderUserProfile({ ...userProfileState, profile });
+    }, 180);
+    const debouncedRenderPanelPreferencePreview = debounce(() => {
+        renderPanelPreferenceInputs(getPanelPreferencesFromInputs());
+        setPanelPreferencesStatus('Previewing changes. Save to keep them.');
+    }, 120);
     renderQolControls();
     renderAlertRulesInputs();
     renderCommandPresets();
@@ -5540,9 +5629,9 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('refresh-dashboard')
         ?.addEventListener('click', fetchDashboard);
     document.getElementById('global-panel-search')
-        ?.addEventListener('input', event => setOverviewFilter(event.target.value));
+        ?.addEventListener('input', event => debouncedSetOverviewFilter(event.target.value));
     document.getElementById('overview-filter')
-        ?.addEventListener('input', event => setOverviewFilter(event.target.value));
+        ?.addEventListener('input', event => debouncedSetOverviewFilter(event.target.value));
     document.getElementById('pinned-only-toggle')
         ?.addEventListener('change', event => {
             qolSettingsState.pinnedOnly = Boolean(event.target.checked);
@@ -5639,7 +5728,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('swarm-accounts-limit-select')
         ?.addEventListener('change', loadSwarmAccountAdmin);
     document.getElementById('swarm-accounts-search')
-        ?.addEventListener('input', renderSwarmAccountAdmin);
+        ?.addEventListener('input', debouncedRenderSwarmAccounts);
     document.getElementById('swarm-accounts-email-filter')
         ?.addEventListener('change', renderSwarmAccountAdmin);
     document.getElementById('swarm-accounts-visibility-filter')
@@ -5670,21 +5759,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'profile-public-profile',
         'profile-bio',
     ].forEach(id => {
-        document.getElementById(id)?.addEventListener('input', () => {
-            const profile = {
-                ...(userProfileState.profile || {}),
-                display_name: document.getElementById('profile-display-name')?.value || '',
-                avatar_url: document.getElementById('profile-avatar-url')?.value || '',
-                server_name: document.getElementById('profile-server-name')?.value || '',
-                server_icon_url: document.getElementById('profile-server-icon-url')?.value || '',
-                server_invite_url: document.getElementById('profile-server-invite-url')?.value || '',
-                favorite_bot: document.getElementById('profile-favorite-bot')?.value || '',
-                theme_accent: document.getElementById('profile-theme-accent')?.value || '#89b4fa',
-                public_profile: Boolean(document.getElementById('profile-public-profile')?.checked),
-                bio: document.getElementById('profile-bio')?.value || '',
-            };
-            renderUserProfile({ ...userProfileState, profile });
-        });
+        document.getElementById(id)?.addEventListener('input', debouncedRenderProfilePreview);
     });
 
     [
@@ -5706,10 +5781,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'panel-dashboard-density',
     ].forEach(id => {
         const eventName = id === 'panel-background-image-url' ? 'input' : 'change';
-        document.getElementById(id)?.addEventListener(eventName, () => {
-            renderPanelPreferenceInputs(getPanelPreferencesFromInputs());
-            setPanelPreferencesStatus('Previewing changes. Save to keep them.');
-        });
+        document.getElementById(id)?.addEventListener(eventName, debouncedRenderPanelPreferencePreview);
     });
 
     document.getElementById('refresh-diagnostics')
@@ -5724,7 +5796,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('load-inventory')
         ?.addEventListener('click', loadInventory);
     document.getElementById('inventory-search')
-        ?.addEventListener('input', renderInventoryBrowser);
+        ?.addEventListener('input', debouncedRenderInventory);
     document.getElementById('inventory-sort')
         ?.addEventListener('change', renderInventoryBrowser);
 
@@ -5775,7 +5847,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('image-gallery-limit-select')
         ?.addEventListener('change', loadImageGalleryAdmin);
     document.getElementById('image-gallery-search')
-        ?.addEventListener('input', renderImageGalleryAdmin);
+        ?.addEventListener('input', debouncedRenderImageGallery);
     document.getElementById('image-gallery-scope-select')
         ?.addEventListener('change', renderImageGalleryAdmin);
     document.getElementById('image-gallery-media-status-select')
@@ -6158,24 +6230,17 @@ metricsRefreshLoop();
 // =====================================================================
 (function installSwarmPanelDynamicScalingShield() {
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+    const lowPower = isLowPowerDevice();
     const WATCH_SELECTOR = [
-        '.topbar', '.topbar-actions', '.topbar-search', '.topbar-select', '.account-dropdown', '.app-shell',
-        '.swarm-tabs', '.swarm-tab', '.swarm-section', '.swarm-section-hero', '.overview-grid', '.overview-card',
-        '.diagnostic-grid', '.diagnostic-card', '.direct-control-grid', '.control-layout', '.control-grid',
-        '.control-room-layout', '.control-sidebar', '.control-side-card', '.control-context-card', '.control-actions',
-        '.quick-actions', '.card-actions', '.bot-actions', '.np-actions', '.admin-actions', '.form-actions',
-        '.alert-rule-actions', '.user-card-actions', '.invite-actions', '.gallery-admin-actions',
-        '.image-gallery-admin-actions', '.profile-actions', '.appearance-actions', '.remote-actions', '.login-actions',
-        '.cards', '#bot-cards', '#aria-card-container', '#now-playing-cards', '.bot-card', '.np-card',
-        '.worker-diagnostic-grid', '.worker-diagnostic-card', '.swarm-guild-grid', '.swarm-guild-card',
-        '.invite-bot-grid', '.invite-bot-card', '.user-directory-grid', '.user-card', '.appearance-grid',
-        '.appearance-card', '.appearance-preview-card', '.user-profile-grid', '.user-profile-shell',
-        '.user-directory-shell', '.alert-rule-grid', '.alert-rule-card', '.panel-directory-stack', '.table-wrap',
-        '.table-shell', '.log-feed', '.queue-list', '.login-card', '.form-grid', '.field-grid'
+        '.topbar', '.topbar-actions', '.topbar-search', '.account-dropdown',
+        '.swarm-tabs', '.swarm-tab', '.section-title-row',
+        '.control-actions', '.quick-actions', '.card-actions', '.bot-actions', '.np-actions',
+        '.admin-actions', '.form-actions', '.profile-actions', '.appearance-actions',
+        '.cards', '.table-wrap', '.table-shell'
     ].join(',');
 
     let scheduled = false;
-    let observerReady = false;
+    let mutationTimer = null;
 
     function computeScale() {
         const width = Math.max(320, window.innerWidth || document.documentElement.clientWidth || 320);
@@ -6205,7 +6270,9 @@ metricsRefreshLoop();
     }
 
     function markOverflow(root) {
-        const scope = root && root.querySelectorAll ? root : document;
+        if (lowPower && root !== document) return;
+        const activeSection = document.querySelector('.swarm-section:not([hidden])');
+        const scope = root && root.querySelectorAll ? root : (activeSection || document);
         const nodes = new Set();
         if (scope instanceof HTMLElement && scope.matches(WATCH_SELECTOR)) nodes.add(scope);
         scope.querySelectorAll?.(WATCH_SELECTOR).forEach((node) => nodes.add(node));
@@ -6234,30 +6301,13 @@ metricsRefreshLoop();
         run(document);
         window.addEventListener('resize', () => schedule(document), { passive: true });
         window.addEventListener('orientationchange', () => schedule(document), { passive: true });
-        document.addEventListener('transitionend', (event) => schedule(event.target), { passive: true });
-
-        if ('ResizeObserver' in window && !observerReady) {
-            observerReady = true;
-            const resizeObserver = new ResizeObserver((entries) => {
-                for (const entry of entries) schedule(entry.target);
-            });
-            resizeObserver.observe(document.documentElement);
-            resizeObserver.observe(document.body);
-            document.querySelectorAll(WATCH_SELECTOR).forEach((node) => resizeObserver.observe(node));
-            new MutationObserver((mutations) => {
-                for (const mutation of mutations) {
-                    mutation.addedNodes.forEach((node) => {
-                        if (node instanceof HTMLElement) {
-                            if (node.matches(WATCH_SELECTOR)) resizeObserver.observe(node);
-                            node.querySelectorAll?.(WATCH_SELECTOR).forEach((child) => resizeObserver.observe(child));
-                        }
-                    });
-                }
+        new MutationObserver((mutations) => {
+            if (!mutations.some(mutation => mutation.addedNodes.length || mutation.removedNodes.length)) return;
+            clearTimeout(mutationTimer);
+            mutationTimer = setTimeout(() => {
                 schedule(document);
-            }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
-        } else {
-            new MutationObserver(() => schedule(document)).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style', 'open'] });
-        }
+            }, lowPower ? 500 : 180);
+        }).observe(document.body, { childList: true, subtree: true });
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });

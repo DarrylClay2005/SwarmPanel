@@ -428,6 +428,36 @@ body.panel-font-dense { font-size: 13px; }
   transition-duration: 0.001ms !important;
 }
 
+body.panel-low-power *,
+body.panel-low-power *::before,
+body.panel-low-power *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+body.panel-low-power .panel,
+body.panel-low-power .swarm-section-hero,
+body.panel-low-power .control-side-card,
+body.panel-low-power .overview-card,
+body.panel-low-power .diagnostic-item,
+body.panel-low-power .worker-diagnostic-card,
+body.panel-low-power .user-profile-preview,
+body.panel-low-power .appearance-card,
+body.panel-low-power .appearance-preview-surface,
+body.panel-low-power .bot-card,
+body.panel-low-power .np-card,
+body.panel-low-power .account-dropdown {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  box-shadow: 0 8px 22px rgba(0,0,0,0.16) !important;
+}
+
+body.panel-low-power .login-bg-orb {
+  display: none !important;
+}
+
 .deck-panel {
   background:
     radial-gradient(circle at top right, rgba(137,180,250,0.14), transparent 34%),
