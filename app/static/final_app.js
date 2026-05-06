@@ -59,6 +59,8 @@ let diagnosticsRefreshTimer = null;
 let metricsRefreshTimer = null;
 let dashboardRenderSignature = '';
 let lastDashboardFullRenderAt = 0;
+let dashboardFetchController = null;
+let dashboardFetchRequestId = 0;
 const LIVE_POSITION_CACHE_MAX = 300;
 const LIVE_POSITION_CACHE_TTL_MS = 60 * 60 * 1000;
 const DASHBOARD_FORCED_RENDER_MS = 30000;
@@ -995,7 +997,7 @@ function ensureLivePositionTicker() {
     setInterval(() => {
         if (!panelAppStarted || !isPanelDocumentVisible()) return;
         renderLivePositionTick();
-    }, 1000);
+    }, isLowPowerDevice() ? 2000 : 1000);
 }
 
 function formatHeartbeatAge(seconds) {
@@ -2553,14 +2555,24 @@ async function loadUserDirectory(query = null) {
 // 📡 FETCH DASHBOARD DATA
 // ================================
 async function fetchDashboard() {
+    dashboardFetchController?.abort();
+    dashboardFetchController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const requestId = ++dashboardFetchRequestId;
     try {
-        const res = await fetch(`${API_BASE}/dashboard`);
+        const res = await fetch(`${API_BASE}/dashboard`, {
+            cache: 'no-store',
+            signal: dashboardFetchController?.signal,
+        });
         if (handle401(res)) return;
         const data = await res.json();
+        if (requestId !== dashboardFetchRequestId) return;
         applyDashboardData(data);
 
     } catch (err) {
+        if (err?.name === 'AbortError' || requestId !== dashboardFetchRequestId) return;
         console.error("❌ Dashboard fetch failed:", err);
+    } finally {
+        if (requestId === dashboardFetchRequestId) dashboardFetchController = null;
     }
 }
 
