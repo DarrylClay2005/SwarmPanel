@@ -4060,3 +4060,204 @@ body.panel-dashboard-compact .bot-live-summary {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* 2026 mobile viewport hardening */
+html {
+  min-height: 100%;
+  min-height: 100dvh;
+  overflow-x: clip;
+}
+
+body {
+  min-height: 100%;
+  min-height: 100dvh;
+  max-width: 100%;
+}
+
+.topbar,
+.container,
+.panel,
+.control-shell,
+.control-sidebar,
+.control-main,
+.cards,
+.bot-card,
+.np-card,
+.table-wrap,
+.account-dropdown {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.swarm-tabs {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+.swarm-tab {
+  flex: 0 0 auto;
+}
+
+.table-wrap,
+#data-viewer-container {
+  overscroll-behavior-inline: contain;
+}
+
+.account-dropdown {
+  max-width: min(320px, calc(100vw - 16px));
+}
+
+.topbar-search,
+.topbar-select,
+button,
+input,
+select,
+textarea {
+  max-width: 100%;
+}
+
+@media (max-width: 760px) {
+  body {
+    min-width: 0;
+  }
+
+  .topbar {
+    position: sticky;
+    max-height: none;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  }
+
+  .topbar-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+    gap: 8px;
+  }
+
+  .topbar-actions > *,
+  .account-menu,
+  .topbar-search,
+  .topbar-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .account-menu {
+    justify-content: end;
+  }
+
+  .account-dropdown {
+    right: 0;
+    left: auto;
+  }
+
+  .swarm-tabs {
+    position: sticky;
+    top: var(--mobile-tabs-top, 0px);
+    z-index: 80;
+    padding-left: max(10px, env(safe-area-inset-left, 0px));
+    padding-right: max(10px, env(safe-area-inset-right, 0px));
+    scroll-snap-type: x proximity;
+  }
+
+  .swarm-tab {
+    min-height: 42px;
+    scroll-snap-align: start;
+    white-space: nowrap;
+  }
+
+  .container {
+    width: 100%;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .section-title-row,
+  .utility-toolbar,
+  .gallery-admin-toolbar,
+  .alert-rule-grid,
+  .admin-actions,
+  .form-actions,
+  .appearance-actions,
+  .profile-actions,
+  .bot-actions,
+  .control-actions {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .gallery-admin-toolbar > *,
+  .utility-toolbar > *,
+  .admin-actions > *,
+  .form-actions > *,
+  .appearance-actions > *,
+  .profile-actions > *,
+  .bot-actions > *,
+  .control-actions > * {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .overview-grid,
+  .diagnostic-grid,
+  .direct-control-grid,
+  .worker-diagnostic-grid,
+  .swarm-guild-grid,
+  #now-playing-cards,
+  #bot-cards,
+  #aria-card-container,
+  .live-stream-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .np-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .np-thumb-wrap,
+  body.panel-stream-compact .np-thumb-wrap {
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+
+  .bot-meta-pill,
+  .bot-live-summary,
+  .diagnostic-item,
+  .control-side-card,
+  .panel {
+    overflow-wrap: anywhere;
+  }
+
+  .table-wrap {
+    width: 100%;
+    max-width: calc(100vw - 24px);
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 430px) {
+  .topbar-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topbar h1 {
+    overflow-wrap: anywhere;
+  }
+
+  .account-dropdown {
+    position: fixed;
+    top: calc(58px + env(safe-area-inset-top, 0px));
+    right: max(8px, env(safe-area-inset-right, 0px));
+    left: max(8px, env(safe-area-inset-left, 0px));
+    width: auto;
+  }
+
+  table {
+    min-width: 640px;
+  }
+}
