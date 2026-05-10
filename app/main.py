@@ -2261,6 +2261,15 @@ async def push_feed_event(
 
 
 
+@app.get("/api/stability")
+async def stability_data(request: Request):
+    require_api_auth(request)
+    try:
+        return await db.get_stability_snapshot()
+    except Exception as exc:
+        action_logger.exception("Failed to build stability snapshot")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 @app.get("/api/metrics")
 async def metrics_data(request: Request):
     _require_admin_auth(request)

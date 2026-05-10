@@ -1701,6 +1701,41 @@ class PanelDatabase:
             "sessions": sessions,
         }
 
+    async def get_stability_snapshot(self) -> dict[str, Any]:
+        """Return Aria recovery/degraded-mode status plus bot metric freshness."""
+        snapshot: dict[str, Any] = {"cooldowns": [], "recent_repairs": [], "metrics": await self.get_metrics_snapshot(), "status": "ok"}
+        try:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    try:
+                        await cur.execute("""
+                            SELECT scope_key, scope_type, guild_id, bot_name, reason,
+                                   TIMESTAMPDIFF(SECOND, NOW(), cooldown_until) AS remaining_seconds,
+                                   cooldown_until, updated_at
+                            FROM discord_aria.aria_swarm_recovery_cooldowns
+                            WHERE cooldown_until > NOW()
+                            ORDER BY cooldown_until DESC
+                            LIMIT 50
+                        """)
+                        snapshot["cooldowns"] = await cur.fetchall()
+                    except Exception as exc:
+                        snapshot["cooldowns_error"] = str(exc)
+                    try:
+                        await cur.execute("""
+                            SELECT issue_type, repair_action, repair_scope, success, confidence, details, error_text, created_at
+                            FROM discord_aria.aria_repair_journal
+                            ORDER BY created_at DESC
+                            LIMIT 50
+                        """)
+                        snapshot["recent_repairs"] = await cur.fetchall()
+                    except Exception as exc:
+                        snapshot["repairs_error"] = str(exc)
+        except Exception as exc:
+            snapshot["status"] = "error"
+            snapshot["error"] = str(exc)
+        return snapshot
+
     async def get_dashboard_data(self) -> dict[str, Any]:
         await self._ensure_connected()
         bots = []
