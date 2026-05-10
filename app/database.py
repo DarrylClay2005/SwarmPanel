@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import time
@@ -57,6 +59,15 @@ YOUTUBE_HOSTS = {
 SOUNDCLOUD_HOST_SUFFIXES = ("soundcloud.com",)
 SOUNDCLOUD_HOSTS = {"snd.sc"}
 THUMBNAIL_CACHE_TTL_SECONDS = 60 * 60
+
+PANEL_DB_POOL_MIN_SIZE = max(1, int(os.getenv("PANEL_DB_POOL_MIN_SIZE", "1") or "1"))
+PANEL_DB_POOL_MAX_SIZE = max(PANEL_DB_POOL_MIN_SIZE, int(os.getenv("PANEL_DB_POOL_MAX_SIZE", "6") or "6"))
+PANEL_DB_CONNECT_TIMEOUT_SECONDS = max(3, int(os.getenv("PANEL_DB_CONNECT_TIMEOUT_SECONDS", "10") or "10"))
+PANEL_DB_QUERY_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PANEL_DB_QUERY_TIMEOUT_SECONDS", "15") or "15"))
+PANEL_DB_POOL_RECYCLE_SECONDS = max(60, int(os.getenv("PANEL_DB_POOL_RECYCLE_SECONDS", "900") or "900"))
+PANEL_TABLE_CACHE_TTL_SECONDS = max(10.0, float(os.getenv("PANEL_TABLE_CACHE_TTL_SECONDS", "120") or "120"))
+PANEL_DASHBOARD_CACHE_TTL_SECONDS = max(0.5, float(os.getenv("PANEL_DASHBOARD_CACHE_TTL_SECONDS", "2") or "2"))
+
 GUILD_SETTINGS_COLUMNS = (
     ("home_vc_id", "BIGINT"),
     ("volume", "INT DEFAULT 100"),
@@ -270,7 +281,16 @@ class PanelDatabase:
         self.pool: aiomysql.Pool | None = None
         self.http_session: aiohttp.ClientSession | None = None
         self.thumbnail_cache: dict[str, tuple[float, str | None]] = {}
+        self._connect_lock = asyncio.Lock()
+        self._table_exists_cache: dict[tuple[str, str], tuple[float, bool]] = {}
+        self._dashboard_cache: tuple[float, dict[str, Any]] | None = None
 
+    def _invalidate_hot_caches(self) -> None:
+        self._dashboard_cache = None
+        self._table_exists_cache.clear()
+
+    async def _run_with_timeout(self, awaitable, timeout: float | None = None):
+        return await asyncio.wait_for(awaitable, timeout=timeout or PANEL_DB_QUERY_TIMEOUT_SECONDS)
 
     async def _ensure_schema_exists(self, schema_name: str) -> None:
         schema_name = _validate_identifier(schema_name, "schema")
@@ -280,7 +300,7 @@ class PanelDatabase:
             user=self.settings.db_user,
             password=self.settings.db_password,
             autocommit=True,
-            connect_timeout=10,
+            connect_timeout=PANEL_DB_CONNECT_TIMEOUT_SECONDS,
         )
         try:
             async with conn.cursor() as cur:
@@ -299,27 +319,31 @@ class PanelDatabase:
             conn.close()
 
     async def connect(self) -> None:
-        if not self.pool:
-            # Create every schema the dashboard can read before the pool opens.
-            startup_schemas = {self.settings.db_default_schema, "discord_aria", ACCOUNT_LOGIN_SCHEMA}
-            startup_schemas.update(bot.db_schema for bot in MUSIC_BOTS if bot.db_schema)
-            for schema in sorted(startup_schemas):
-                await self._ensure_schema_exists(schema)
-            self.pool = await aiomysql.create_pool(
-                host=self.settings.db_host,
-                port=self.settings.db_port,
-                user=self.settings.db_user,
-                password=self.settings.db_password,
-                db=self.settings.db_default_schema,
-                autocommit=True,
-                minsize=1,
-                maxsize=10,
-                connect_timeout=10,
-            )
-        await self._ensure_startup_schema()
-        if not self.http_session:
-            timeout = aiohttp.ClientTimeout(total=10)
-            self.http_session = aiohttp.ClientSession(timeout=timeout)
+        async with self._connect_lock:
+            if not self.pool or getattr(self.pool, "closed", False):
+                # Create every schema the dashboard can read before the pool opens.
+                startup_schemas = {self.settings.db_default_schema, "discord_aria", ACCOUNT_LOGIN_SCHEMA}
+                startup_schemas.update(bot.db_schema for bot in MUSIC_BOTS if bot.db_schema)
+                for schema in sorted(startup_schemas):
+                    await self._ensure_schema_exists(schema)
+                self.pool = await aiomysql.create_pool(
+                    host=self.settings.db_host,
+                    port=self.settings.db_port,
+                    user=self.settings.db_user,
+                    password=self.settings.db_password,
+                    db=self.settings.db_default_schema,
+                    autocommit=True,
+                    minsize=PANEL_DB_POOL_MIN_SIZE,
+                    maxsize=PANEL_DB_POOL_MAX_SIZE,
+                    connect_timeout=PANEL_DB_CONNECT_TIMEOUT_SECONDS,
+                    pool_recycle=PANEL_DB_POOL_RECYCLE_SECONDS,
+                )
+                self._invalidate_hot_caches()
+            await self._ensure_startup_schema()
+            if not self.http_session or self.http_session.closed:
+                timeout = aiohttp.ClientTimeout(total=10, connect=5)
+                connector = aiohttp.TCPConnector(limit=16, ttl_dns_cache=300)
+                self.http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
 
     async def _ensure_startup_schema(self) -> None:
         """Create low-churn panel/Aria support tables once at startup.
@@ -420,8 +444,14 @@ class PanelDatabase:
             self.http_session = None
 
     async def _ensure_connected(self) -> None:
-        if not self.pool:
+        if not self.pool or getattr(self.pool, "closed", False):
             await self.connect()
+
+    async def _get_pool(self) -> aiomysql.Pool:
+        await self._ensure_connected()
+        if not self.pool:
+            raise RuntimeError("Database pool not initialized")
+        return self.pool
 
     async def _fetchall(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
         await self._ensure_connected()
@@ -429,8 +459,8 @@ class PanelDatabase:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             cursor_context = conn.cursor(cursor_cls) if cursor_cls else conn.cursor()
             async with cursor_context as cur:
-                await asyncio.wait_for(cur.execute(query, params), timeout=15)
-                return await asyncio.wait_for(cur.fetchall(), timeout=15)
+                await self._run_with_timeout(cur.execute(query, params))
+                return await self._run_with_timeout(cur.fetchall())
 
     async def _fetchone(self, query: str, params: tuple[Any, ...] = (), dict_cursor: bool = True):
         await self._ensure_connected()
@@ -438,14 +468,14 @@ class PanelDatabase:
             cursor_cls = aiomysql.DictCursor if dict_cursor else None
             cursor_context = conn.cursor(cursor_cls) if cursor_cls else conn.cursor()
             async with cursor_context as cur:
-                await asyncio.wait_for(cur.execute(query, params), timeout=15)
-                return await asyncio.wait_for(cur.fetchone(), timeout=15)
+                await self._run_with_timeout(cur.execute(query, params))
+                return await self._run_with_timeout(cur.fetchone())
 
     async def _execute(self, query: str, params: tuple[Any, ...] = ()) -> int:
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await asyncio.wait_for(cur.execute(query, params), timeout=15)
+                await self._run_with_timeout(cur.execute(query, params))
                 return cur.rowcount
 
     async def _ensure_music_guild_settings_schema(self, cur, schema: str, prefix: str) -> None:
@@ -1221,6 +1251,13 @@ class PanelDatabase:
         return await self._resolve_soundcloud_thumbnail(video_url)
 
     async def _table_exists(self, schema: str, table: str) -> bool:
+        schema = _validate_identifier(schema, "schema")
+        table = _validate_identifier(table, "table")
+        key = (schema, table)
+        now = time.monotonic()
+        cached = self._table_exists_cache.get(key)
+        if cached and cached[0] > now:
+            return bool(cached[1])
         row = await self._fetchone(
             """
             SELECT 1 AS table_exists
@@ -1230,7 +1267,9 @@ class PanelDatabase:
             """,
             (schema, table),
         )
-        return bool(row)
+        exists = bool(row)
+        self._table_exists_cache[key] = (now + PANEL_TABLE_CACHE_TTL_SECONDS, exists)
+        return exists
 
     async def ping(self) -> bool:
         try:
@@ -1670,10 +1709,11 @@ class PanelDatabase:
 
         if sessions:
             thumbnails = await asyncio.gather(
-                *(self._get_thumbnail_url(session.get("video_url")) for session in sessions)
+                *(self._get_thumbnail_url(session.get("video_url")) for session in sessions),
+                return_exceptions=True,
             )
             for session, thumbnail in zip(sessions, thumbnails):
-                session["thumbnail"] = thumbnail
+                session["thumbnail"] = None if isinstance(thumbnail, Exception) else thumbnail
 
         heartbeat_age = None
         heartbeat_status = "unknown"
@@ -1737,6 +1777,9 @@ class PanelDatabase:
         return snapshot
 
     async def get_dashboard_data(self) -> dict[str, Any]:
+        now = time.monotonic()
+        if self._dashboard_cache and self._dashboard_cache[0] > now:
+            return copy.deepcopy(self._dashboard_cache[1])
         await self._ensure_connected()
         bots = []
         for bot in MUSIC_BOTS:
@@ -1868,10 +1911,12 @@ class PanelDatabase:
             }
         )
 
-        return {
+        result = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "bots": bots,
         }
+        self._dashboard_cache = (time.monotonic() + PANEL_DASHBOARD_CACHE_TTL_SECONDS, copy.deepcopy(result))
+        return result
 
 
 
@@ -2742,4 +2787,5 @@ class PanelDatabase:
                     raise ValueError(f"Unsupported action: {action}")
             
             await conn.commit() # FORCE COMMIT TO DATABASE
+        self._invalidate_hot_caches()
         return result

@@ -2160,6 +2160,14 @@ active_connections: list[dict[str, Any]] = []
 bot_health={}
 recent_feed_events: deque[dict[str, str]] = deque(maxlen=100)
 dashboard_broadcast_task: asyncio.Task[Any] | None = None
+WS_SEND_TIMEOUT_SECONDS = max(2.0, float(os.getenv("SWARM_WS_SEND_TIMEOUT_SECONDS", "6") or "6"))
+WS_DASHBOARD_BUILD_TIMEOUT_SECONDS = max(5.0, float(os.getenv("SWARM_WS_DASHBOARD_BUILD_TIMEOUT_SECONDS", "25") or "25"))
+
+def _remove_connection(connection: dict[str, Any]) -> None:
+    try:
+        active_connections.remove(connection)
+    except ValueError:
+        pass
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -2185,10 +2193,9 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        try:
-            active_connections.remove(connection)
-        except ValueError:
-            pass
+        _remove_connection(connection)
+    except Exception:
+        _remove_connection(connection)
 
 
 def _ensure_dashboard_broadcast_loop() -> None:
@@ -2203,46 +2210,60 @@ async def _dashboard_broadcast_loop() -> None:
     interval_seconds = max(1.0, float(os.getenv("SWARM_WS_DASHBOARD_INTERVAL_SECONDS", "4") or "4"))
     try:
         while active_connections:
-            payload_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+            payload_cache: dict[str, tuple[str, dict[str, Any], str]] = {}
             dead_connections: list[dict[str, Any]] = []
             for connection in list(active_connections):
                 websocket = connection.get("websocket")
                 auth = connection.get("auth") or {}
                 scope_key = _dashboard_scope_cache_key(auth)
                 if scope_key not in payload_cache:
-                    snapshot = await _build_dashboard_payload(auth, enrich_discord=False)
-                    payload = {"type": "dashboard_snapshot", "data": snapshot}
-                    payload_cache[scope_key] = (json.dumps(payload, sort_keys=True, separators=(",", ":")), payload)
-                digest, payload = payload_cache[scope_key]
+                    try:
+                        snapshot = await asyncio.wait_for(
+                            _build_dashboard_payload(auth, enrich_discord=False),
+                            timeout=WS_DASHBOARD_BUILD_TIMEOUT_SECONDS,
+                        )
+                        payload = {"type": "dashboard_snapshot", "data": snapshot}
+                    except Exception as exc:
+                        payload = {
+                            "type": "dashboard_snapshot_error",
+                            "error": str(exc),
+                            "generated_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    serialized = json.dumps(payload)
+                    payload_cache[scope_key] = (
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        payload,
+                        serialized,
+                    )
+                digest, _payload, serialized = payload_cache[scope_key]
                 if connection.get("last_dashboard_digest") == digest:
                     continue
                 try:
-                    await websocket.send_text(json.dumps(payload))
+                    await asyncio.wait_for(websocket.send_text(serialized), timeout=WS_SEND_TIMEOUT_SECONDS)
                     connection["last_dashboard_digest"] = digest
                 except Exception:
                     dead_connections.append(connection)
             for connection in dead_connections:
-                try:
-                    active_connections.remove(connection)
-                except ValueError:
-                    pass
+                _remove_connection(connection)
             await asyncio.sleep(interval_seconds)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        action_logger.exception("Dashboard broadcast loop crashed; it will restart on the next websocket connection.")
     finally:
         dashboard_broadcast_task = None
 
 async def broadcast(data: dict):
     dead=[]
+    serialized = json.dumps(data)
     for connection in list(active_connections):
         ws = connection.get("websocket")
         try:
-            await ws.send_text(json.dumps(data))
+            await asyncio.wait_for(ws.send_text(serialized), timeout=WS_SEND_TIMEOUT_SECONDS)
         except Exception:
             dead.append(connection)
     for connection in dead:
-        try:
-            active_connections.remove(connection)
-        except ValueError:
-            pass
+        _remove_connection(connection)
 
 
 async def push_feed_event(
