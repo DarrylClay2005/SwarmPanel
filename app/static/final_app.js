@@ -323,22 +323,35 @@ function getDisplayPositionSeconds(session, now = Date.now()) {
 function renderLivePositionTick() {
     if (!panelAppStarted || !Array.isArray(liveSessionState) || !liveSessionState.length) return;
     const now = Date.now();
+
+    // Build value maps first (no DOM access yet)
+    const posMap = new Map();
+    const progMap = new Map();
     liveSessionState.forEach(session => {
+        const key = getSessionRuntimeKey(session);
         const positionSeconds = getDisplayPositionSeconds(session, now);
         const durationSeconds = Number(session.duration_seconds || session.length_seconds || session.track_length_seconds || 0);
         const label = formatDuration(positionSeconds);
-        const fullLabel = `${label}${durationSeconds > 0 ? ` / ${formatDuration(durationSeconds)}` : ''}`;
-        const key = getSessionRuntimeKey(session);
-        document.querySelectorAll(`[data-position-key="${CSS.escape(key)}"]`).forEach(node => {
-            node.textContent = node.dataset.positionFull === '1' ? fullLabel : label;
-        });
-        const progressPercent = formatProgressPercent(positionSeconds, durationSeconds);
-        if (progressPercent !== null) {
-            document.querySelectorAll(`[data-progress-key="${CSS.escape(key)}"]`).forEach(node => {
-                node.style.width = `${progressPercent}%`;
-            });
-        }
+        posMap.set(key, { label, full: `${label}${durationSeconds > 0 ? ` / ${formatDuration(durationSeconds)}` : ''}` });
+        const prog = formatProgressPercent(positionSeconds, durationSeconds);
+        if (prog !== null) progMap.set(key, `${prog}%`);
     });
+
+    // Single pass over all position nodes
+    document.querySelectorAll('[data-position-key]').forEach(node => {
+        const entry = posMap.get(node.dataset.positionKey);
+        if (!entry) return;
+        const text = node.dataset.positionFull === '1' ? entry.full : entry.label;
+        if (node.textContent !== text) node.textContent = text;
+    });
+
+    // Single pass over all progress nodes
+    if (progMap.size) {
+        document.querySelectorAll('[data-progress-key]').forEach(node => {
+            const w = progMap.get(node.dataset.progressKey);
+            if (w && node.style.width !== w) node.style.width = w;
+        });
+    }
 }
 
 // ================================
@@ -6299,7 +6312,7 @@ metricsRefreshLoop();
         scheduled = false;
         if (!document.body) return;
         setScaleVars();
-        markOverflow(root || document);
+        // markOverflow removed: caused forced reflow on resize; CSS handles containment
     }
 
     function schedule(root) {
@@ -6310,16 +6323,12 @@ metricsRefreshLoop();
 
     function boot() {
         if (!document.body) return;
-        run(document);
+        setScaleVars();  // set vars only, skip reflow-inducing markOverflow on boot
         window.addEventListener('resize', () => schedule(document), { passive: true });
         window.addEventListener('orientationchange', () => schedule(document), { passive: true });
-        new MutationObserver((mutations) => {
-            if (!mutations.some(mutation => mutation.addedNodes.length || mutation.removedNodes.length)) return;
-            clearTimeout(mutationTimer);
-            mutationTimer = setTimeout(() => {
-                schedule(document);
-            }, lowPower ? 500 : 180);
-        }).observe(document.body, { childList: true, subtree: true });
+        // MutationObserver removed: it was calling markOverflow() on every card render,
+        // which reads scrollWidth/clientWidth on all matched elements = forced reflow per render.
+        // Overflow containment is now handled entirely in CSS (min-width:0, overflow:hidden).
     }
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });

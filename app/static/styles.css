@@ -115,7 +115,7 @@ body.panel-font-dense { font-size: 13px; }
   position: sticky;
   top: 0;
   z-index: 100;
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(6px);
 }
 
 .topbar h1 {
@@ -1929,7 +1929,7 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
   z-index: 1;
   width: min(400px, 94vw);
   background: rgba(17, 22, 34, 0.85);
-  backdrop-filter: blur(20px);
+  backdrop-filter: blur(8px);
   border: 1px solid var(--border-light);
   border-radius: 18px;
   padding: 36px 32px;
@@ -2982,7 +2982,7 @@ th { color: var(--text-muted); font-weight: 500; font-size: 0.78rem; text-transf
   border: 1px solid var(--border);
   border-radius: 18px;
   background: rgba(17, 22, 34, 0.82);
-  backdrop-filter: blur(10px);
+  backdrop-filter: blur(6px);
 }
 
 .swarm-tab {
@@ -3775,6 +3775,16 @@ body[data-ui-size="compact"] .login-actions {
   }
 }
 
+
+/* Overflow containment — previously applied dynamically by JS markOverflow().
+   Applied statically here to eliminate forced reflow on every render. */
+.topbar, .topbar-actions, .swarm-tabs, .swarm-tab,
+.control-actions, .quick-actions, .card-actions, .bot-actions, .np-actions,
+.admin-actions, .form-actions, .profile-actions, .appearance-actions {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .ui-overflow-guard,
 .ui-overflow-guard * {
   min-width: 0 !important;
@@ -3845,8 +3855,9 @@ body[data-ui-size="compact"] .login-actions {
 .np-card,
 .account-dropdown {
   background: color-mix(in srgb, var(--bg-panel) calc(var(--panel-surface-alpha) * 100%), transparent) !important;
-  backdrop-filter: blur(var(--panel-surface-blur)) saturate(1.12);
-  -webkit-backdrop-filter: blur(var(--panel-surface-blur)) saturate(1.12);
+  /* Capped at 6px — the default 18px on every card caused GPU overdraw on all visible cards */
+  backdrop-filter: blur(6px) saturate(1.08);
+  -webkit-backdrop-filter: blur(6px) saturate(1.08);
 }
 
 #now-playing-cards,
