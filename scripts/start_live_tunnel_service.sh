@@ -11,14 +11,17 @@ TUNNEL_LOG="${LOG_DIR}/cloudflared-service.log"
 UVICORN_LOG="${LOG_DIR}/uvicorn-service-fallback.log"
 INSTANCE_LOCK_FILE="${LOG_DIR}/live-manager.lock"
 AUTO_PUSH_CONFIG="${PANEL_AUTO_PUSH_CONFIG:-1}"
-ALLOW_FALLBACK_BACKEND="${PANEL_SERVICE_START_BACKEND_IF_MISSING:-1}"
+CONFIG_PUSH_COOLDOWN_SECONDS="${PANEL_CONFIG_PUSH_COOLDOWN_SECONDS:-120}"
+LAST_PUSH_FILE="${LOG_DIR}/last-live-config-push"
+PUSH_OFFLINE_CONFIG="${PANEL_PUSH_OFFLINE_CONFIG:-0}"
+ALLOW_FALLBACK_BACKEND="${PANEL_SERVICE_START_BACKEND_IF_MISSING:-0}"
 TUNNEL_PROVIDER="${PANEL_TUNNEL_PROVIDER:-cloudflare}"
 PAGES_ORIGIN="${PANEL_PAGES_ORIGIN:-https://heavenlyxenusvr.github.io}"
 PAGES_URL="${PANEL_PAGES_PUBLIC_URL:-https://heavenlyxenusvr.github.io/SwarmPanel/}"
 MAX_TUNNEL_START_ATTEMPTS="${PANEL_MAX_TUNNEL_START_ATTEMPTS:-12}"
 TUNNEL_READY_ATTEMPTS="${PANEL_TUNNEL_READY_ATTEMPTS:-900}"
 QUICK_TUNNEL_URL_ATTEMPTS="${PANEL_QUICK_TUNNEL_URL_ATTEMPTS:-180}"
-CLOUDFLARE_PROTOCOL="${PANEL_CLOUDFLARE_PROTOCOL:-quic}"
+CLOUDFLARE_PROTOCOL="${PANEL_CLOUDFLARE_PROTOCOL:-http2}"
 CLOUDFLARE_TUNNEL_TOKEN="${PANEL_CLOUDFLARE_TUNNEL_TOKEN:-}"
 CLOUDFLARE_PUBLIC_URL="${PANEL_CLOUDFLARE_PUBLIC_URL:-}"
 GLOBAL_TUNNEL_STATE_DIR="${HOME}/.local/state/cloudflare-quick-tunnels"
@@ -170,6 +173,13 @@ publish_config() {
     echo "live-config.json already matches the current tunnel URL."
     return
   fi
+  local now last_push
+  now="$(date +%s)"
+  last_push="$(cat "${LAST_PUSH_FILE}" 2>/dev/null || echo 0)"
+  if [[ "$((now - last_push))" -lt "${CONFIG_PUSH_COOLDOWN_SECONDS}" ]]; then
+    echo "Skipping live-config auto-push; last push was less than ${CONFIG_PUSH_COOLDOWN_SECONDS}s ago."
+    return
+  fi
   if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false run_git ls-remote --exit-code origin HEAD >/dev/null 2>&1; then
     echo "Skipping live-config auto-push because GitHub auth is unavailable; local file was still updated."
     return
@@ -177,12 +187,16 @@ publish_config() {
   echo "Publishing updated live-config.json to GitHub Pages..."
   run_git add live-config.json
   run_git commit -m "Update live backend URL" -- live-config.json || true
-  GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false run_git push origin main || echo "Could not push live-config.json automatically." >&2
+  if GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false run_git push origin main; then date +%s > "${LAST_PUSH_FILE}"; else echo "Could not push live-config.json automatically." >&2; fi
 }
 
 publish_offline_config() {
   write_offline_config
-  publish_config
+  if [[ "${PUSH_OFFLINE_CONFIG}" == "1" ]]; then
+    publish_config
+  else
+    echo "Offline live-config written locally only; not pushing offline state to GitHub Pages."
+  fi
 }
 
 install_python_deps() {
@@ -229,7 +243,7 @@ port_in_use() {
 }
 
 kill_stale_port() {
-  if [[ "${PANEL_KILL_STALE_PORT:-1}" != "1" ]]; then
+  if [[ "${PANEL_KILL_STALE_PORT:-0}" != "1" ]]; then
     return 0
   fi
   if command -v fuser >/dev/null 2>&1; then
@@ -276,8 +290,7 @@ cleanup() {
   release_instance_lock
   release_global_tunnel_slot
   if [[ -n "${PUBLISHED_PANEL_URL:-}" ]] && grep -Fq "\"panel_url\": \"${PUBLISHED_PANEL_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
-    write_offline_config
-    publish_config
+    publish_offline_config
   fi
   if [[ -n "${TUNNEL_PID:-}" ]]; then
     kill "${TUNNEL_PID}" >/dev/null 2>&1 || true

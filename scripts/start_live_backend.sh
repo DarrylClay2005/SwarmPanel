@@ -14,6 +14,7 @@ TUNNEL_LOG="${LOG_DIR}/cloudflared.log"
 PID_FILE="${LOG_DIR}/live_backend.pid"
 INSTANCE_LOCK_FILE="${LOG_DIR}/live-manager.lock"
 AUTO_PUSH_CONFIG="${PANEL_AUTO_PUSH_CONFIG:-1}"
+PUSH_OFFLINE_CONFIG="${PANEL_PUSH_OFFLINE_CONFIG:-0}"
 
 mkdir -p "${BIN_DIR}" "${LOG_DIR}"
 echo "$$" > "${PID_FILE}"
@@ -159,8 +160,7 @@ cloudflared_bin() {
 cleanup() {
   release_instance_lock
   if [[ -n "${PUBLISHED_PANEL_URL:-}" ]] && grep -Fq "\"panel_url\": \"${PUBLISHED_PANEL_URL}\"" "${CONFIG_FILE}" 2>/dev/null; then
-    write_offline_config
-    publish_config
+    publish_offline_config
   fi
   rm -f "${PID_FILE}"
   if [[ -n "${UVICORN_PID:-}" ]]; then
