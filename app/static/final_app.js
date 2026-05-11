@@ -5229,7 +5229,18 @@ function galleryTd(label, value) {
 }
 
 function renderImageGalleryAdmin() {
-    const payload = imageGalleryAdminState.payload || {};
+    let payload = imageGalleryAdminState.payload || {};
+    const XENUS_GALLERY_ADMIN_ROW_LIMIT = 300;
+    const xenusCapRows = (rows) => Array.isArray(rows) ? rows.slice(0, XENUS_GALLERY_ADMIN_ROW_LIMIT) : [];
+    payload = {
+        ...payload,
+        users: xenusCapRows(payload.users),
+        reports: xenusCapRows(payload.reports),
+        comments: xenusCapRows(payload.comments),
+        media: xenusCapRows(payload.media),
+        categories: xenusCapRows(payload.categories),
+        collections: xenusCapRows(payload.collections),
+    };
     const filters = currentImageGalleryFilters();
     imageGalleryAdminState.filters = filters;
 
