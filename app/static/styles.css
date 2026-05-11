@@ -4274,3 +4274,917 @@ textarea {
     min-width: 640px;
   }
 }
+
+/* =====================================================================
+   Xenus SwarmPanel Global UI Density + UX Animation Patch
+   Keeps the panel readable, compact, animated, and mobile-safe.
+   ===================================================================== */
+
+:root {
+  --xenus-panel-gap: clamp(8px, 0.85vw, 14px);
+  --xenus-panel-pad: clamp(9px, 0.9vw, 15px);
+  --xenus-panel-card-pad: clamp(9px, 0.95vw, 15px);
+  --xenus-panel-control-h: clamp(30px, 2.2vw, 36px);
+  --xenus-panel-radius: clamp(10px, 0.9vw, 16px);
+  --xenus-ease-spring: cubic-bezier(.16, 1, .3, 1);
+  --xenus-ease-pop: cubic-bezier(.2, 1.35, .35, 1);
+  --xenus-ease-glide: cubic-bezier(.22, .61, .36, 1);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box !important;
+}
+
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden !important;
+}
+
+body {
+  text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+img,
+svg,
+canvas,
+video {
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  min-width: 0 !important;
+  max-width: 100% !important;
+}
+
+input,
+select,
+textarea {
+  min-height: var(--xenus-panel-control-h) !important;
+  line-height: 1.25 !important;
+}
+
+textarea {
+  min-height: 86px !important;
+  resize: vertical !important;
+}
+
+button {
+  min-height: 30px;
+  line-height: 1.15;
+  white-space: normal;
+}
+
+/* Page entrance + ambient depth */
+body.xenus-swarmpanel-ready {
+  animation: xenusSwarmWake 620ms var(--xenus-ease-spring) both;
+}
+
+@keyframes xenusSwarmWake {
+  from {
+    opacity: 0;
+    transform: scale(.988);
+    filter: blur(7px) saturate(.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0) saturate(1);
+  }
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  inset: -18%;
+  pointer-events: none;
+  z-index: -1;
+  opacity: .22;
+  background:
+    radial-gradient(circle at 10% 18%, color-mix(in srgb, var(--user-panel-accent) 22%, transparent), transparent 32%),
+    radial-gradient(circle at 88% 12%, rgba(203,166,247,.12), transparent 30%),
+    radial-gradient(circle at 68% 88%, rgba(148,226,213,.10), transparent 32%);
+  animation: xenusSwarmAmbient 18s ease-in-out infinite alternate;
+}
+
+@keyframes xenusSwarmAmbient {
+  from { transform: translate3d(-1%, -1%, 0) scale(1); filter: hue-rotate(0deg); }
+  to { transform: translate3d(1%, 1%, 0) scale(1.035); filter: hue-rotate(12deg); }
+}
+
+/* Main desktop density */
+@media (min-width: 901px) {
+  body {
+    font-size: clamp(12px, 0.78vw, 14px) !important;
+  }
+
+  .topbar {
+    padding: calc(7px + env(safe-area-inset-top, 0px)) 12px 7px 12px !important;
+    gap: 8px !important;
+    min-height: unset !important;
+  }
+
+  .topbar h1 {
+    font-size: clamp(.9rem, .95vw, 1.08rem) !important;
+    line-height: 1.05 !important;
+  }
+
+  .topbar-actions {
+    gap: 5px !important;
+  }
+
+  .topbar-search {
+    width: min(210px, 24vw) !important;
+  }
+
+  .topbar button,
+  .topbar input,
+  .topbar select,
+  .topbar-status,
+  .admin-mode-toggle {
+    min-height: 28px !important;
+    height: auto !important;
+    padding: 4px 8px !important;
+    font-size: .72rem !important;
+    border-radius: 9px !important;
+  }
+
+  .topbar .topbar-profile-button {
+    width: 30px !important;
+    min-width: 30px !important;
+    height: 30px !important;
+  }
+
+  .topbar-profile-avatar {
+    width: 24px !important;
+    height: 24px !important;
+    font-size: .72rem !important;
+  }
+
+  .topbar-user-name {
+    max-width: 140px !important;
+    font-size: .76rem !important;
+  }
+
+  .container {
+    width: min(1840px, calc(100vw - 18px)) !important;
+    padding: 9px max(9px, env(safe-area-inset-right, 0px)) calc(9px + env(safe-area-inset-bottom, 0px)) max(9px, env(safe-area-inset-left, 0px)) !important;
+    gap: var(--xenus-panel-gap) !important;
+  }
+
+  .swarm-tabs {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+    margin: 6px 0 8px !important;
+  }
+
+  .swarm-tab {
+    min-height: 29px !important;
+    padding: 5px 10px !important;
+    font-size: .72rem !important;
+    border-radius: 10px !important;
+  }
+
+  .panel,
+  .deck-panel,
+  .swarm-section-hero,
+  .overview-card,
+  .bot-card,
+  .np-card,
+  .invite-bot-card,
+  .user-card,
+  .diagnostic-item,
+  .worker-diagnostic-card,
+  .swarm-guild-card,
+  .control-side-card,
+  .appearance-card,
+  .appearance-preview-card,
+  .image-gallery-owner-card {
+    padding: var(--xenus-panel-card-pad) !important;
+    border-radius: var(--xenus-panel-radius) !important;
+  }
+
+  .swarm-section-hero {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 10px !important;
+  }
+
+  .swarm-section-hero h2,
+  .panel h2,
+  .deck-panel h2 {
+    font-size: clamp(1rem, 1.15vw, 1.35rem) !important;
+    line-height: 1.1 !important;
+  }
+
+  .panel h3,
+  .control-side-card h3,
+  .diagnostic-item h3,
+  .bot-card h3,
+  .np-card h3 {
+    font-size: clamp(.86rem, .92vw, 1.02rem) !important;
+    line-height: 1.12 !important;
+  }
+
+  .muted,
+  .panel p,
+  .deck-timestamp,
+  .bot-card p,
+  .np-card p,
+  .diagnostic-item p,
+  .control-side-card p,
+  .error-entry-meta {
+    font-size: .72rem !important;
+    line-height: 1.28 !important;
+  }
+
+  .section-title-row,
+  .live-panel-title,
+  .content-head,
+  .panel-header,
+  .card-header {
+    gap: 8px !important;
+  }
+
+  .overview-grid,
+  .diagnostic-grid,
+  .worker-diagnostic-grid,
+  .direct-control-grid,
+  .alert-rule-grid,
+  .appearance-grid,
+  .user-profile-grid,
+  .user-directory-grid,
+  .swarm-guild-grid,
+  .invite-bot-grid,
+  .live-stream-grid,
+  .cards,
+  #bot-cards,
+  #aria-card-container,
+  #now-playing-cards {
+    gap: var(--xenus-panel-gap) !important;
+  }
+
+  .cards,
+  #bot-cards,
+  #aria-card-container,
+  #now-playing-cards {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr)) !important;
+  }
+
+  .overview-grid,
+  .diagnostic-grid,
+  .worker-diagnostic-grid,
+  .direct-control-grid,
+  .appearance-grid,
+  .user-profile-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)) !important;
+  }
+
+  .control-main,
+  .control-sidebar,
+  .user-profile-shell,
+  .user-directory-shell,
+  .inventory-grid {
+    gap: var(--xenus-panel-gap) !important;
+  }
+
+  .control-field,
+  label.control-field,
+  .login-field {
+    gap: 4px !important;
+  }
+
+  .control-field span,
+  label.control-field span,
+  .login-field label {
+    font-size: .72rem !important;
+    line-height: 1.2 !important;
+  }
+
+  .control-field input,
+  .control-field select,
+  .control-field textarea,
+  .login-field input,
+  .login-field select,
+  .login-field textarea {
+    padding: 5px 8px !important;
+    font-size: .76rem !important;
+    border-radius: 9px !important;
+  }
+
+  .panel button,
+  .deck-panel button,
+  .control-side-card button,
+  .bot-card button,
+  .np-card button,
+  .invite-bot-card button,
+  .user-card button,
+  .diagnostic-item button,
+  .swarm-guild-card button {
+    min-height: 28px !important;
+    padding: 4px 8px !important;
+    font-size: .7rem !important;
+    border-radius: 9px !important;
+  }
+
+  .button-row,
+  .action-row,
+  .control-actions,
+  .card-actions,
+  .bot-actions,
+  .bot-control-actions,
+  .quick-actions,
+  .error-feed-controls {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    gap: 5px !important;
+  }
+
+  .button-row > *,
+  .action-row > *,
+  .control-actions > *,
+  .card-actions > *,
+  .bot-actions > *,
+  .bot-control-actions > *,
+  .quick-actions > * {
+    flex: 1 1 auto !important;
+    min-width: min(100%, 108px) !important;
+  }
+
+  .status,
+  .status-pill,
+  .topbar-status,
+  .badge,
+  .chip,
+  .user-chip,
+  .capability-item,
+  .metric-chip {
+    min-height: 23px !important;
+    padding: 3px 7px !important;
+    font-size: .68rem !important;
+    border-radius: 999px !important;
+  }
+
+  .table-wrap {
+    max-width: 100% !important;
+    overflow: auto !important;
+    border-radius: var(--xenus-panel-radius) !important;
+  }
+
+  .table-wrap table,
+  .sessions-table {
+    min-width: 720px !important;
+    font-size: .72rem !important;
+  }
+
+  .table-wrap th,
+  .table-wrap td,
+  .sessions-table th,
+  .sessions-table td {
+    padding: 6px 8px !important;
+    line-height: 1.25 !important;
+  }
+
+  .error-entry {
+    padding: 9px !important;
+    border-radius: 11px !important;
+  }
+
+  .error-entry-head {
+    font-size: .72rem !important;
+  }
+
+  .error-entry-title {
+    font-size: .82rem !important;
+    line-height: 1.18 !important;
+  }
+
+  .login-card {
+    width: min(440px, calc(100vw - 24px)) !important;
+    padding: clamp(16px, 2vw, 26px) !important;
+    border-radius: 18px !important;
+  }
+}
+
+/* Anti-squash safety */
+.topbar,
+.topbar-actions,
+.container,
+.panel,
+.deck-panel,
+.swarm-section-hero,
+.swarm-tab-panel,
+.cards,
+.overview-grid,
+.diagnostic-grid,
+.worker-diagnostic-grid,
+.direct-control-grid,
+.appearance-grid,
+.user-profile-shell,
+.user-profile-grid,
+.user-directory-grid,
+.table-wrap,
+.control-main,
+.control-sidebar,
+.control-side-card,
+.bot-card,
+.np-card,
+.invite-bot-card,
+.user-card,
+.diagnostic-item,
+.worker-diagnostic-card,
+.swarm-guild-card,
+.error-entry,
+.login-card {
+  min-width: 0 !important;
+}
+
+.panel h2,
+.panel h3,
+.bot-card h3,
+.np-card h3,
+.control-context-track,
+.worker-diagnostic-name,
+.diagnostic-card-title,
+.error-entry-title,
+.status,
+.muted,
+.deck-timestamp,
+#live-sync-status,
+#remote-connection-status {
+  overflow-wrap: anywhere !important;
+}
+
+/* Big UX animation layer */
+.xenus-sp-reveal {
+  opacity: 0;
+  transform: translateY(24px) scale(.968);
+  filter: blur(8px);
+  transition:
+    opacity 700ms var(--xenus-ease-spring),
+    transform 700ms var(--xenus-ease-spring),
+    filter 700ms var(--xenus-ease-spring);
+  transition-delay: var(--xenus-sp-delay, 0ms);
+}
+
+.xenus-sp-reveal.xenus-sp-in-view {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  filter: blur(0);
+}
+
+.topbar {
+  animation: xenusSPTopbar 620ms var(--xenus-ease-pop) both;
+}
+
+@keyframes xenusSPTopbar {
+  from { opacity: 0; transform: translateY(-22px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.swarm-tab-panel.active {
+  animation: xenusSPPanelIn 460ms var(--xenus-ease-spring) both !important;
+}
+
+@keyframes xenusSPPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(.988);
+    filter: blur(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.panel,
+.overview-card,
+.bot-card,
+.np-card,
+.invite-bot-card,
+.user-card,
+.diagnostic-item,
+.worker-diagnostic-card,
+.swarm-guild-card,
+.control-side-card,
+.appearance-card,
+.appearance-preview-card,
+.error-entry {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  transition:
+    transform 380ms var(--xenus-ease-spring),
+    box-shadow 380ms ease,
+    border-color 380ms ease,
+    background 380ms ease,
+    filter 380ms ease;
+}
+
+.panel::after,
+.overview-card::after,
+.bot-card::after,
+.np-card::after,
+.invite-bot-card::after,
+.user-card::after,
+.diagnostic-item::after,
+.worker-diagnostic-card::after,
+.swarm-guild-card::after,
+.control-side-card::after,
+.appearance-card::after,
+.error-entry::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 2;
+  transform: translateX(-120%) skewX(-18deg);
+  background: linear-gradient(100deg, transparent, rgba(255,255,255,.13), transparent 68%);
+}
+
+.panel:hover,
+.overview-card:hover,
+.bot-card:hover,
+.np-card:hover,
+.invite-bot-card:hover,
+.user-card:hover,
+.diagnostic-item:hover,
+.worker-diagnostic-card:hover,
+.swarm-guild-card:hover,
+.control-side-card:hover,
+.appearance-card:hover,
+.appearance-preview-card:hover,
+.error-entry:hover {
+  transform: translateY(-6px) scale(1.008);
+  filter: saturate(1.06);
+  border-color: color-mix(in srgb, var(--user-panel-accent) 48%, var(--border)) !important;
+  box-shadow: 0 22px 58px rgba(0,0,0,.34) !important;
+}
+
+.panel:hover::after,
+.overview-card:hover::after,
+.bot-card:hover::after,
+.np-card:hover::after,
+.invite-bot-card:hover::after,
+.user-card:hover::after,
+.diagnostic-item:hover::after,
+.worker-diagnostic-card:hover::after,
+.swarm-guild-card:hover::after,
+.control-side-card:hover::after,
+.appearance-card:hover::after,
+.error-entry:hover::after {
+  opacity: 1;
+  animation: xenusSPShine 850ms var(--xenus-ease-glide) both;
+}
+
+@keyframes xenusSPShine {
+  from { transform: translateX(-120%) skewX(-18deg); }
+  to { transform: translateX(135%) skewX(-18deg); }
+}
+
+button,
+.swarm-tab,
+.topbar-status,
+.admin-mode-toggle,
+.account-dropdown button {
+  position: relative;
+  overflow: hidden;
+  transform: translateZ(0);
+  transition:
+    transform 180ms var(--xenus-ease-pop),
+    box-shadow 220ms ease,
+    filter 220ms ease,
+    border-color 220ms ease,
+    background 220ms ease;
+}
+
+button:hover,
+.swarm-tab:hover,
+.topbar-status:hover,
+.admin-mode-toggle:hover,
+.account-dropdown button:hover {
+  transform: translateY(-2px) scale(1.018);
+  filter: brightness(1.08);
+}
+
+button:active,
+.swarm-tab:active,
+.account-dropdown button:active {
+  transform: translateY(1px) scale(.972);
+}
+
+.xenus-sp-ripple {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  border-radius: 999px;
+  opacity: .44;
+  background: currentColor;
+  transform: translate(-50%, -50%) scale(0);
+  animation: xenusSPRipple 620ms ease-out forwards;
+}
+
+@keyframes xenusSPRipple {
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(22);
+  }
+}
+
+.live-panel-dot,
+.status-live,
+.online,
+[data-tone="live"],
+[data-status="online"],
+[data-state="connected"] {
+  animation: xenusSPLivePulse 2s ease-in-out infinite;
+}
+
+@keyframes xenusSPLivePulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 28%, transparent); }
+  50% { box-shadow: 0 0 0 7px color-mix(in srgb, var(--green) 0%, transparent); }
+}
+
+.panel-toast,
+.login-error,
+.invite-lockout-message,
+.status {
+  animation: xenusSPToast 420ms var(--xenus-ease-pop) both;
+}
+
+@keyframes xenusSPToast {
+  from { opacity: 0; transform: translateY(-10px) scale(.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Mobile usability */
+@media (max-width: 900px) {
+  body {
+    font-size: 13.5px !important;
+  }
+
+  .topbar {
+    position: static !important;
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    align-items: stretch !important;
+    gap: 8px !important;
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 10px 8px !important;
+  }
+
+  .topbar h1 {
+    text-align: center !important;
+    font-size: 1rem !important;
+  }
+
+  .topbar-actions {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+    width: 100% !important;
+  }
+
+  .topbar-search,
+  .topbar-select,
+  .topbar button,
+  .topbar-status,
+  .admin-mode-toggle,
+  .account-menu {
+    width: 100% !important;
+    min-height: 34px !important;
+    font-size: .78rem !important;
+  }
+
+  .account-menu {
+    grid-column: 1 / -1 !important;
+    justify-content: center !important;
+  }
+
+  .container {
+    width: calc(100vw - 10px) !important;
+    padding: 8px 5px calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    gap: 9px !important;
+  }
+
+  .swarm-tabs {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    overflow-x: auto !important;
+    gap: 6px !important;
+    padding-bottom: 4px !important;
+    margin: 4px 0 8px !important;
+    scrollbar-width: thin;
+  }
+
+  .swarm-tab {
+    flex: 0 0 auto !important;
+    min-width: max-content !important;
+    padding: 7px 10px !important;
+    font-size: .76rem !important;
+  }
+
+  .swarm-section-hero {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    padding: 12px !important;
+  }
+
+  .swarm-section-hero h2 {
+    font-size: clamp(1.08rem, 6vw, 1.55rem) !important;
+  }
+
+  .panel,
+  .deck-panel,
+  .overview-card,
+  .bot-card,
+  .np-card,
+  .invite-bot-card,
+  .user-card,
+  .diagnostic-item,
+  .worker-diagnostic-card,
+  .swarm-guild-card,
+  .control-side-card,
+  .appearance-card,
+  .appearance-preview-card {
+    padding: 11px !important;
+    border-radius: 12px !important;
+  }
+
+  .cards,
+  #bot-cards,
+  #aria-card-container,
+  #now-playing-cards,
+  .overview-grid,
+  .diagnostic-grid,
+  .worker-diagnostic-grid,
+  .direct-control-grid,
+  .appearance-grid,
+  .user-profile-grid,
+  .user-directory-grid,
+  .swarm-guild-grid,
+  .invite-bot-grid,
+  .alert-rule-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 9px !important;
+  }
+
+  .section-title-row,
+  .live-panel-title,
+  .panel-header,
+  .card-header {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 8px !important;
+  }
+
+  .section-title-row button,
+  .live-panel-title button,
+  .panel-header button,
+  .card-header button {
+    width: 100% !important;
+  }
+
+  .button-row,
+  .action-row,
+  .control-actions,
+  .card-actions,
+  .bot-actions,
+  .bot-control-actions,
+  .quick-actions {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 6px !important;
+  }
+
+  .button-row > *,
+  .action-row > *,
+  .control-actions > *,
+  .card-actions > *,
+  .bot-actions > *,
+  .bot-control-actions > *,
+  .quick-actions > * {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .table-wrap {
+    max-width: 100% !important;
+    overflow-x: auto !important;
+  }
+
+  .table-wrap table,
+  .sessions-table {
+    min-width: 680px !important;
+  }
+
+  .login-card {
+    width: calc(100vw - 20px) !important;
+    padding: 16px !important;
+  }
+
+  .panel:hover,
+  .overview-card:hover,
+  .bot-card:hover,
+  .np-card:hover,
+  .invite-bot-card:hover,
+  .user-card:hover,
+  .diagnostic-item:hover,
+  .worker-diagnostic-card:hover,
+  .swarm-guild-card:hover,
+  .control-side-card:hover,
+  .appearance-card:hover {
+    transform: translateY(-3px) scale(1.003);
+  }
+}
+
+@media (max-width: 520px) {
+  body {
+    font-size: 12.8px !important;
+  }
+
+  .topbar-actions,
+  .button-row,
+  .action-row,
+  .control-actions,
+  .card-actions,
+  .bot-actions,
+  .bot-control-actions,
+  .quick-actions {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .topbar button,
+  .topbar input,
+  .topbar select,
+  .panel button,
+  .deck-panel button,
+  .control-side-card button,
+  .bot-card button,
+  .np-card button {
+    min-height: 32px !important;
+    padding: 5px 8px !important;
+    font-size: .78rem !important;
+  }
+
+  .container {
+    width: calc(100vw - 6px) !important;
+    padding-left: 3px !important;
+    padding-right: 3px !important;
+  }
+
+  .panel,
+  .deck-panel,
+  .overview-card,
+  .bot-card,
+  .np-card,
+  .invite-bot-card,
+  .user-card,
+  .diagnostic-item,
+  .worker-diagnostic-card,
+  .swarm-guild-card,
+  .control-side-card {
+    padding: 9px !important;
+  }
+
+  .swarm-section-hero h2,
+  .panel h2 {
+    font-size: 1.05rem !important;
+  }
+
+  .muted,
+  .panel p,
+  .bot-card p,
+  .np-card p {
+    font-size: .72rem !important;
+  }
+}
+
+/* Accessibility / user preference safety */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+
+  .xenus-sp-reveal {
+    opacity: 1 !important;
+    transform: none !important;
+    filter: none !important;
+  }
+}

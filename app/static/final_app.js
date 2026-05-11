@@ -6334,3 +6334,119 @@ metricsRefreshLoop();
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });
     else boot();
 })();
+
+
+/* XENUS_SWARMPANEL_UX_ANIMATION_PACK_V1 */
+(() => {
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const ready = () => {
+    document.body.classList.add("xenus-swarmpanel-ready");
+
+    if (reduceMotion || document.body.classList.contains("panel-motion-reduced") || document.body.classList.contains("panel-low-power")) {
+      return;
+    }
+
+    const revealSelectors = [
+      ".panel",
+      ".swarm-section-hero",
+      ".overview-card",
+      ".bot-card",
+      ".np-card",
+      ".invite-bot-card",
+      ".user-card",
+      ".diagnostic-item",
+      ".worker-diagnostic-card",
+      ".swarm-guild-card",
+      ".control-side-card",
+      ".appearance-card",
+      ".appearance-preview-card",
+      ".error-entry"
+    ];
+
+    let observer = null;
+
+    const ensureObserver = () => {
+      if (!("IntersectionObserver" in window)) return null;
+      if (observer) return observer;
+
+      observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("xenus-sp-in-view");
+            observer.unobserve(entry.target);
+          }
+        }
+      }, { threshold: 0.08, rootMargin: "0px 0px -7% 0px" });
+
+      return observer;
+    };
+
+    const revealItems = () => {
+      const nodes = Array.from(document.querySelectorAll(revealSelectors.join(",")));
+      const io = ensureObserver();
+
+      nodes.forEach((node, index) => {
+        if (node.dataset.xenusSpRevealReady === "1") return;
+
+        node.dataset.xenusSpRevealReady = "1";
+        node.classList.add("xenus-sp-reveal");
+        node.style.setProperty("--xenus-sp-delay", `${Math.min(index % 14, 13) * 38}ms`);
+
+        if (io) {
+          io.observe(node);
+        } else {
+          node.classList.add("xenus-sp-in-view");
+        }
+      });
+    };
+
+    const addRipple = (event) => {
+      const target = event.target.closest("button, .swarm-tab, .topbar-status, .admin-mode-toggle, .account-dropdown button");
+      if (!target || target.disabled) return;
+
+      const rect = target.getBoundingClientRect();
+      const ripple = document.createElement("span");
+      ripple.className = "xenus-sp-ripple";
+      ripple.style.left = `${event.clientX - rect.left}px`;
+      ripple.style.top = `${event.clientY - rect.top}px`;
+
+      target.appendChild(ripple);
+      setTimeout(() => ripple.remove(), 700);
+    };
+
+    document.addEventListener("pointerdown", addRipple, { passive: true });
+
+    document.addEventListener("click", (event) => {
+      const card = event.target.closest(".bot-card, .np-card, .overview-card, .diagnostic-item, .worker-diagnostic-card, .control-side-card, .invite-bot-card, .user-card");
+      if (!card) return;
+
+      card.animate(
+        [
+          { transform: "scale(1)" },
+          { transform: "scale(.986)" },
+          { transform: "scale(1.012)" },
+          { transform: "scale(1)" }
+        ],
+        {
+          duration: 320,
+          easing: "cubic-bezier(.2, 1.35, .35, 1)"
+        }
+      );
+    }, { passive: true });
+
+    revealItems();
+
+    const mo = new MutationObserver(() => {
+      window.requestAnimationFrame(revealItems);
+    });
+
+    mo.observe(document.body, { childList: true, subtree: true });
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ready, { once: true });
+  } else {
+    ready();
+  }
+})();
