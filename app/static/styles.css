@@ -5188,3 +5188,280 @@ button:active,
     filter: none !important;
   }
 }
+
+/* =====================================================================
+   Xenus Soft 7% Upscale Patch
+   Makes SwarmPanel slightly larger while keeping compact responsive layout.
+   ===================================================================== */
+
+:root {
+  --xenus-panel-soft-scale: 1.07;
+}
+
+body {
+  font-size: clamp(12.84px, 0.835vw, 14.98px) !important;
+}
+
+@media (min-width: 901px) {
+  .topbar {
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 13px 8px 13px !important;
+    gap: 9px !important;
+  }
+
+  .topbar h1 {
+    font-size: clamp(0.96rem, 1.02vw, 1.16rem) !important;
+  }
+
+  .topbar button,
+  .topbar input,
+  .topbar select,
+  .topbar-status,
+  .admin-mode-toggle {
+    min-height: 30px !important;
+    padding: 5px 9px !important;
+    font-size: 0.77rem !important;
+  }
+
+  .topbar-search {
+    width: min(225px, 26vw) !important;
+  }
+
+  .topbar-profile-button {
+    width: 32px !important;
+    min-width: 32px !important;
+    height: 32px !important;
+  }
+
+  .topbar-profile-avatar {
+    width: 26px !important;
+    height: 26px !important;
+    font-size: 0.77rem !important;
+  }
+
+  .container {
+    width: min(1840px, calc(100vw - 18px)) !important;
+    padding: 10px !important;
+    gap: clamp(9px, 0.92vw, 15px) !important;
+  }
+
+  .swarm-tabs {
+    gap: 7px !important;
+    margin: 7px 0 9px !important;
+  }
+
+  .swarm-tab {
+    min-height: 31px !important;
+    padding: 6px 11px !important;
+    font-size: 0.77rem !important;
+  }
+
+  .panel,
+  .deck-panel,
+  .swarm-section-hero,
+  .overview-card,
+  .bot-card,
+  .np-card,
+  .invite-bot-card,
+  .user-card,
+  .diagnostic-item,
+  .worker-diagnostic-card,
+  .swarm-guild-card,
+  .control-side-card,
+  .appearance-card,
+  .appearance-preview-card,
+  .image-gallery-owner-card {
+    padding: clamp(10px, 1.02vw, 16px) !important;
+  }
+
+  .swarm-section-hero h2,
+  .panel h2,
+  .deck-panel h2 {
+    font-size: clamp(1.07rem, 1.23vw, 1.45rem) !important;
+  }
+
+  .panel h3,
+  .control-side-card h3,
+  .diagnostic-item h3,
+  .bot-card h3,
+  .np-card h3 {
+    font-size: clamp(0.92rem, 0.98vw, 1.09rem) !important;
+  }
+
+  .muted,
+  .panel p,
+  .deck-timestamp,
+  .bot-card p,
+  .np-card p,
+  .diagnostic-item p,
+  .control-side-card p,
+  .error-entry-meta {
+    font-size: 0.77rem !important;
+  }
+
+  .overview-grid,
+  .diagnostic-grid,
+  .worker-diagnostic-grid,
+  .direct-control-grid,
+  .alert-rule-grid,
+  .appearance-grid,
+  .user-profile-grid,
+  .user-directory-grid,
+  .swarm-guild-grid,
+  .invite-bot-grid,
+  .live-stream-grid,
+  .cards,
+  #bot-cards,
+  #aria-card-container,
+  #now-playing-cards {
+    gap: clamp(9px, 0.92vw, 15px) !important;
+  }
+
+  .cards,
+  #bot-cards,
+  #aria-card-container,
+  #now-playing-cards {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 268px), 1fr)) !important;
+  }
+
+  .overview-grid,
+  .diagnostic-grid,
+  .worker-diagnostic-grid,
+  .direct-control-grid,
+  .appearance-grid,
+  .user-profile-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)) !important;
+  }
+
+  .control-field input,
+  .control-field select,
+  .control-field textarea,
+  .login-field input,
+  .login-field select,
+  .login-field textarea {
+    min-height: 34px !important;
+    padding: 6px 9px !important;
+    font-size: 0.81rem !important;
+  }
+
+  .panel button,
+  .deck-panel button,
+  .control-side-card button,
+  .bot-card button,
+  .np-card button,
+  .invite-bot-card button,
+  .user-card button,
+  .diagnostic-item button,
+  .swarm-guild-card button {
+    min-height: 30px !important;
+    padding: 5px 9px !important;
+    font-size: 0.75rem !important;
+  }
+
+  .status,
+  .status-pill,
+  .topbar-status,
+  .badge,
+  .chip,
+  .user-chip,
+  .capability-item,
+  .metric-chip {
+    min-height: 25px !important;
+    padding: 4px 8px !important;
+    font-size: 0.73rem !important;
+  }
+
+  .table-wrap table,
+  .sessions-table {
+    font-size: 0.77rem !important;
+  }
+
+  .table-wrap th,
+  .table-wrap td,
+  .sessions-table th,
+  .sessions-table td {
+    padding: 7px 9px !important;
+  }
+
+  .error-entry {
+    padding: 10px !important;
+  }
+
+  .error-entry-title {
+    font-size: 0.88rem !important;
+  }
+}
+
+@media (max-width: 900px) {
+  body {
+    font-size: 14.45px !important;
+  }
+
+  .topbar h1 {
+    font-size: 1.07rem !important;
+  }
+
+  .topbar-search,
+  .topbar-select,
+  .topbar button,
+  .topbar-status,
+  .admin-mode-toggle,
+  .account-menu {
+    min-height: 36px !important;
+    font-size: 0.83rem !important;
+  }
+
+  .swarm-tab {
+    padding: 8px 11px !important;
+    font-size: 0.81rem !important;
+  }
+
+  .panel,
+  .deck-panel,
+  .overview-card,
+  .bot-card,
+  .np-card,
+  .invite-bot-card,
+  .user-card,
+  .diagnostic-item,
+  .worker-diagnostic-card,
+  .swarm-guild-card,
+  .control-side-card,
+  .appearance-card,
+  .appearance-preview-card {
+    padding: 12px !important;
+  }
+
+  .swarm-section-hero h2 {
+    font-size: clamp(1.16rem, 6.4vw, 1.66rem) !important;
+  }
+}
+
+@media (max-width: 520px) {
+  body {
+    font-size: 13.35px !important;
+  }
+
+  .topbar button,
+  .topbar input,
+  .topbar select,
+  .panel button,
+  .deck-panel button,
+  .control-side-card button,
+  .bot-card button,
+  .np-card button {
+    min-height: 34px !important;
+    font-size: 0.83rem !important;
+  }
+
+  .swarm-section-hero h2,
+  .panel h2 {
+    font-size: 1.12rem !important;
+  }
+
+  .muted,
+  .panel p,
+  .bot-card p,
+  .np-card p {
+    font-size: 0.77rem !important;
+  }
+}
