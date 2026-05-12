@@ -5465,3 +5465,101 @@ body {
     font-size: 0.77rem !important;
   }
 }
+
+/* =====================================================================
+   Xenus Single Scrollbar Fix
+   Normal pages use browser scrollbar only. Tables/log panes keep intended scroll.
+   ===================================================================== */
+
+html {
+  height: auto !important;
+  min-height: 100% !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  scrollbar-gutter: stable !important;
+}
+
+body {
+  height: auto !important;
+  min-height: 100dvh !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+/* Top-level wrappers should not make a second full-page scrollbar */
+#app,
+.app,
+.app-shell,
+.container,
+.dashboard,
+.dashboard-shell,
+.swarm-page,
+.swarm-tab-panel,
+.swarm-section,
+.panel-grid,
+.cards,
+.content,
+.main,
+main,
+.deck,
+.deck-panel,
+.panel,
+.control-main,
+.control-sidebar,
+.user-profile-shell,
+.user-directory-shell,
+.appearance-grid,
+.image-gallery-admin-shell {
+  max-height: none !important;
+  overflow-y: visible !important;
+}
+
+/* Keep intentional internal scrollers */
+.table-wrap,
+.sessions-table-wrap,
+.error-feed,
+.log-feed,
+.live-error-feed,
+.diagnostics-log,
+.websocket-log,
+pre,
+code.output,
+.scroll-panel {
+  overflow-y: auto !important;
+}
+
+/* But do not let log/feed boxes become full viewport nested pages */
+.error-feed,
+.log-feed,
+.live-error-feed,
+.diagnostics-log,
+.websocket-log,
+.scroll-panel {
+  max-height: min(520px, 58dvh) !important;
+}
+
+/* Dialog/modal behavior */
+body:has(dialog[open]),
+body:has(.modal[open]) {
+  overflow: hidden !important;
+}
+
+dialog.modal[open],
+.modal[open] {
+  overflow: hidden !important;
+}
+
+dialog.modal[open] .modal-shell,
+dialog.modal[open] .modal-shell.wide,
+dialog.modal[open] .detail-shell,
+dialog.modal[open] .profile-shell,
+dialog.modal[open] form {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  max-height: calc(100dvh - 24px) !important;
+}
+
+dialog.modal[open] form {
+  max-height: none !important;
+  overflow-y: visible !important;
+}
