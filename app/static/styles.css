@@ -5563,3 +5563,101 @@ dialog.modal[open] form {
   max-height: none !important;
   overflow-y: visible !important;
 }
+
+/* =====================================================================
+   Xenus Hard Single-Scrollbar Fix
+   Browser page scrolls normally. Logs/tables/modals keep internal scrolling.
+   ===================================================================== */
+
+html,
+body {
+  height: auto !important;
+  min-height: 100% !important;
+  max-height: none !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+body {
+  min-height: 100dvh !important;
+}
+
+/* Disable nested full-page scrolling */
+body:not(.xenus-modal-lock) #app,
+body:not(.xenus-modal-lock) .app,
+body:not(.xenus-modal-lock) .app-shell,
+body:not(.xenus-modal-lock) .container,
+body:not(.xenus-modal-lock) .dashboard,
+body:not(.xenus-modal-lock) .dashboard-shell,
+body:not(.xenus-modal-lock) .swarm-page,
+body:not(.xenus-modal-lock) .swarm-tab-panel,
+body:not(.xenus-modal-lock) .swarm-section,
+body:not(.xenus-modal-lock) .panel-grid,
+body:not(.xenus-modal-lock) .cards,
+body:not(.xenus-modal-lock) .content,
+body:not(.xenus-modal-lock) .main,
+body:not(.xenus-modal-lock) main,
+body:not(.xenus-modal-lock) .deck,
+body:not(.xenus-modal-lock) .deck-panel,
+body:not(.xenus-modal-lock) .panel,
+body:not(.xenus-modal-lock) .control-main,
+body:not(.xenus-modal-lock) .control-sidebar,
+body:not(.xenus-modal-lock) .user-profile-shell,
+body:not(.xenus-modal-lock) .user-directory-shell,
+body:not(.xenus-modal-lock) .appearance-grid,
+body:not(.xenus-modal-lock) .image-gallery-admin-shell,
+body:not(.xenus-modal-lock) .xenus-page-scroll-container {
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow-y: visible !important;
+  overflow-x: visible !important;
+}
+
+/* Keep real internal scrollers */
+.table-wrap,
+.sessions-table-wrap,
+.error-feed,
+.log-feed,
+.live-error-feed,
+.diagnostics-log,
+.websocket-log,
+pre,
+code.output,
+.scroll-panel {
+  overflow-y: auto !important;
+}
+
+.error-feed,
+.log-feed,
+.live-error-feed,
+.diagnostics-log,
+.websocket-log,
+.scroll-panel {
+  max-height: min(520px, 58dvh) !important;
+}
+
+/* Modals */
+body.xenus-modal-lock {
+  overflow: hidden !important;
+}
+
+dialog[open],
+dialog.modal[open],
+.modal[open] {
+  overflow: hidden !important;
+}
+
+dialog[open] .modal-shell,
+dialog[open] .modal-shell.wide,
+dialog[open] .detail-shell,
+dialog[open] .profile-shell {
+  max-height: calc(100dvh - 24px) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+dialog[open] form {
+  max-height: none !important;
+  overflow: visible !important;
+}
