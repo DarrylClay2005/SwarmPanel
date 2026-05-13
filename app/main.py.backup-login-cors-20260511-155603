@@ -1216,14 +1216,7 @@ async def api_session_status(request: Request):
 async def api_session_login(request: Request, payload: SessionLoginRequest):
     ip = _client_ip(request)
     _rate_limit_auth(f"login-api:{ip}:{str(payload.username or '').strip().lower()[:80]}", limit=15, window_seconds=900)
-    try:
-        auth = await _authenticate_login(payload.username, payload.password, payload.guild_id)
-    except Exception as exc:
-        action_logger.exception("API session login failed for %s", payload.username)
-        return JSONResponse(
-            {"detail": "Login backend error. Check SwarmPanel database/schema logs."},
-            status_code=503,
-        )
+    auth = await _authenticate_login(payload.username, payload.password, payload.guild_id)
     if not auth:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 

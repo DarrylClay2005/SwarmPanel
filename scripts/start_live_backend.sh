@@ -5,6 +5,8 @@ PORT="${1:-8000}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 BIN_DIR="${ROOT_DIR}/.bin"
+PYTHON_BIN="${VENV_DIR}/bin/python"
+PYTHON_TARGET_DIR="${ROOT_DIR}/.runtime/python-packages"
 CONFIG_FILE="${ROOT_DIR}/live-config.json"
 PAGES_ORIGIN="${PANEL_PAGES_ORIGIN:-https://heavenlyxenusvr.github.io}"
 PAGES_URL="${PANEL_PAGES_PUBLIC_URL:-https://heavenlyxenusvr.github.io/SwarmPanel/}"
@@ -118,10 +120,19 @@ install_python_deps() {
     rm -rf "${VENV_DIR}"
   fi
   if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-    python3 -m venv "${VENV_DIR}"
+    if ! python3 -m venv "${VENV_DIR}"; then
+      echo "python3 venv support is unavailable; installing dependencies into ${PYTHON_TARGET_DIR}." >&2
+      rm -rf "${VENV_DIR}"
+      mkdir -p "${PYTHON_TARGET_DIR}"
+      python3 -m pip install --upgrade --target "${PYTHON_TARGET_DIR}" -r "${ROOT_DIR}/requirements.txt"
+      PYTHON_BIN="python3"
+      export PYTHONPATH="${PYTHON_TARGET_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
+      return
+    fi
   fi
-  "${VENV_DIR}/bin/python" -m pip install --upgrade pip
-  "${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
+  PYTHON_BIN="${VENV_DIR}/bin/python"
+  "${PYTHON_BIN}" -m pip install --upgrade pip
+  "${PYTHON_BIN}" -m pip install -r "${ROOT_DIR}/requirements.txt"
 }
 
 cloudflared_bin() {
@@ -185,7 +196,7 @@ fi
 
 cd "${ROOT_DIR}"
 echo "Starting SwarmPanel backend on http://127.0.0.1:${PORT}"
-"${VENV_DIR}/bin/python" -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" >"${UVICORN_LOG}" 2>&1 &
+"${PYTHON_BIN}" -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" >"${UVICORN_LOG}" 2>&1 &
 UVICORN_PID="$!"
 
 for _ in {1..40}; do
