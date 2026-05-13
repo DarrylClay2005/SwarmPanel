@@ -318,6 +318,15 @@ small,
   gap: 12px;
 }
 
+.live-bots-panel .bot-grid {
+  min-height: 142px;
+  contain: layout paint;
+}
+
+.dashboard-grid[aria-busy="true"] .live-bots-panel {
+  opacity: 0.96;
+}
+
 .bot-card,
 .invite-card,
 .user-card {
@@ -328,6 +337,9 @@ small,
 
 .bot-card {
   border-color: color-mix(in srgb, var(--card-accent, var(--accent)) 38%, var(--line));
+  min-height: 142px;
+  content-visibility: auto;
+  contain-intrinsic-size: 142px 280px;
 }
 
 .bot-head {

@@ -319,7 +319,10 @@ class RuntimeDiagnosticsService:
             }
 
     async def _probe_gemini(self, api_key: str, model_id: str) -> dict[str, Any]:
-        sdk_installed = importlib.util.find_spec("google.genai") is not None
+        try:
+            sdk_installed = importlib.util.find_spec("google.genai") is not None
+        except ModuleNotFoundError:
+            sdk_installed = False
         result = {
             "status": "missing",
             "reachable": False,

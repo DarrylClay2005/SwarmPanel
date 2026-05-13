@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
@@ -1202,6 +1202,18 @@ async def logout(request: Request):
 @app.get("/intel")
 async def index() -> FileResponse:
     return FileResponse(_app_shell_path())
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    svg = (
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\">"
+        "<rect width=\"64\" height=\"64\" rx=\"14\" fill=\"#0d1117\"/>"
+        "<path d=\"M15 36c6-15 15-22 27-21 7 1 11 5 10 11-1 7-8 9-16 8l-8-1c-5 0-9 3-13 9z\" fill=\"#89b4fa\"/>"
+        "<circle cx=\"42\" cy=\"24\" r=\"5\" fill=\"#f9e2af\"/>"
+        "</svg>"
+    )
+    return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/session")
