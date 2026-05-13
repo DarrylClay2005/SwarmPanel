@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
@@ -55,6 +55,22 @@ from .emailer import send_image_gallery_verification_email, send_verification_em
 
 
 BASE_DIR = Path(__file__).resolve().parent
+REACT_SHELL_PATH = BASE_DIR / "static" / "react" / "index.html"
+APP_SHELL_PATHS = {
+    "/",
+    "/login",
+    "/dashboard",
+    "/controls",
+    "/invites",
+    "/users",
+    "/profile",
+    "/appearance",
+    "/diagnostics",
+    "/accounts",
+    "/databases",
+    "/gallery-admin",
+    "/intel",
+}
 settings = load_settings()
 db = PanelDatabase(settings)
 discord_service = DiscordInventoryService()
@@ -88,6 +104,10 @@ DISCORD_INVITE_HOSTS = {
     "www.discordapp.com",
 }
 OWNER_SCOPE_SENTINEL = "__site_owner_only__"
+
+
+def _app_shell_path() -> Path:
+    return REACT_SHELL_PATH if REACT_SHELL_PATH.exists() else BASE_DIR.parent / "index.html"
 
 
 def _validate_discord_webhook_url(value: Any) -> str:
@@ -293,7 +313,11 @@ def _security_headers(request: Request, response: JSONResponse | HTMLResponse | 
     response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     if request.url.scheme == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    if request.url.path in {"/", "/login"} or request.url.path.startswith("/api/session"):
+    if request.url.path.startswith("/static/react/assets/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif request.url.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=86400")
+    if request.url.path in APP_SHELL_PATHS or request.url.path.startswith("/api/session"):
         response.headers.setdefault("Cache-Control", "no-store")
 
 
@@ -1094,10 +1118,8 @@ def _redirect_login() -> RedirectResponse:
 
 
 @app.get("/login")
-async def login_page(request: Request):
-    if is_authenticated(request):
-        return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse(request, "login.html", {"error": None, "register_error": None})
+async def login_page() -> FileResponse:
+    return FileResponse(_app_shell_path())
 
 
 @app.post("/login")
@@ -1167,30 +1189,19 @@ async def logout(request: Request):
 
 
 @app.get("/")
-async def index(request: Request):
-    if not is_authenticated(request):
-        return _redirect_login()
-    session_username = request.session.get(SESSION_USERNAME_KEY) or settings.admin_username
-    session_role = request.session.get(SESSION_ROLE_KEY) or "admin"
-    session_guild_id = request.session.get(SESSION_GUILD_ID_KEY)
-    session_site_owner = bool(request.session.get(SESSION_SITE_OWNER_KEY))
-    session_admin_mode = request.session.get(SESSION_ADMIN_MODE_KEY)
-    if session_admin_mode is None:
-        session_admin_mode = session_site_owner and str(session_role or "").lower() == "admin" and not session_guild_id
-    return templates.TemplateResponse(request, "index.html", {
-        "session_username": session_username,
-        "session_role": session_role,
-        "session_guild_id": session_guild_id,
-        "session_site_owner": session_site_owner,
-        "session_admin_mode": bool(session_admin_mode),
-        "session_image_gallery_owner": _is_image_gallery_owner_auth({
-            "username": session_username,
-            "role": session_role,
-            "guild_id": session_guild_id,
-            "site_owner": session_site_owner,
-            "admin_mode": bool(session_admin_mode),
-        }),
-    })
+@app.get("/dashboard")
+@app.get("/controls")
+@app.get("/invites")
+@app.get("/users")
+@app.get("/profile")
+@app.get("/appearance")
+@app.get("/diagnostics")
+@app.get("/accounts")
+@app.get("/databases")
+@app.get("/gallery-admin")
+@app.get("/intel")
+async def index() -> FileResponse:
+    return FileResponse(_app_shell_path())
 
 
 @app.get("/api/session")
@@ -2335,7 +2346,7 @@ async def push_feed_event(
 
 @app.get("/api/stability")
 async def stability_data(request: Request):
-    require_api_auth(request)
+    _require_api_auth(request)
     try:
         return await db.get_stability_snapshot()
     except Exception as exc:
