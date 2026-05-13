@@ -60,6 +60,7 @@ YOUTUBE_HOSTS = {
 SOUNDCLOUD_HOST_SUFFIXES = ("soundcloud.com",)
 SOUNDCLOUD_HOSTS = {"snd.sc"}
 THUMBNAIL_CACHE_TTL_SECONDS = 60 * 60
+SMART_TITLE_NOISE_RE = re.compile(r"\s*[\[(][^\])]*(?:official|lyrics?|audio|video|visualizer|remaster|sped up|slowed)[^\])]*[\])]\s*", re.IGNORECASE)
 
 PANEL_DB_POOL_MIN_SIZE = max(1, int(os.getenv("PANEL_DB_POOL_MIN_SIZE", "1") or "1"))
 PANEL_DB_POOL_MAX_SIZE = max(PANEL_DB_POOL_MIN_SIZE, int(os.getenv("PANEL_DB_POOL_MAX_SIZE", "6") or "6"))
@@ -72,6 +73,7 @@ PANEL_SCHEMA_CACHE_TTL_SECONDS = max(10.0, float(os.getenv("PANEL_SCHEMA_CACHE_T
 PANEL_TABLE_DATA_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("PANEL_TABLE_DATA_CACHE_TTL_SECONDS", "20") or "20"))
 PANEL_TABLE_DATA_CACHE_MAX_ITEMS = max(16, int(os.getenv("PANEL_TABLE_DATA_CACHE_MAX_ITEMS", "64") or "64"))
 PANEL_IMAGE_GALLERY_ADMIN_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("PANEL_IMAGE_GALLERY_ADMIN_CACHE_TTL_SECONDS", "10") or "10"))
+PANEL_MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("PANEL_MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS", "20") or "20"))
 
 GUILD_SETTINGS_COLUMNS = (
     ("home_vc_id", "BIGINT"),
@@ -280,6 +282,13 @@ def _derive_thumbnail_url(video_url: str | None) -> str | None:
     return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
 
 
+def _smart_query_from_title(title: str | None) -> str:
+    cleaned = re.sub(r"https?://\S+", "", str(title or ""))
+    cleaned = SMART_TITLE_NOISE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -|")
+    return cleaned[:180] or str(title or "").strip()[:180]
+
+
 class PanelDatabase:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -293,6 +302,7 @@ class PanelDatabase:
         self._tables_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._table_data_cache: OrderedDict[tuple[str, str, int], tuple[float, dict[str, Any]]] = OrderedDict()
         self._image_gallery_admin_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+        self._music_intelligence_cache: dict[tuple[str | None, str | None, int], tuple[float, dict[str, Any]]] = {}
 
     def _invalidate_hot_caches(self) -> None:
         self._dashboard_cache = None
@@ -301,6 +311,7 @@ class PanelDatabase:
         self._tables_cache.clear()
         self._table_data_cache.clear()
         self._image_gallery_admin_cache.clear()
+        self._music_intelligence_cache.clear()
 
     async def _run_with_timeout(self, awaitable, timeout: float | None = None):
         return await asyncio.wait_for(awaitable, timeout=timeout or PANEL_DB_QUERY_TIMEOUT_SECONDS)
@@ -505,6 +516,43 @@ class PanelDatabase:
                     f"ALTER TABLE `{schema}`.`{prefix}_guild_settings` "
                     f"ADD COLUMN {safe_column} {definition}"
                 ), timeout=15)
+            except Exception:
+                pass
+
+    async def _ensure_music_intelligence_schema(self, cur, schema: str, prefix: str) -> None:
+        schema = _validate_identifier(schema, "schema")
+        prefix = _validate_identifier(prefix, "table prefix")
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_track_intelligence` ("
+            "guild_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, "
+            "queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, "
+            "skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, "
+            "total_listen_seconds INT NOT NULL DEFAULT 0, last_requester_id BIGINT DEFAULT NULL, source VARCHAR(40) DEFAULT 'unknown', "
+            "first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_queued TIMESTAMP NULL DEFAULT NULL, last_played TIMESTAMP NULL DEFAULT NULL, "
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, url_key))"
+        )
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_user_track_affinity` ("
+            "guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, url_key VARCHAR(64) NOT NULL, video_url TEXT, title TEXT, "
+            "queued_count INT NOT NULL DEFAULT 0, play_count INT NOT NULL DEFAULT 0, finish_count INT NOT NULL DEFAULT 0, "
+            "skip_count INT NOT NULL DEFAULT 0, like_count INT NOT NULL DEFAULT 0, dislike_count INT NOT NULL DEFAULT 0, "
+            "score FLOAT NOT NULL DEFAULT 0, last_requested TIMESTAMP NULL DEFAULT NULL, "
+            "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (guild_id, user_id, url_key))"
+        )
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_smart_recommendations` ("
+            "id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT NOT NULL, requester_id BIGINT DEFAULT NULL, "
+            "seed_title TEXT, seed_url TEXT, query_text TEXT, chosen_url TEXT, chosen_title TEXT, "
+            "reason VARCHAR(80), accepted BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        for stmt in (
+            f"CREATE INDEX {prefix}_track_intelligence_recent_idx ON `{schema}`.`{prefix}_track_intelligence` (guild_id, last_played)",
+            f"CREATE INDEX {prefix}_track_intelligence_requester_idx ON `{schema}`.`{prefix}_track_intelligence` (guild_id, last_requester_id, last_played)",
+            f"CREATE INDEX {prefix}_user_affinity_recent_idx ON `{schema}`.`{prefix}_user_track_affinity` (guild_id, user_id, last_requested)",
+            f"CREATE INDEX {prefix}_smart_recommendations_recent_idx ON `{schema}`.`{prefix}_smart_recommendations` (guild_id, created_at)",
+        ):
+            try:
+                await cur.execute(stmt)
             except Exception:
                 pass
 
@@ -1125,7 +1173,17 @@ class PanelDatabase:
         return profiles
 
     def _empty_music_activity_summary(self) -> dict[str, Any]:
-        return {"top_tracks": [], "top_bots": [], "active_sessions": [], "total_plays": 0}
+        return {
+            "top_tracks": [],
+            "top_bots": [],
+            "active_sessions": [],
+            "total_plays": 0,
+            "learned_tracks": 0,
+            "smart_likes": 0,
+            "smart_dislikes": 0,
+            "smart_recommendations": 0,
+            "top_smart_tracks": [],
+        }
 
     async def get_music_activity_summary_for_guilds(self, guild_ids: list[str | int]) -> dict[str, dict[str, Any]]:
         normalized_guilds = sorted({_coerce_int(guild_id, "guild_id") for guild_id in guild_ids if guild_id not in (None, "")})
@@ -1224,7 +1282,206 @@ class PanelDatabase:
             ]
             summaries[str(guild_id)]["active_sessions"] = per_guild_active[guild_id][:4]
 
+        intelligence = await self.get_music_intelligence_summary(limit=3, guild_ids=normalized_guilds)
+        for bot_summary in intelligence.get("bots", []):
+            for guild_row in bot_summary.get("guilds", []):
+                guild_id = str(guild_row.get("guild_id"))
+                if guild_id not in summaries:
+                    continue
+                smart = summaries[guild_id]
+                smart["learned_tracks"] += int(guild_row.get("learned_tracks") or 0)
+                smart["smart_likes"] += int(guild_row.get("likes") or 0)
+                smart["smart_dislikes"] += int(guild_row.get("dislikes") or 0)
+                smart["smart_recommendations"] += int(guild_row.get("recommendations") or 0)
+                for track in bot_summary.get("top_tracks", []):
+                    if str(track.get("guild_id")) == guild_id:
+                        smart["top_smart_tracks"].append({
+                            "bot_key": bot_summary.get("bot_key"),
+                            "bot_display": bot_summary.get("bot_display"),
+                            "title": track.get("title"),
+                            "smart_score": track.get("smart_score"),
+                        })
+        for summary in summaries.values():
+            summary["top_smart_tracks"] = sorted(
+                summary["top_smart_tracks"],
+                key=lambda item: -float(item.get("smart_score") or 0),
+            )[:3]
+
         return summaries
+
+    async def get_music_intelligence_summary(
+        self,
+        guild_id: str | int | None = None,
+        bot_key: str | None = None,
+        limit: int = 8,
+        guild_ids: list[int] | None = None,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 8), 25))
+        normalized_guild_id = _coerce_int(guild_id, "guild_id") if guild_id not in (None, "") else None
+        normalized_guild_ids = sorted({int(gid) for gid in (guild_ids or [])})
+        if normalized_guild_id is not None:
+            normalized_guild_ids = [normalized_guild_id]
+        normalized_bot_key = str(bot_key or "").strip().lower() or None
+        if normalized_bot_key and normalized_bot_key not in BOT_INDEX:
+            raise ValueError("Unknown bot key")
+        bots = [BOT_INDEX[normalized_bot_key]] if normalized_bot_key else list(MUSIC_BOTS)
+
+        cache_guild_key = ",".join(str(gid) for gid in normalized_guild_ids) if normalized_guild_ids else None
+        cache_key = (cache_guild_key, normalized_bot_key, safe_limit)
+        now = time.monotonic()
+        cached = self._music_intelligence_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1])
+
+        totals = {
+            "learned_tracks": 0,
+            "plays": 0,
+            "finishes": 0,
+            "skips": 0,
+            "likes": 0,
+            "dislikes": 0,
+            "recommendations": 0,
+        }
+        result_bots: list[dict[str, Any]] = []
+
+        for bot in bots:
+            if bot.kind != "music" or not bot.db_schema or not bot.table_prefix:
+                continue
+            schema = _validate_identifier(bot.db_schema, "schema")
+            prefix = _validate_identifier(bot.table_prefix, "table prefix")
+            intelligence_table = f"{prefix}_track_intelligence"
+            affinity_table = f"{prefix}_user_track_affinity"
+            recommendations_table = f"{prefix}_smart_recommendations"
+            if not await self._table_exists(schema, intelligence_table):
+                continue
+
+            where = ""
+            params: tuple[Any, ...] = ()
+            if normalized_guild_ids:
+                placeholders = ", ".join(["%s"] * len(normalized_guild_ids))
+                where = f"WHERE guild_id IN ({placeholders})"
+                params = tuple(normalized_guild_ids)
+
+            summary = await self._fetchone(
+                f"""
+                SELECT COUNT(*) AS learned_tracks,
+                       COALESCE(SUM(play_count), 0) AS plays,
+                       COALESCE(SUM(finish_count), 0) AS finishes,
+                       COALESCE(SUM(skip_count), 0) AS skips,
+                       COALESCE(SUM(like_count), 0) AS likes,
+                       COALESCE(SUM(dislike_count), 0) AS dislikes
+                FROM `{schema}`.`{intelligence_table}`
+                {where}
+                """,
+                params,
+            ) or {}
+            top_tracks = await self._fetchall(
+                f"""
+                SELECT guild_id, title, video_url, play_count, finish_count, skip_count, like_count, dislike_count,
+                       ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score,
+                       updated_at
+                FROM `{schema}`.`{intelligence_table}`
+                {where}
+                ORDER BY smart_score DESC, updated_at DESC
+                LIMIT %s
+                """,
+                (*params, safe_limit),
+            )
+
+            guild_rows: list[dict[str, Any]] = []
+            if normalized_guild_ids:
+                guild_rows = await self._fetchall(
+                    f"""
+                    SELECT guild_id, COUNT(*) AS learned_tracks,
+                           COALESCE(SUM(play_count), 0) AS plays,
+                           COALESCE(SUM(like_count), 0) AS likes,
+                           COALESCE(SUM(dislike_count), 0) AS dislikes
+                    FROM `{schema}`.`{intelligence_table}`
+                    {where}
+                    GROUP BY guild_id
+                    """,
+                    params,
+                )
+            elif summary.get("learned_tracks"):
+                guild_rows = await self._fetchall(
+                    f"""
+                    SELECT guild_id, COUNT(*) AS learned_tracks,
+                           COALESCE(SUM(play_count), 0) AS plays,
+                           COALESCE(SUM(like_count), 0) AS likes,
+                           COALESCE(SUM(dislike_count), 0) AS dislikes
+                    FROM `{schema}`.`{intelligence_table}`
+                    GROUP BY guild_id
+                    ORDER BY learned_tracks DESC
+                    LIMIT %s
+                    """,
+                    (safe_limit,),
+                )
+
+            top_users: list[dict[str, Any]] = []
+            if await self._table_exists(schema, affinity_table):
+                top_users = await self._fetchall(
+                    f"""
+                    SELECT guild_id, user_id, COUNT(*) AS track_count, COALESCE(SUM(score), 0) AS taste_score,
+                           COALESCE(SUM(like_count), 0) AS likes, COALESCE(SUM(dislike_count), 0) AS dislikes
+                    FROM `{schema}`.`{affinity_table}`
+                    {where}
+                    GROUP BY guild_id, user_id
+                    ORDER BY taste_score DESC, likes DESC
+                    LIMIT %s
+                    """,
+                    (*params, safe_limit),
+                )
+
+            recommendation_count = 0
+            if await self._table_exists(schema, recommendations_table):
+                rec_row = await self._fetchone(
+                    f"SELECT COUNT(*) AS recommendations FROM `{schema}`.`{recommendations_table}` {where}",
+                    params,
+                ) or {}
+                recommendation_count = int(rec_row.get("recommendations") or 0)
+                if guild_rows:
+                    rec_rows = await self._fetchall(
+                        f"SELECT guild_id, COUNT(*) AS recommendations FROM `{schema}`.`{recommendations_table}` {where} GROUP BY guild_id",
+                        params,
+                    )
+                    rec_map = {int(row["guild_id"]): int(row.get("recommendations") or 0) for row in rec_rows}
+                    for row in guild_rows:
+                        row["recommendations"] = rec_map.get(int(row["guild_id"]), 0)
+
+            item = {
+                "bot_key": bot.key,
+                "bot_display": bot.display_name,
+                "schema": schema,
+                "learned_tracks": int(summary.get("learned_tracks") or 0),
+                "plays": int(summary.get("plays") or 0),
+                "finishes": int(summary.get("finishes") or 0),
+                "skips": int(summary.get("skips") or 0),
+                "likes": int(summary.get("likes") or 0),
+                "dislikes": int(summary.get("dislikes") or 0),
+                "recommendations": recommendation_count,
+                "top_tracks": top_tracks,
+                "top_users": top_users,
+                "guilds": guild_rows,
+            }
+            result_bots.append(item)
+            totals["learned_tracks"] += item["learned_tracks"]
+            totals["plays"] += item["plays"]
+            totals["finishes"] += item["finishes"]
+            totals["skips"] += item["skips"]
+            totals["likes"] += item["likes"]
+            totals["dislikes"] += item["dislikes"]
+            totals["recommendations"] += item["recommendations"]
+
+        result = {
+            "guild_id": str(normalized_guild_id) if normalized_guild_id is not None else None,
+            "guild_ids": [str(gid) for gid in normalized_guild_ids],
+            "bot_key": normalized_bot_key,
+            "totals": totals,
+            "bots": result_bots,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._music_intelligence_cache[cache_key] = (time.monotonic() + PANEL_MUSIC_INTELLIGENCE_CACHE_TTL_SECONDS, copy.deepcopy(result))
+        return result
 
     async def _resolve_soundcloud_thumbnail(self, video_url: str | None) -> str | None:
         if not _is_soundcloud_url(video_url):
@@ -1368,6 +1625,9 @@ class PanelDatabase:
         direct_orders_table = f"{prefix}_swarm_direct_orders"
         heartbeat_table = "swarm_health"
         metrics_table = f"{prefix}_metrics"
+        intelligence_table = f"{prefix}_track_intelligence"
+        affinity_table = f"{prefix}_user_track_affinity"
+        recommendations_table = f"{prefix}_smart_recommendations"
 
         table_exists = {
             "playback": await self._table_exists(schema, playback_table),
@@ -1378,6 +1638,9 @@ class PanelDatabase:
             "direct_orders": await self._table_exists(schema, direct_orders_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
             "metrics": await self._table_exists(schema, metrics_table),
+            "intelligence": await self._table_exists(schema, intelligence_table),
+            "affinity": await self._table_exists(schema, affinity_table),
+            "recommendations": await self._table_exists(schema, recommendations_table),
         }
 
         playback: dict[str, Any] = {}
@@ -1390,6 +1653,15 @@ class PanelDatabase:
         feedback_channel_id: int | None = None
         heartbeat_age = None
         heartbeat_status = "unknown"
+        intelligence = {
+            "learned_tracks": 0,
+            "plays": 0,
+            "likes": 0,
+            "dislikes": 0,
+            "recommendations": 0,
+            "top_seed": None,
+            "top_user": None,
+        }
 
         if table_exists["playback"]:
             try:
@@ -1498,6 +1770,61 @@ class PanelDatabase:
                 heartbeat_age = int(row.get("heartbeat_age") or 0)
                 heartbeat_status = row.get("status") or "unknown"
 
+        if table_exists["intelligence"]:
+            row = await self._fetchone(
+                f"""
+                SELECT COUNT(*) AS learned_tracks,
+                       COALESCE(SUM(play_count), 0) AS plays,
+                       COALESCE(SUM(like_count), 0) AS likes,
+                       COALESCE(SUM(dislike_count), 0) AS dislikes
+                FROM `{schema}`.`{intelligence_table}`
+                WHERE guild_id = %s
+                """,
+                (gid,),
+            ) or {}
+            intelligence.update({
+                "learned_tracks": int(row.get("learned_tracks") or 0),
+                "plays": int(row.get("plays") or 0),
+                "likes": int(row.get("likes") or 0),
+                "dislikes": int(row.get("dislikes") or 0),
+            })
+            top_seed = await self._fetchone(
+                f"""
+                SELECT title, video_url,
+                       ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score
+                FROM `{schema}`.`{intelligence_table}`
+                WHERE guild_id = %s AND dislike_count <= like_count
+                ORDER BY smart_score DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (gid,),
+            )
+            if top_seed:
+                intelligence["top_seed"] = top_seed
+
+        if table_exists["affinity"]:
+            top_user = await self._fetchone(
+                f"""
+                SELECT user_id, COUNT(*) AS track_count, COALESCE(SUM(score), 0) AS taste_score,
+                       COALESCE(SUM(like_count), 0) AS likes, COALESCE(SUM(dislike_count), 0) AS dislikes
+                FROM `{schema}`.`{affinity_table}`
+                WHERE guild_id = %s
+                GROUP BY user_id
+                ORDER BY taste_score DESC, likes DESC
+                LIMIT 1
+                """,
+                (gid,),
+            )
+            if top_user:
+                intelligence["top_user"] = top_user
+
+        if table_exists["recommendations"]:
+            row = await self._fetchone(
+                f"SELECT COUNT(*) AS recommendations FROM `{schema}`.`{recommendations_table}` WHERE guild_id = %s",
+                (gid,),
+            ) or {}
+            intelligence["recommendations"] = int(row.get("recommendations") or 0)
+
         session_state, session_state_label = _derive_session_state(
             playback,
             queue_count=queue_count,
@@ -1570,6 +1897,7 @@ class PanelDatabase:
                 "home_channel_name": None,
                 "feedback_channel_id": str(feedback_channel_id) if feedback_channel_id else None,
                 "feedback_channel_name": None,
+                "intelligence": intelligence,
             },
         }
 
@@ -1584,6 +1912,8 @@ class PanelDatabase:
         home_table = f"{prefix}_bot_home_channels"
         heartbeat_table = "swarm_health"
         metrics_table = f"{prefix}_metrics"
+        intelligence_table = f"{prefix}_track_intelligence"
+        recommendations_table = f"{prefix}_smart_recommendations"
 
         table_exists = {
             "playback": await self._table_exists(schema, playback_table),
@@ -1593,6 +1923,8 @@ class PanelDatabase:
             "home": await self._table_exists(schema, home_table),
             "heartbeat": await self._table_exists(schema, heartbeat_table),
             "metrics": await self._table_exists(schema, metrics_table),
+            "intelligence": await self._table_exists(schema, intelligence_table),
+            "recommendations": await self._table_exists(schema, recommendations_table),
         }
 
         playback_rows: list[dict[str, Any]] = []
@@ -1601,6 +1933,8 @@ class PanelDatabase:
         backup_queue_map: dict[int, int] = {}
         home_map: dict[int, int | None] = {}
         metrics_map: dict[int, dict[str, Any]] = {}
+        intelligence_map: dict[int, dict[str, Any]] = {}
+        recommendation_map: dict[int, int] = {}
         known_guilds: set[int] = set()
 
         if table_exists["playback"]:
@@ -1677,6 +2011,40 @@ class PanelDatabase:
             except Exception:
                 logger.exception("Failed reading metrics for %s", bot.key)
 
+        if table_exists.get("intelligence"):
+            try:
+                rows = await self._fetchall(
+                    f"""
+                    SELECT guild_id, COUNT(*) AS learned_tracks,
+                           COALESCE(SUM(play_count), 0) AS plays,
+                           COALESCE(SUM(like_count), 0) AS likes,
+                           COALESCE(SUM(dislike_count), 0) AS dislikes
+                    FROM `{schema}`.`{intelligence_table}`
+                    GROUP BY guild_id
+                    """
+                )
+                for row in rows:
+                    guild_id = int(row["guild_id"])
+                    intelligence_map[guild_id] = {
+                        "learned_tracks": int(row.get("learned_tracks") or 0),
+                        "plays": int(row.get("plays") or 0),
+                        "likes": int(row.get("likes") or 0),
+                        "dislikes": int(row.get("dislikes") or 0),
+                    }
+                    known_guilds.add(guild_id)
+            except Exception:
+                logger.exception("Failed reading music intelligence for %s", bot.key)
+
+        if table_exists.get("recommendations"):
+            try:
+                rows = await self._fetchall(
+                    f"SELECT guild_id, COUNT(*) AS recommendations FROM `{schema}`.`{recommendations_table}` GROUP BY guild_id"
+                )
+                for row in rows:
+                    recommendation_map[int(row["guild_id"])] = int(row.get("recommendations") or 0)
+            except Exception:
+                logger.exception("Failed reading smart recommendations for %s", bot.key)
+
         playback_map = {int(row["guild_id"]): row for row in playback_rows if row.get("guild_id") is not None}
         sessions = []
         active_playing_count = 0
@@ -1689,6 +2057,8 @@ class PanelDatabase:
             queue_count = queue_map.get(guild_id, 0)
             backup_queue_count = backup_queue_map.get(guild_id, 0)
             home_channel_id = home_map.get(guild_id)
+            smart = dict(intelligence_map.get(guild_id, {}))
+            smart["recommendations"] = recommendation_map.get(guild_id, 0)
             source_info = _detect_media_source(playback.get("video_url"))
             metric_fresh = int(metric.get("metric_age_seconds") or 999999) <= 90 if metric else False
             is_playing = bool(metric.get("player_playing")) if metric_fresh else bool(playback.get("is_playing"))
@@ -1730,6 +2100,7 @@ class PanelDatabase:
                     "home_channel_name": None,
                     "guild_name": None,
                     "channel_name": None,
+                    "intelligence": smart,
                 }
             )
 
@@ -1764,6 +2135,8 @@ class PanelDatabase:
             "heartbeat_status": heartbeat_status,
             "active_playing_count": active_playing_count,
             "known_guild_count": len(known_guilds),
+            "learned_track_count": sum(int(item.get("learned_tracks") or 0) for item in intelligence_map.values()),
+            "smart_recommendation_count": sum(recommendation_map.values()),
             "sessions": sessions,
         }
 
@@ -2744,6 +3117,76 @@ class PanelDatabase:
                             values = tuple(row[c] for c in cols)
                             await cur.execute(f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})", values)
                     result["message"] = f"Shuffled the queue for guild {gid} on {bot.display_name}."
+
+                elif action == "SMART_RECOMMEND":
+                    if not isinstance(payload, dict):
+                        raise ValueError("SMART_RECOMMEND payload must be an object with voice_channel_id")
+                    await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)
+                    await self._ensure_music_intelligence_schema(cur, schema, prefix)
+                    voice_channel_id = _coerce_int(payload.get("voice_channel_id"), "voice_channel_id")
+                    text_channel_raw = payload.get("text_channel_id")
+                    text_channel_id = _coerce_int(text_channel_raw, "text_channel_id") if text_channel_raw not in (None, "", 0, "0") else 0
+                    requester_raw = payload.get("requester_id")
+                    requester_id = _coerce_int(requester_raw, "requester_id") if requester_raw not in (None, "", 0, "0") else None
+
+                    seed = None
+                    reason = "server_favorite"
+                    if requester_id:
+                        await cur.execute(
+                            f"""
+                            SELECT title, video_url, score
+                            FROM `{schema}`.`{prefix}_user_track_affinity`
+                            WHERE guild_id = %s AND user_id = %s AND dislike_count <= like_count
+                            ORDER BY score DESC, last_requested DESC
+                            LIMIT 1
+                            """,
+                            (gid, requester_id),
+                        )
+                        seed = await cur.fetchone()
+                        if seed:
+                            reason = "personal_taste"
+                    if not seed:
+                        await cur.execute(
+                            f"""
+                            SELECT title, video_url,
+                                   ((finish_count * 3) + (like_count * 5) + play_count - (skip_count * 2) - (dislike_count * 5)) AS smart_score
+                            FROM `{schema}`.`{prefix}_track_intelligence`
+                            WHERE guild_id = %s AND dislike_count <= like_count
+                            ORDER BY smart_score DESC, updated_at DESC
+                            LIMIT 1
+                            """,
+                            (gid,),
+                        )
+                        seed = await cur.fetchone()
+                    if not seed:
+                        raise ValueError("No smart recommendation seed exists for this bot and guild yet")
+
+                    seed_title = str(seed.get("title") or seed.get("video_url") or "").strip()
+                    query_text = f"ytmsearch:{_smart_query_from_title(seed_title)} radio"
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
+                        "id INT AUTO_INCREMENT PRIMARY KEY, "
+                        "bot_name VARCHAR(50), guild_id BIGINT, vc_id BIGINT, text_channel_id BIGINT, "
+                        "command VARCHAR(50), data TEXT, attempts INT NOT NULL DEFAULT 0, last_error TEXT NULL)"
+                    )
+                    await cur.execute(
+                        f"INSERT INTO `{schema}`.`{prefix}_swarm_direct_orders` "
+                        "(bot_name, guild_id, vc_id, text_channel_id, command, data) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (bot_key, gid, voice_channel_id, text_channel_id, "PLAY", query_text),
+                    )
+                    await cur.execute(
+                        f"""
+                        INSERT INTO `{schema}`.`{prefix}_smart_recommendations`
+                        (guild_id, requester_id, seed_title, seed_url, query_text, reason)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (gid, requester_id, seed_title, seed.get("video_url"), query_text, reason),
+                    )
+                    result["seed_title"] = seed_title
+                    result["query_text"] = query_text
+                    result["reason"] = reason
+                    result["message"] = f"Queued a smart recommendation for {bot.display_name} in guild {gid} using {seed_title[:120]}."
 
                 elif action == "PLAY":
                     await self._clear_pending_orders(cur, schema, prefix, gid, bot_key)

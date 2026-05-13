@@ -28,6 +28,7 @@ let panelPreferencesState = {};
 let controlInventoryState = null;
 let controlMatrixState = { guildId: null, bots: [], loaded: false, generatedAt: null };
 let selectedControlState = { botKey: null, guildId: null, loaded: false, data: null };
+let musicIntelligenceState = { guildId: null, botKey: null, loaded: false, data: null };
 let controlInventoryLoading = false;
 let controlInventoryRequestId = 0;
 let controlMatrixRequestId = 0;
@@ -1693,6 +1694,12 @@ function clearSelectedControlState(botKey = null, guildId = null) {
         loaded: false,
         data: null,
     };
+    musicIntelligenceState = {
+        botKey: botKey ? String(botKey) : null,
+        guildId: guildId ? String(guildId) : null,
+        loaded: false,
+        data: null,
+    };
 }
 
 function getSelectedControlBot(botKey, guildId = null) {
@@ -1779,6 +1786,7 @@ function setDirectControlsDisabled(disabled) {
         'control-filter-select',
         'control-source-input',
         'queue-from-panel',
+        'smart-recommend-panel',
         'apply-loop-mode',
         'apply-filter-mode',
         'set-home-channel',
@@ -4114,6 +4122,7 @@ function syncControlSelectionsFromDashboard() {
     }
 
     renderControlContext();
+    renderMusicIntelligence();
     renderAriaCommandGuide();
     renderSelectedBotCapabilities();
     renderSelectedGuildMatrix();
@@ -4277,6 +4286,7 @@ function renderControlContext() {
     const feedbackName = session?.feedback_channel_name || (session?.feedback_channel_id ? `Feedback ${session.feedback_channel_id}` : 'Not set');
     const backupQueueCount = Number(session?.backup_queue_count || 0);
     const pendingOrders = Number(session?.pending_direct_orders || 0);
+    const learnedTracks = Number(session?.intelligence?.learned_tracks || 0);
     const heartbeatAge = getControlHeartbeatAge(botKey, guildId);
     const trackLabel = session?.title
         || (sessionState.key === 'queued'
@@ -4316,6 +4326,7 @@ function renderControlContext() {
             <span>Feedback: ${escapeHtml(feedbackName)}</span>
             <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
             <span>Backup: ${escapeHtml(String(backupQueueCount))}</span>
+            <span>Learned: ${escapeHtml(String(learnedTracks))}</span>
             <span>Pending orders: ${escapeHtml(String(pendingOrders))}</span>
             <span>Loop: ${escapeHtml(normalizeLoopMode(session?.loop_mode))}</span>
             <span>Filter: ${escapeHtml(session?.filter_mode || 'none')}</span>
@@ -4325,6 +4336,88 @@ function renderControlContext() {
             <span>Live sync: ${escapeHtml(liveMatrixReady ? 'connected' : 'fallback')}</span>
         </div>
     `;
+}
+
+function getSelectedMusicIntelligence() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const session = botKey && guildId ? getBestControlSession(botKey, guildId) : null;
+    const live = session?.intelligence || null;
+    const fetchedReady = musicIntelligenceState.loaded
+        && String(musicIntelligenceState.botKey || '') === String(botKey || '')
+        && String(musicIntelligenceState.guildId || '') === String(guildId || '');
+    const fetchedBot = fetchedReady
+        ? (musicIntelligenceState.data?.bots || []).find(bot => bot.bot_key === botKey)
+        : null;
+    return { live, fetchedBot };
+}
+
+function renderMusicIntelligence() {
+    const container = document.getElementById('music-intelligence-card');
+    if (!container) return;
+
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    if (!botKey || !guildId) {
+        container.innerHTML = '<div class="control-context-empty">Choose a bot and guild to inspect learned music taste.</div>';
+        return;
+    }
+
+    const { live, fetchedBot } = getSelectedMusicIntelligence();
+    const topSeed = live?.top_seed || fetchedBot?.top_tracks?.[0] || null;
+    const learnedTracks = Number(live?.learned_tracks ?? fetchedBot?.learned_tracks ?? 0);
+    const plays = Number(live?.plays ?? fetchedBot?.plays ?? 0);
+    const likes = Number(live?.likes ?? fetchedBot?.likes ?? 0);
+    const dislikes = Number(live?.dislikes ?? fetchedBot?.dislikes ?? 0);
+    const recommendations = Number(live?.recommendations ?? fetchedBot?.recommendations ?? 0);
+    const topUsers = fetchedBot?.top_users || [];
+    const topUser = live?.top_user || topUsers[0] || null;
+    const seedTitle = topSeed?.title || 'No smart seed yet';
+
+    container.innerHTML = `
+        <div class="capability-item">
+            <div class="capability-item-head">
+                <span>Smart recommend</span>
+                ${diagnosticBadge(learnedTracks > 0 ? 'online' : 'missing')}
+            </div>
+            <div class="capability-item-body">${escapeHtml(learnedTracks > 0 ? `Ready from ${learnedTracks} learned tracks.` : 'The smart tables are reachable, but this guild needs more listens, likes, or finishes first.')}</div>
+        </div>
+        <div class="capability-item">
+            <div class="capability-item-head"><span>Top seed</span></div>
+            <div class="capability-item-body">${escapeHtml(seedTitle)}</div>
+        </div>
+        <div class="capability-item">
+            <div class="capability-item-head"><span>Signals</span></div>
+            <div class="capability-item-body">${escapeHtml(`${plays} plays, ${likes} likes, ${dislikes} dislikes, ${recommendations} recommendations`)}</div>
+        </div>
+        <div class="capability-item">
+            <div class="capability-item-head"><span>Strongest listener</span></div>
+            <div class="capability-item-body">${escapeHtml(topUser?.user_id ? `User ${topUser.user_id} across ${topUser.track_count || 0} tracks` : 'No listener affinity rows yet')}</div>
+        </div>
+    `;
+}
+
+async function fetchMusicIntelligence(options = {}) {
+    const { force = false } = options;
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    if (!botKey || !guildId) {
+        renderMusicIntelligence();
+        return;
+    }
+    try {
+        const data = await cachedJsonFetch(`${API_BASE}/music-intelligence?guild_id=${encodeURIComponent(guildId)}&bot_key=${encodeURIComponent(botKey)}&limit=5`, { ttlMs: 20000, force });
+        musicIntelligenceState = {
+            botKey: String(botKey),
+            guildId: String(guildId),
+            loaded: true,
+            data: data.data || data,
+        };
+    } catch (err) {
+        console.error('❌ Music intelligence fetch failed:', err);
+        musicIntelligenceState = { botKey: String(botKey), guildId: String(guildId), loaded: false, data: null };
+    }
+    renderMusicIntelligence();
 }
 
 function renderAriaCommandGuide() {
@@ -4419,6 +4512,7 @@ async function applyCommandPreset(preset = selectedCommandPreset()) {
         }
         if (voice && preset.voiceChannelId) voice.value = preset.voiceChannelId;
         renderControlContext();
+        renderMusicIntelligence();
         renderAriaCommandGuide();
         renderSelectedBotCapabilities();
     showPanelToast('Preset applied.', 'success');
@@ -4525,6 +4619,15 @@ function renderSelectedBotCapabilities() {
                 : 'Select a guild and voice channel first.',
         },
         {
+            label: 'Smart recommend',
+            ready: dbReady && guildInventoryReady && hasVoice && Number(session?.intelligence?.learned_tracks || 0) > 0,
+            reason: !dbReady ? dbAccess.message
+                : !guildInventoryReady ? inventoryReason
+                : !hasVoice ? 'Select a voice channel for the recommendation.'
+                : Number(session?.intelligence?.learned_tracks || 0) > 0 ? 'Learned taste data can be turned into a queued recommendation.'
+                : 'The smart tables exist, but this bot needs more learned tracks for this guild.',
+        },
+        {
             label: 'Set home channel',
             ready: dbReady && guildInventoryReady && hasVoice,
             reason: !dbReady ? dbAccess.message
@@ -4621,6 +4724,7 @@ function renderSelectedGuildMatrix() {
         const discordAccess = bot.discord || deriveBotDiscordAccess(bot.key, guildId);
         const status = getControlBotStatus(bot.key, guildId);
         const homeLabel = session?.home_channel_name || (session?.home_channel_id ? `Home ${session.home_channel_id}` : 'No home channel');
+        const smart = session?.intelligence || {};
         const sessionState = describeSessionState(session);
         const activityLabel = session
             ? sessionState.key === 'playing'
@@ -4646,6 +4750,7 @@ function renderSelectedGuildMatrix() {
                     <span>Home: ${escapeHtml(homeLabel)}</span>
                     <span>Queue: ${escapeHtml(String(session?.queue_count ?? 0))}</span>
                     <span>Backup: ${escapeHtml(String(session?.backup_queue_count ?? 0))}</span>
+                    <span>Learned: ${escapeHtml(String(smart?.learned_tracks ?? 0))}</span>
                     <span>Pending: ${escapeHtml(String(session?.pending_direct_orders ?? 0))}</span>
                     <span>DB: ${escapeHtml(describeDiagnosticState(dbAccess.status).label)}</span>
                     <span>Discord: ${escapeHtml(describeDiagnosticState(discordAccess.status).label)}</span>
@@ -4664,6 +4769,7 @@ async function fetchSelectedControlState(options = {}) {
     if (!botKey || !guildId) {
         clearSelectedControlState(botKey, guildId);
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         return;
     }
@@ -4681,6 +4787,7 @@ async function fetchSelectedControlState(options = {}) {
     if (!botKey || !guildId) {
         clearSelectedControlState(botKey, guildId);
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         return;
     }
@@ -4701,7 +4808,9 @@ async function fetchSelectedControlState(options = {}) {
             data,
         };
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
+        fetchMusicIntelligence({ force: false });
 
         if (!silent) {
             const guildLabel = data?.session?.guild_name || selectedOptionText('control-guild-select') || guildId;
@@ -4711,6 +4820,7 @@ async function fetchSelectedControlState(options = {}) {
         if (requestId !== selectedControlRequestId) return;
         clearSelectedControlState(botKey, guildId);
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         if (!silent) {
             setControlStatus(`Failed to load selected control state: ${err}`, true);
@@ -4767,6 +4877,7 @@ async function loadControlInventory(botKey) {
             controlInventoryLoading = false;
             setDirectControlsDisabled(false);
             renderControlContext();
+            renderMusicIntelligence();
             renderSelectedBotCapabilities();
             renderSelectedGuildMatrix();
         }
@@ -4791,6 +4902,7 @@ async function fetchControlMatrix(options = {}) {
     if (!guildId) {
         clearControlMatrixState();
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
         return;
@@ -4812,6 +4924,7 @@ async function fetchControlMatrix(options = {}) {
             generatedAt: data.generated_at || null,
         };
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
 
@@ -4822,6 +4935,7 @@ async function fetchControlMatrix(options = {}) {
         if (requestId !== controlMatrixRequestId) return;
         clearControlMatrixState(guildId);
         renderControlContext();
+        renderMusicIntelligence();
         renderSelectedBotCapabilities();
         renderSelectedGuildMatrix();
         if (!silent) {
@@ -4874,6 +4988,44 @@ async function queueFromPanel() {
         fetchControlMatrix({ silent: true });
     }, 2200);
     renderAriaCommandGuide();
+}
+
+async function smartRecommendFromPanel() {
+    const botKey = document.getElementById('control-bot-select')?.value;
+    const guildId = document.getElementById('control-guild-select')?.value;
+    const voiceChannelId = document.getElementById('control-voice-select')?.value;
+
+    if (controlInventoryLoading) {
+        setControlStatus('Wait for the selected bot inventory to finish loading before asking for a smart recommendation.', true);
+        return;
+    }
+    if (!botKey || !guildId) {
+        setControlStatus('Select a bot and guild before asking for a smart recommendation.', true);
+        return;
+    }
+    if (!voiceChannelId) {
+        setControlStatus('Choose the voice channel that bot should use.', true);
+        return;
+    }
+
+    setControlStatus('Asking the selected bot for a learned recommendation...');
+    const result = await sendCommand(botKey, guildId, 'SMART_RECOMMEND', {
+        voice_channel_id: voiceChannelId,
+    }, { refresh: false });
+
+    if (!result?.ok) {
+        setControlStatus(result?.error || 'Failed to queue a smart recommendation.', true);
+        return;
+    }
+
+    setControlStatus(result.data?.message || 'Smart recommendation queued.');
+    clearPanelJsonCache(`${API_BASE}/music-intelligence`);
+    fetchMusicIntelligence({ force: true });
+    scheduleDashboardRefresh(2200);
+    setTimeout(() => {
+        fetchSelectedControlState({ silent: true });
+        fetchControlMatrix({ silent: true });
+    }, 2200);
 }
 
 async function applyLoopModeFromPanel() {
@@ -5894,11 +6046,13 @@ document.addEventListener('DOMContentLoaded', () => {
             populateControlChannels();
             fetchSelectedControlState({ silent: true });
             fetchControlMatrix({ silent: true });
+            fetchMusicIntelligence({ force: false });
         });
 
     document.getElementById('control-voice-select')
         ?.addEventListener('change', () => {
             renderControlContext();
+            renderMusicIntelligence();
             renderAriaCommandGuide();
             renderSelectedBotCapabilities();
         });
@@ -5908,6 +6062,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('queue-from-panel')
         ?.addEventListener('click', queueFromPanel);
+
+    document.getElementById('smart-recommend-panel')
+        ?.addEventListener('click', smartRecommendFromPanel);
+
+    document.getElementById('refresh-music-intelligence')
+        ?.addEventListener('click', () => fetchMusicIntelligence({ force: true }));
 
     document.getElementById('apply-loop-mode')
         ?.addEventListener('click', applyLoopModeFromPanel);

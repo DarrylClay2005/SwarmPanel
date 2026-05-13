@@ -65,7 +65,7 @@ action_logger = logging.getLogger("swarm_panel.actions")
 background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
-VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER"}
+VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER", "SMART_RECOMMEND"}
 PROFILE_ACCENT_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 PANEL_BACKGROUND_MODES = {"default", "midnight", "aurora", "ember", "custom_color", "custom_image"}
 PANEL_LAYOUT_MODES = {"standard", "focused", "wide"}
@@ -952,7 +952,7 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
             if "webhook" in str(key).lower() and value:
                 normalized_payload[key] = _validate_discord_webhook_url(value)
 
-    if action not in {"PLAY", "SET_HOME"}:
+    if action not in {"PLAY", "SET_HOME", "SMART_RECOMMEND"}:
         return action, str(guild_id), normalized_payload
 
     bot = BOT_INDEX.get(req.bot_key)
@@ -984,6 +984,22 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
 
     normalized_payload = dict(req.payload)
     normalized_payload["voice_channel_id"] = voice_channel_id
+
+    if action == "SMART_RECOMMEND":
+        text_channel_raw = req.payload.get("text_channel_id")
+        text_channel_id = 0
+        if text_channel_raw not in (None, "", 0, "0"):
+            text_channel_id = _coerce_control_int(text_channel_raw, "text_channel_id")
+            text_channel = channel_map.get(text_channel_id)
+            if not text_channel or int(text_channel.get("type", -1)) not in TEXT_CHANNEL_TYPES:
+                guild_name = guild.get("name") or f"Guild {guild_id}"
+                raise ValueError(
+                    f"Text channel {text_channel_id} is not a text/announcement channel visible to {bot.display_name} in {guild_name}."
+                )
+        normalized_payload = {
+            "voice_channel_id": voice_channel_id,
+            "text_channel_id": text_channel_id,
+        }
 
     if action == "PLAY":
         source_url = str(req.payload.get("source_url") or req.payload.get("query") or "").strip()
@@ -1883,6 +1899,34 @@ async def guild_control_matrix(request: Request, guild_id: str):
         "guild_id": str(guild_id),
         "bots": bots,
     }
+
+
+@app.get("/api/music-intelligence")
+async def music_intelligence(request: Request, guild_id: str | None = None, bot_key: str | None = None, limit: int = 8):
+    auth = _require_api_auth(request)
+    scoped_guild = _scoped_guild_id(auth)
+    if scoped_guild:
+        guild_id = str(scoped_guild)
+    elif guild_id:
+        _require_guild_scope(auth, guild_id)
+    else:
+        _require_admin_auth(request)
+
+    if bot_key and guild_id:
+        await _require_bot_guild_access(auth, bot_key, guild_id)
+    elif bot_key and scoped_guild:
+        await _require_bot_guild_access(auth, bot_key, scoped_guild)
+
+    try:
+        return {
+            "ok": True,
+            "data": await db.get_music_intelligence_summary(guild_id=guild_id, bot_key=bot_key, limit=limit),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        action_logger.exception("Failed loading music intelligence guild=%s bot=%s: %s", guild_id, bot_key, exc)
+        raise HTTPException(status_code=503, detail=f"Music intelligence unavailable: {exc}")
 
 
 @app.get("/api/databases")
