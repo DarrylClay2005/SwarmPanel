@@ -79,6 +79,8 @@ const MAX_EVENT_FEED_ENTRIES = 80;
 const EVENT_FEED_POLL_INTERVAL_MS = 8000;
 const DASHBOARD_FALLBACK_ONLINE_INTERVAL_MS = 90000;
 const EVENT_FEED_HEARTBEAT_MS = 20000;
+const PANEL_JSON_CACHE_MAX_ITEMS = 100;
+const PANEL_JSON_CACHE_TTL_MS = 15000;
 const CENTRAL_TIMEZONE = "America/Chicago";
 const centralDateTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, year: "numeric", month: "2-digit", day: "2-digit", hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
 const centralTimeFormatter = new Intl.DateTimeFormat("en-US", { timeZone: CENTRAL_TIMEZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true, timeZoneName: "short" });
@@ -105,6 +107,8 @@ let swarmAccountAdminLoaded = false;
 let imageGalleryAdminLoaded = false;
 let imageGalleryTablesLoaded = false;
 let dbSchemasLoaded = false;
+const panelJsonCache = new Map();
+const panelJsonInflight = new Map();
 
 function debounce(fn, wait = 180) {
     let timer = null;
@@ -515,7 +519,9 @@ function setRemoteOrigin(value, persist = true) {
 }
 
 function setRemoteToken(value, persist = true) {
+    const previousToken = remotePanelToken;
     remotePanelToken = String(value || '').trim();
+    if (previousToken !== remotePanelToken) clearPanelJsonCache();
     if (!REMOTE_MODE) return remotePanelToken;
     if (persist) {
         writeStoredValue(REMOTE_TOKEN_KEY, remotePanelToken);
@@ -625,6 +631,7 @@ function toggleAdminModeFromStatus() {
 }
 
 async function refreshPanelAfterModeSwitch() {
+    clearPanelJsonCache();
     dashboardBotsState = [];
     botCatalogState = [];
     inviteCatalogState = [];
@@ -855,6 +862,64 @@ function handle401(res) {
         return true;
     }
     return false;
+}
+
+function cloneJsonPayload(value) {
+    if (typeof structuredClone === 'function') return structuredClone(value);
+    return JSON.parse(JSON.stringify(value));
+}
+
+function panelJsonCacheKey(path) {
+    return `${remotePanelOrigin || window.location.origin}|${remotePanelToken || 'local'}|${path}`;
+}
+
+function clearPanelJsonCache(pathPrefix = '') {
+    if (!pathPrefix) {
+        panelJsonCache.clear();
+        panelJsonInflight.clear();
+        return;
+    }
+    for (const key of Array.from(panelJsonCache.keys())) {
+        if (key.endsWith(pathPrefix) || key.includes(`|${pathPrefix}`)) panelJsonCache.delete(key);
+    }
+    for (const key of Array.from(panelJsonInflight.keys())) {
+        if (key.endsWith(pathPrefix) || key.includes(`|${pathPrefix}`)) panelJsonInflight.delete(key);
+    }
+}
+
+async function cachedJsonFetch(path, { ttlMs = PANEL_JSON_CACHE_TTL_MS, force = false } = {}) {
+    const key = panelJsonCacheKey(path);
+    const now = Date.now();
+    const cached = panelJsonCache.get(key);
+    if (!force && cached && cached.expiresAt > now) return cloneJsonPayload(cached.data);
+    if (cached && cached.expiresAt <= now) panelJsonCache.delete(key);
+    if (!force && panelJsonInflight.has(key)) return cloneJsonPayload(await panelJsonInflight.get(key));
+
+    const promise = (async () => {
+        const res = await fetch(path);
+        if (handle401(res)) {
+            const error = new Error('Authentication required');
+            error.status = 401;
+            throw error;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || data.message || 'Request failed');
+        panelJsonCache.set(key, {
+            expiresAt: Date.now() + Math.max(0, ttlMs),
+            data: cloneJsonPayload(data),
+        });
+        while (panelJsonCache.size > PANEL_JSON_CACHE_MAX_ITEMS) {
+            panelJsonCache.delete(panelJsonCache.keys().next().value);
+        }
+        return data;
+    })();
+
+    panelJsonInflight.set(key, promise);
+    try {
+        return cloneJsonPayload(await promise);
+    } finally {
+        panelJsonInflight.delete(key);
+    }
 }
 
 // ================================
@@ -1148,7 +1213,7 @@ async function hydrateActiveTabData(target = getActiveTabId(), { force = false }
         return;
     }
     if (nextTarget === 'controls-tab' && (force || !dbSchemasLoaded)) {
-        await loadDbSchemas();
+        await loadDbSchemas({ force });
     }
     if (nextTarget === 'controls-tab') {
         if (document.getElementById('control-guild-select')?.value && !controlInventoryLoading) {
@@ -1165,7 +1230,7 @@ async function hydrateActiveTabData(target = getActiveTabId(), { force = false }
     }
     if (nextTarget === 'image-gallery-tab') {
         if (isImageGalleryOwnerSession() && (force || !imageGalleryAdminLoaded || !imageGalleryTablesLoaded)) {
-            await loadImageGalleryAdmin();
+            await loadImageGalleryAdmin({ force });
         }
         return;
     }
@@ -3466,14 +3531,12 @@ document.addEventListener('click', (e) => {
 // ================================
 // 🤖 BOT SELECT (INVENTORY)
 // ================================
-async function loadBotSelect() {
+async function loadBotSelect({ force = false } = {}) {
     const sel = document.getElementById('bot-select');
     const controlSel = document.getElementById('control-bot-select');
     if (!sel) return;
     try {
-        const res = await fetch(`${API_BASE}/bots`);
-        if (handle401(res)) return;
-        const data = await res.json();
+        const data = await cachedJsonFetch(`${API_BASE}/bots`, { ttlMs: 60000, force });
         const visibleBots = data.bots || [];
         inviteCatalogState = Array.isArray(data.invite_bots) ? data.invite_bots : visibleBots;
         botCatalogState = visibleBots.filter(b => b.kind === 'music');
@@ -3504,19 +3567,13 @@ async function loadBotSelect() {
     }
 }
 
-async function loadInventory() {
+async function loadInventory({ force = false } = {}) {
     const sel = document.getElementById('bot-select');
     const out = document.getElementById('inventory-output');
     if (!sel || !out) return;
     out.innerHTML = '<div class="control-context-empty">Loading live guild and channel inventory...</div>';
     try {
-        const res = await fetch(`${API_BASE}/bots/${sel.value}/inventory`);
-        if (handle401(res)) return;
-        const data = await res.json();
-        if (!res.ok) {
-            out.innerHTML = `<div class="control-context-empty">Inventory load failed: ${escapeHtml(data.detail || 'Unknown error')}</div>`;
-            return;
-        }
+        const data = await cachedJsonFetch(`${API_BASE}/bots/${sel.value}/inventory`, { ttlMs: 20000, force });
         inventoryBrowserState = {
             bot: data.bot || null,
             identity: data.identity || null,
@@ -5390,7 +5447,7 @@ function renderImageGalleryAdmin() {
     }
 }
 
-async function loadImageGalleryAdmin() {
+async function loadImageGalleryAdmin({ force = false } = {}) {
     if (!isImageGalleryOwnerSession()) return;
     const status = document.getElementById('image-gallery-admin-status');
     const usersBody = document.getElementById('image-gallery-users-body');
@@ -5400,16 +5457,13 @@ async function loadImageGalleryAdmin() {
     setImageGalleryLoading(true);
     if (status) status.textContent = 'Loading Image Gallery data...';
     try {
-        const res = await fetch(`${API_BASE}/image-gallery/admin?limit=${getImageGalleryLimit()}`);
-        if (handle401(res)) return;
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Image Gallery request failed');
+        const data = await cachedJsonFetch(`${API_BASE}/image-gallery/admin?limit=${getImageGalleryLimit()}`, { ttlMs: 10000, force });
         const payload = data.data || {};
         imageGalleryAdminState.payload = payload;
         imageGalleryAdminLoaded = true;
         renderImageGalleryAdmin();
         if (status) status.textContent = 'Image Gallery data loaded.';
-        await loadImageGalleryTables();
+        await loadImageGalleryTables({ force });
     } catch (err) {
         imageGalleryAdminLoaded = false;
         if (status) status.textContent = `Image Gallery Error: ${err instanceof Error ? err.message : String(err)}`;
@@ -5418,17 +5472,14 @@ async function loadImageGalleryAdmin() {
     }
 }
 
-async function loadImageGalleryTables() {
+async function loadImageGalleryTables({ force = false } = {}) {
     if (!isImageGalleryOwnerSession()) return;
     const tableSelect = document.getElementById('image-gallery-table-select');
     const status = document.getElementById('image-gallery-table-status');
     if (!tableSelect) return;
     if (status) status.textContent = 'Loading Image Gallery tables...';
     try {
-        const res = await fetch(`${API_BASE}/image-gallery/tables`);
-        if (handle401(res)) return;
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Image Gallery table request failed');
+        const data = await cachedJsonFetch(`${API_BASE}/image-gallery/tables`, { ttlMs: 60000, force });
         imageGalleryTables = data.tables || [];
         imageGalleryTablesLoaded = true;
         tableSelect.innerHTML = imageGalleryTables.length
@@ -5441,7 +5492,7 @@ async function loadImageGalleryTables() {
     }
 }
 
-async function viewImageGalleryTableData() {
+async function viewImageGalleryTableData({ force = false } = {}) {
     if (!isImageGalleryOwnerSession()) return;
     const tableName = document.getElementById('image-gallery-table-select')?.value;
     const viewer = document.getElementById('image-gallery-table-viewer');
@@ -5452,10 +5503,7 @@ async function viewImageGalleryTableData() {
     if (!tableName) return;
     if (status) status.textContent = `Loading ${tableName} rows...`;
     try {
-        const res = await fetch(`${API_BASE}/image-gallery/table-data?table_name=${encodeURIComponent(tableName)}&limit=100`);
-        if (handle401(res)) return;
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'Image Gallery table data request failed');
+        const data = await cachedJsonFetch(`${API_BASE}/image-gallery/table-data?table_name=${encodeURIComponent(tableName)}&limit=100`, { ttlMs: 20000, force });
         const rows = data.data?.rows || [];
         if (viewer) viewer.hidden = false;
         if (title) title.textContent = `${data.data?.schema || 'image_gallery'}.${tableName} - ${rows.length} rows`;
@@ -5486,18 +5534,18 @@ async function postImageGalleryAdminAction(path, payload) {
     if (handle401(res)) return false;
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || 'Image Gallery action failed');
-    await loadImageGalleryAdmin();
+    clearPanelJsonCache(`${API_BASE}/image-gallery`);
+    clearPanelJsonCache(`${API_BASE}/database`);
+    await loadImageGalleryAdmin({ force: true });
     return true;
 }
 
-async function loadDbSchemas() {
+async function loadDbSchemas({ force = false } = {}) {
     const schemaSel = document.getElementById('schema-select');
     const status = document.getElementById('db-status');
     if (!schemaSel) return;
     try {
-        const res = await fetch(`${API_BASE}/databases?include_tables=true`);
-        if (handle401(res)) return;
-        const data = await res.json();
+        const data = await cachedJsonFetch(`${API_BASE}/databases?include_tables=true`, { ttlMs: 60000, force });
         dbSchemas = data.schemas || [];
         dbSchemasLoaded = true;
         schemaSel.innerHTML = dbSchemas
@@ -5532,7 +5580,7 @@ function updateConfirmText() {
     if (schemaConfirmEl) schemaConfirmEl.textContent = schema ? `TRUNCATE ALL ${schema}` : '—';
 }
 
-async function viewTableData() {
+async function viewTableData({ force = false } = {}) {
     const schema = document.getElementById('schema-select')?.value;
     const table = document.getElementById('table-select')?.value;
     const container = document.getElementById('data-viewer-container');
@@ -5543,9 +5591,7 @@ async function viewTableData() {
     if (!schema || !table) return;
 
     try {
-        const res = await fetch(`${API_BASE}/database/data?schema_name=${encodeURIComponent(schema)}&table_name=${encodeURIComponent(table)}&limit=100`);
-        if (handle401(res)) return;
-        const data = await res.json();
+        const data = await cachedJsonFetch(`${API_BASE}/database/data?schema_name=${encodeURIComponent(schema)}&table_name=${encodeURIComponent(table)}&limit=100`, { ttlMs: 20000, force });
         const rows = data.data?.rows || [];
 
         if (container) container.style.display = 'block';
@@ -5590,7 +5636,9 @@ async function truncateTable() {
         if (handle401(res)) return;
         const data = await res.json();
         if (status) status.textContent = data.message || (data.ok ? '✅ Done.' : '❌ Failed.');
-        loadDbSchemas();
+        clearPanelJsonCache(`${API_BASE}/database`);
+        clearPanelJsonCache(`${API_BASE}/databases`);
+        loadDbSchemas({ force: true });
     } catch (err) {
         if (status) status.textContent = `Error: ${err}`;
     }
@@ -5619,7 +5667,9 @@ async function truncateSchema() {
         if (status) status.textContent = data.ok
             ? `✅ Truncated ${data.truncated_tables} tables in ${schema}.`
             : '❌ Failed.';
-        loadDbSchemas();
+        clearPanelJsonCache(`${API_BASE}/database`);
+        clearPanelJsonCache(`${API_BASE}/databases`);
+        loadDbSchemas({ force: true });
     } catch (err) {
         if (status) status.textContent = `Error: ${err}`;
     }
@@ -5727,7 +5777,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('refresh-invite-catalog')
         ?.addEventListener('click', () => {
-            loadBotSelect();
+            loadBotSelect({ force: true });
             fetchDashboard();
         });
 
@@ -5830,7 +5880,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ?.addEventListener('click', fetchMetrics);
 
     document.getElementById('load-inventory')
-        ?.addEventListener('click', loadInventory);
+        ?.addEventListener('click', () => loadInventory({ force: true }));
     document.getElementById('inventory-search')
         ?.addEventListener('input', debouncedRenderInventory);
     document.getElementById('inventory-sort')
@@ -5872,16 +5922,16 @@ document.addEventListener('DOMContentLoaded', () => {
         .forEach(button => button.addEventListener('click', () => sendPanelAction(button.dataset.panelAction)));
 
     document.getElementById('refresh-db')
-        ?.addEventListener('click', loadDbSchemas);
+        ?.addEventListener('click', () => loadDbSchemas({ force: true }));
 
     document.getElementById('refresh-image-gallery-admin')
-        ?.addEventListener('click', loadImageGalleryAdmin);
+        ?.addEventListener('click', () => loadImageGalleryAdmin({ force: true }));
     document.getElementById('refresh-image-gallery-tables')
-        ?.addEventListener('click', loadImageGalleryTables);
+        ?.addEventListener('click', () => loadImageGalleryTables({ force: true }));
     document.getElementById('view-image-gallery-table')
-        ?.addEventListener('click', viewImageGalleryTableData);
+        ?.addEventListener('click', () => viewImageGalleryTableData({ force: true }));
     document.getElementById('image-gallery-limit-select')
-        ?.addEventListener('change', loadImageGalleryAdmin);
+        ?.addEventListener('change', () => loadImageGalleryAdmin({ force: true }));
     document.getElementById('image-gallery-search')
         ?.addEventListener('input', debouncedRenderImageGallery);
     document.getElementById('image-gallery-scope-select')
@@ -6136,7 +6186,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
     document.getElementById('view-table-data')
-        ?.addEventListener('click', viewTableData);
+        ?.addEventListener('click', () => viewTableData({ force: true }));
 
     document.getElementById('truncate-table')
         ?.addEventListener('click', truncateTable);

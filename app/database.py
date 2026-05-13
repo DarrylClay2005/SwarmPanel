@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -67,6 +68,10 @@ PANEL_DB_QUERY_TIMEOUT_SECONDS = max(3.0, float(os.getenv("PANEL_DB_QUERY_TIMEOU
 PANEL_DB_POOL_RECYCLE_SECONDS = max(60, int(os.getenv("PANEL_DB_POOL_RECYCLE_SECONDS", "900") or "900"))
 PANEL_TABLE_CACHE_TTL_SECONDS = max(10.0, float(os.getenv("PANEL_TABLE_CACHE_TTL_SECONDS", "120") or "120"))
 PANEL_DASHBOARD_CACHE_TTL_SECONDS = max(0.5, float(os.getenv("PANEL_DASHBOARD_CACHE_TTL_SECONDS", "2") or "2"))
+PANEL_SCHEMA_CACHE_TTL_SECONDS = max(10.0, float(os.getenv("PANEL_SCHEMA_CACHE_TTL_SECONDS", "120") or "120"))
+PANEL_TABLE_DATA_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("PANEL_TABLE_DATA_CACHE_TTL_SECONDS", "20") or "20"))
+PANEL_TABLE_DATA_CACHE_MAX_ITEMS = max(16, int(os.getenv("PANEL_TABLE_DATA_CACHE_MAX_ITEMS", "64") or "64"))
+PANEL_IMAGE_GALLERY_ADMIN_CACHE_TTL_SECONDS = max(2.0, float(os.getenv("PANEL_IMAGE_GALLERY_ADMIN_CACHE_TTL_SECONDS", "10") or "10"))
 
 GUILD_SETTINGS_COLUMNS = (
     ("home_vc_id", "BIGINT"),
@@ -284,10 +289,18 @@ class PanelDatabase:
         self._connect_lock = asyncio.Lock()
         self._table_exists_cache: dict[tuple[str, str], tuple[float, bool]] = {}
         self._dashboard_cache: tuple[float, dict[str, Any]] | None = None
+        self._schema_cache: tuple[float, list[str]] | None = None
+        self._tables_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._table_data_cache: OrderedDict[tuple[str, str, int], tuple[float, dict[str, Any]]] = OrderedDict()
+        self._image_gallery_admin_cache: dict[int, tuple[float, dict[str, Any]]] = {}
 
     def _invalidate_hot_caches(self) -> None:
         self._dashboard_cache = None
         self._table_exists_cache.clear()
+        self._schema_cache = None
+        self._tables_cache.clear()
+        self._table_data_cache.clear()
+        self._image_gallery_admin_cache.clear()
 
     async def _run_with_timeout(self, awaitable, timeout: float | None = None):
         return await asyncio.wait_for(awaitable, timeout=timeout or PANEL_DB_QUERY_TIMEOUT_SECONDS)
@@ -1279,6 +1292,9 @@ class PanelDatabase:
             return False
 
     async def list_schemas(self) -> list[str]:
+        now = time.monotonic()
+        if self._schema_cache and self._schema_cache[0] > now:
+            return list(self._schema_cache[1])
         rows = await self._fetchall(
             """
             SELECT schema_name
@@ -1287,10 +1303,18 @@ class PanelDatabase:
             ORDER BY schema_name
             """
         )
-        return [row["schema_name"] for row in rows]
+        schemas = [row["schema_name"] for row in rows]
+        self._schema_cache = (time.monotonic() + PANEL_SCHEMA_CACHE_TTL_SECONDS, list(schemas))
+        return schemas
 
     async def list_tables(self, schema: str) -> list[dict[str, Any]]:
         schema = _validate_identifier(schema, "schema")
+        now = time.monotonic()
+        cached = self._tables_cache.get(schema)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1])
+        if cached:
+            self._tables_cache.pop(schema, None)
         rows = await self._fetchall(
             """
             SELECT table_name, table_rows
@@ -1300,10 +1324,12 @@ class PanelDatabase:
             """,
             (schema,),
         )
-        return [
+        tables = [
             {"table_name": row["table_name"], "estimated_rows": int(row["table_rows"] or 0)}
             for row in rows
         ]
+        self._tables_cache[schema] = (time.monotonic() + PANEL_TABLE_CACHE_TTL_SECONDS, copy.deepcopy(tables))
+        return tables
 
     async def get_known_guild_ids(self, bot_key: str) -> list[int]:
         bot = BOT_INDEX.get(bot_key)
@@ -2156,6 +2182,7 @@ class PanelDatabase:
                     await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table}`")
                 finally:
                     await cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        self._invalidate_hot_caches()
 
     async def truncate_schema(self, schema: str) -> dict[str, Any]:
         schema = _validate_identifier(schema, "schema")
@@ -2172,6 +2199,7 @@ class PanelDatabase:
                         await cur.execute(f"TRUNCATE TABLE `{schema}`.`{table_name}`")
                 finally:
                     await cur.execute("SET FOREIGN_KEY_CHECKS = 1")
+        self._invalidate_hot_caches()
         return {"schema": schema, "truncated_tables": len(tables), "tables": [t["table_name"] for t in tables]}
 
     async def get_table_data(self, schema: str, table: str, limit: int = 100) -> dict[str, Any]:
@@ -2180,6 +2208,14 @@ class PanelDatabase:
         if schema in SYSTEM_SCHEMAS:
             raise ValueError(f"Refusing operation on system schema: {schema}")
         safe_limit = max(1, min(int(limit or 100), 500))
+        cache_key = (schema, table, safe_limit)
+        now = time.monotonic()
+        cached = self._table_data_cache.get(cache_key)
+        if cached and cached[0] > now:
+            self._table_data_cache.move_to_end(cache_key)
+            return copy.deepcopy(cached[1])
+        if cached:
+            self._table_data_cache.pop(cache_key, None)
 
         await self._ensure_connected()
 
@@ -2202,12 +2238,17 @@ class PanelDatabase:
                             processed_row[key] = val
                     processed_rows.append(processed_row)
 
-                return {
+                result = {
                     "schema": schema,
                     "table": table,
                     "count": len(processed_rows),
                     "rows": processed_rows
                 }
+                self._table_data_cache[cache_key] = (time.monotonic() + PANEL_TABLE_DATA_CACHE_TTL_SECONDS, copy.deepcopy(result))
+                self._table_data_cache.move_to_end(cache_key)
+                while len(self._table_data_cache) > PANEL_TABLE_DATA_CACHE_MAX_ITEMS:
+                    self._table_data_cache.popitem(last=False)
+                return result
 
     def _json_value(self, value: Any) -> Any:
         if hasattr(value, "isoformat"):
@@ -2222,6 +2263,12 @@ class PanelDatabase:
     async def get_image_gallery_admin_data(self, limit: int = 50) -> dict[str, Any]:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
         safe_limit = max(1, min(int(limit or 50), 200))
+        now = time.monotonic()
+        cached = self._image_gallery_admin_cache.get(safe_limit)
+        if cached and cached[0] > now:
+            return copy.deepcopy(cached[1])
+        if cached:
+            self._image_gallery_admin_cache.pop(safe_limit, None)
         await self._ensure_connected()
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -2331,7 +2378,7 @@ class PanelDatabase:
                     (safe_limit,),
                 )
                 collections = [self._json_row(row) for row in await cur.fetchall()]
-        return {
+        result = {
             "schema": schema,
             "summary": summary,
             "users": users,
@@ -2341,6 +2388,8 @@ class PanelDatabase:
             "categories": categories,
             "collections": collections,
         }
+        self._image_gallery_admin_cache[safe_limit] = (time.monotonic() + PANEL_IMAGE_GALLERY_ADMIN_CACHE_TTL_SECONDS, copy.deepcopy(result))
+        return result
 
     async def get_image_gallery_user_admin(self, user_id: int) -> dict[str, Any] | None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
@@ -2360,10 +2409,12 @@ class PanelDatabase:
     async def delete_image_gallery_user(self, user_id: int) -> None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
         await self._execute(f"DELETE FROM `{schema}`.`users` WHERE id = %s", (_coerce_int(user_id, "user_id"),))
+        self._invalidate_hot_caches()
 
     async def delete_image_gallery_comment(self, comment_id: int) -> None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
         await self._execute(f"DELETE FROM `{schema}`.`media_comments` WHERE id = %s", (_coerce_int(comment_id, "comment_id"),))
+        self._invalidate_hot_caches()
 
     async def reset_image_gallery_user_password(self, user_id: int, new_password: str) -> None:
         if len(str(new_password or "")) < 8:
@@ -2374,6 +2425,7 @@ class PanelDatabase:
             f"UPDATE `{schema}`.`users` SET password_hash = %s WHERE id = %s",
             (password_hash, _coerce_int(user_id, "user_id")),
         )
+        self._invalidate_hot_caches()
 
     async def update_image_gallery_user(self, user_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
@@ -2411,6 +2463,7 @@ class PanelDatabase:
                 f"UPDATE `{schema}`.`users` SET {assignments} WHERE id = %s",
                 (*cleaned.values(), _coerce_int(user_id, "user_id")),
             )
+            self._invalidate_hot_caches()
         return await self.get_image_gallery_user_admin(user_id)
 
     async def set_image_gallery_email_verified(self, user_id: int, verified: bool) -> dict[str, Any] | None:
@@ -2424,6 +2477,7 @@ class PanelDatabase:
             """,
             (1 if verified else 0, 1 if verified else 0, _coerce_int(user_id, "user_id")),
         )
+        self._invalidate_hot_caches()
         return await self.get_image_gallery_user_admin(user_id)
 
     async def set_image_gallery_age_verified(self, user_id: int, verified: bool) -> dict[str, Any] | None:
@@ -2437,6 +2491,7 @@ class PanelDatabase:
             """,
             (1 if verified else 0, 1 if verified else 0, _coerce_int(user_id, "user_id")),
         )
+        self._invalidate_hot_caches()
         return await self.get_image_gallery_user_admin(user_id)
 
     async def issue_image_gallery_email_verification_token(self, user_id: int, token: str) -> dict[str, Any] | None:
@@ -2450,6 +2505,7 @@ class PanelDatabase:
             """,
             (token_hash, _coerce_int(user_id, "user_id")),
         )
+        self._invalidate_hot_caches()
         return await self.get_image_gallery_user_admin(user_id)
 
     async def update_image_gallery_media(self, media_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
@@ -2480,12 +2536,14 @@ class PanelDatabase:
                 f"UPDATE `{schema}`.`media_items` SET {assignments}, moderated_at=CURRENT_TIMESTAMP WHERE id = %s",
                 (*cleaned.values(), _coerce_int(media_id, "media_id")),
             )
+            self._invalidate_hot_caches()
         row = await self._fetchone(f"SELECT * FROM `{schema}`.`media_items` WHERE id = %s", (_coerce_int(media_id, "media_id"),))
         return self._json_row(row) if row else None
 
     async def delete_image_gallery_media(self, media_id: int) -> None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
         await self._execute(f"DELETE FROM `{schema}`.`media_items` WHERE id = %s", (_coerce_int(media_id, "media_id"),))
+        self._invalidate_hot_caches()
 
     async def update_image_gallery_report_status(self, report_id: int, status: str) -> None:
         schema = _validate_identifier(self.settings.image_gallery_schema, "image gallery schema")
@@ -2496,6 +2554,7 @@ class PanelDatabase:
             f"UPDATE `{schema}`.`media_reports` SET status = %s WHERE id = %s",
             (status, _coerce_int(report_id, "report_id")),
         )
+        self._invalidate_hot_caches()
 
     async def _clear_pending_orders(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> None:
         overrides_table = f"{prefix}_swarm_overrides"
