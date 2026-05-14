@@ -26,6 +26,20 @@ def _env_csv(name: str) -> list[str]:
     return [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
 
 
+def _env_int_set(name: str) -> set[int]:
+    raw = os.getenv(name, "")
+    values: set[int] = set()
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            values.add(int(item))
+        except ValueError:
+            continue
+    return values
+
+
 @dataclass(frozen=True)
 class Settings:
     db_host: str
@@ -51,6 +65,9 @@ class Settings:
     smtp_use_tls: bool
     shared_music_env_file: str
     session_https_only: bool
+    telegram_bot_token: str
+    telegram_allowed_chat_ids: set[int]
+    telegram_polling_enabled: bool
 
 
 def load_settings() -> Settings:
@@ -81,6 +98,9 @@ def load_settings() -> Settings:
         smtp_use_tls=(_env("PANEL_SMTP_USE_TLS") or _env("SMTP_USE_TLS") or "true").lower() not in {"0", "false", "no", "off"},
         shared_music_env_file=_env("PANEL_SHARED_MUSIC_ENV_FILE", str(Path(__file__).resolve().parents[2] / "Music" / ".env")),
         session_https_only=_env_bool("PANEL_SESSION_HTTPS_ONLY", False),
+        telegram_bot_token=_env("PANEL_TELEGRAM_BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN"),
+        telegram_allowed_chat_ids=_env_int_set("PANEL_TELEGRAM_ALLOWED_CHAT_IDS") or _env_int_set("TELEGRAM_ALLOWED_CHAT_IDS"),
+        telegram_polling_enabled=_env_bool("PANEL_TELEGRAM_POLLING_ENABLED", bool(_env("PANEL_TELEGRAM_BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN"))),
     )
     validate_settings(settings)
     return settings

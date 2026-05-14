@@ -52,6 +52,7 @@ from .database import PanelDatabase
 from .diagnostics import RuntimeDiagnosticsService
 from .discord_api import DiscordInventoryService
 from .emailer import send_image_gallery_verification_email, send_verification_email
+from .telegram import TelegramPollingService
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -75,6 +76,7 @@ settings = load_settings()
 db = PanelDatabase(settings)
 discord_service = DiscordInventoryService()
 diagnostics_service = RuntimeDiagnosticsService(settings, discord_service)
+telegram_service: TelegramPollingService | None = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 action_logger = logging.getLogger("swarm_panel.actions")
@@ -1050,8 +1052,78 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
     return action, str(guild_id), normalized_payload
 
 
+def _telegram_command_parts(text: str) -> tuple[str, str]:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return "", ""
+    first, _, rest = cleaned.partition(" ")
+    return first.split("@", 1)[0].lower(), rest.strip()
+
+
+def _format_panel_dashboard(snapshot: dict[str, Any]) -> str:
+    bots = list(snapshot.get("bots") or [])
+    sessions = list(snapshot.get("sessions") or [])
+    active = sum(int(bot.get("active_playing_count") or 0) for bot in bots)
+    queued = sum(int(bot.get("queue_depth") or 0) for bot in bots)
+    lines = [
+        "SwarmPanel status",
+        f"Bots: {len(bots)}",
+        f"Active sessions: {active or len([s for s in sessions if s.get('is_playing')])}",
+        f"Queued tracks: {queued}",
+    ]
+    for bot in bots[:10]:
+        name = bot.get("display_name") or bot.get("name") or bot.get("key")
+        state = bot.get("heartbeat_status") or bot.get("status") or "unknown"
+        lines.append(f"- {name}: {state}, {int(bot.get('queue_depth') or 0)} queued")
+    return "\n".join(lines)
+
+
+def _format_panel_sessions(snapshot: dict[str, Any]) -> str:
+    sessions = list(snapshot.get("sessions") or [])
+    if not sessions:
+        return "No live SwarmPanel sessions are reporting right now."
+    lines = ["Live SwarmPanel sessions"]
+    for session in sessions[:12]:
+        bot_name = session.get("bot_name") or session.get("bot_key") or "bot"
+        title = session.get("title") or session.get("session_state") or "idle"
+        guild = session.get("guild_name") or session.get("guild_id") or "unknown guild"
+        channel = session.get("channel_name") or session.get("home_channel_name") or "no channel"
+        lines.append(f"- {bot_name}: {title} | {guild} / {channel}")
+    return "\n".join(lines)
+
+
+async def _handle_telegram_command(message: dict[str, Any]) -> str:
+    command, rest = _telegram_command_parts(str(message.get("text") or ""))
+    if command in {"/start", "/help", "help"}:
+        return (
+            "SwarmPanel Telegram bridge is online.\n"
+            "Commands: /status, /bots, /sessions, /diag, /id"
+        )
+    if command == "/id":
+        return f"Telegram chat id: {message.get('chat_id')}"
+    if command in {"/status", "status", "/bots", "bots"}:
+        snapshot = await _load_dashboard_base_snapshot()
+        return _format_panel_dashboard(snapshot)
+    if command in {"/sessions", "sessions"}:
+        snapshot = await _load_dashboard_base_snapshot()
+        return _format_panel_sessions(snapshot)
+    if command in {"/diag", "/diagnostics", "diag"}:
+        force = rest.lower() in {"force", "fresh", "true", "1"}
+        snapshot = await diagnostics_service.get_snapshot(force=force)
+        checks = snapshot.get("checks") or []
+        lines = ["SwarmPanel diagnostics"]
+        for check in checks[:12]:
+            label = check.get("label") or check.get("id") or "check"
+            ok = "ok" if check.get("ok") else "attention"
+            detail = check.get("detail") or ""
+            lines.append(f"- {label}: {ok} {detail}".strip())
+        return "\n".join(lines)
+    return "Unknown command. Use /help for SwarmPanel Telegram commands."
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global telegram_service
     try:
         await db.connect()
     except Exception:
@@ -1069,7 +1141,25 @@ async def lifespan(_: FastAPI):
             source="system",
         )
     )
+    telegram_service = TelegramPollingService(
+        token=settings.telegram_bot_token,
+        name="SwarmPanel",
+        handler=_handle_telegram_command,
+        allowed_chat_ids=settings.telegram_allowed_chat_ids,
+        commands=[
+            ("status", "Show SwarmPanel runtime status"),
+            ("bots", "Summarize music bot state"),
+            ("sessions", "List live playback sessions"),
+            ("diag", "Show diagnostics"),
+            ("id", "Show this Telegram chat id"),
+            ("help", "Show available commands"),
+        ],
+    )
+    await telegram_service.start()
     yield
+    if telegram_service:
+        await telegram_service.close()
+        telegram_service = None
     for task in background_tasks:
         task.cancel()
     if background_tasks:
@@ -1743,6 +1833,20 @@ async def system_diagnostics(request: Request, force: bool = False):
     except Exception as exc:
         action_logger.exception("Failed collecting diagnostics: %s", exc)
         raise HTTPException(status_code=503, detail=f"Diagnostics unavailable: {exc}")
+
+
+@app.get("/api/telegram/status")
+async def telegram_status(request: Request):
+    _require_admin_auth(request)
+    status = telegram_service.snapshot() if telegram_service else {
+        "enabled": bool(settings.telegram_bot_token),
+        "running": False,
+        "bot_username": "",
+        "allowed_chat_count": len(settings.telegram_allowed_chat_ids),
+        "last_error": "",
+        "last_update_at": 0.0,
+    }
+    return {"telegram": status}
 
 
 @app.get("/api/bots/{bot_key}/inventory")
