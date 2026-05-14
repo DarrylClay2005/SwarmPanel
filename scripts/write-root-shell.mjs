@@ -1,4 +1,15 @@
-<!doctype html>
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const reactIndex = readFileSync(resolve("app/static/react/index.html"), "utf8");
+const scriptMatch = reactIndex.match(/src="\/static\/react\/assets\/([^"]+\.js)"/);
+const styleMatch = reactIndex.match(/href="\/static\/react\/assets\/([^"]+\.css)"/);
+
+if (!scriptMatch || !styleMatch) {
+  throw new Error("Unable to find built React assets.");
+}
+
+const shell = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -15,8 +26,8 @@
         window.SWARM_PANEL_BASENAME = base;
         window.SWARM_PANEL_CONFIG_URL = base ? base + "/live-config.json" : "live-config.json";
         var assets = base + "/app/static/react/assets";
-        document.write('<link rel="stylesheet" crossorigin href="' + assets + '/index-DjZ5JOMi.css">');
-        document.write('<script type="module" crossorigin src="' + assets + '/index-CxYEsr9l.js"></scr' + 'ipt>');
+        document.write('<link rel="stylesheet" crossorigin href="' + assets + '/${styleMatch[1]}">');
+        document.write('<script type="module" crossorigin src="' + assets + '/${scriptMatch[1]}"></scr' + 'ipt>');
       }());
     </script>
   </head>
@@ -24,3 +35,7 @@
     <div id="root"></div>
   </body>
 </html>
+`;
+
+writeFileSync(resolve("index.html"), shell);
+writeFileSync(resolve("404.html"), shell);
