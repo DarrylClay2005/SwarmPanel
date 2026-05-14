@@ -613,8 +613,8 @@ def _set_admin_session(request: Request, username: str) -> None:
     request.session[SESSION_AUTH_KEY] = True
     request.session[SESSION_USERNAME_KEY] = username
     request.session[SESSION_ROLE_KEY] = "admin"
-    request.session[SESSION_SITE_OWNER_KEY] = False
-    request.session[SESSION_ADMIN_MODE_KEY] = False
+    request.session[SESSION_SITE_OWNER_KEY] = True
+    request.session[SESSION_ADMIN_MODE_KEY] = True
     request.session.pop(SESSION_GUILD_ID_KEY, None)
 
 
@@ -679,7 +679,7 @@ async def _hydrate_site_owner_auth(request: Request, auth: dict[str, Any] | None
 
 async def _authenticate_login(username: str, password: str = "", guild_id: str | int | None = None) -> dict[str, Any] | None:
     if verify_credentials(username, password, settings.admin_username, settings.admin_password):
-        return {"username": username, "role": "admin", "guild_id": None, "site_owner": False}
+        return {"username": username, "role": "admin", "guild_id": None, "site_owner": True, "admin_mode": True}
 
     account_secret = password if password not in (None, "") else guild_id
     if account_secret in (None, ""):
