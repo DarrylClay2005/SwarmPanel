@@ -5,7 +5,12 @@ import App from "./App.jsx";
 import "./styles.css";
 
 function runtimeBasename() {
-  return String(window.SWARM_PANEL_BASENAME || "").replace(/\/+$/, "");
+  const configured = String(window.SWARM_PANEL_BASENAME || "").replace(/\/+$/, "");
+  if (configured) return configured;
+  const path = window.location.pathname.replace(/\/+$/, "");
+  if (path.startsWith("/static/react")) return "/static/react";
+  if (path.startsWith("/app/static/react")) return "/app/static/react";
+  return "";
 }
 
 function applyRuntimeClasses() {

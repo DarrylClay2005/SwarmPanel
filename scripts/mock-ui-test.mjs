@@ -2,6 +2,7 @@ import { chromium } from "playwright";
 
 const BASE_URL = process.env.SWARM_PANEL_TEST_URL || "http://127.0.0.1:8000";
 const TOKEN = "mock-swarm-token";
+const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 const OWNER_SESSION = {
   authenticated: true,
   mode: "token",
@@ -173,6 +174,15 @@ async function installMocks(context, options = {}) {
   const unhandled = [];
   let unauthenticated = Boolean(options.unauthenticated);
 
+  await context.route("**://example.test/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: Buffer.from(PNG_BASE64, "base64"),
+      headers: { "Cache-Control": "public, max-age=3600" },
+    });
+  });
+
   await context.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -327,6 +337,7 @@ async function runAuthenticatedMock(browser, failures) {
   await controlForm.locator("input[list='known-guilds']").fill("1247394560007471134");
   await controlForm.locator("select").nth(1).selectOption("PLAY");
   await page.getByPlaceholder("https://youtube.com/... or search terms").fill("mock search");
+  await controlForm.locator("select").nth(2).locator("option[value='111']").waitFor({ state: "attached", timeout: 10_000 });
   await controlForm.locator("select").nth(2).selectOption("111");
   await controlForm.locator("select").nth(3).selectOption("333");
   await click(page, "button", "Send Control");
@@ -334,7 +345,7 @@ async function runAuthenticatedMock(browser, failures) {
   await click(page, "button", "Smart Rec");
   await click(page, "button", "Send Control");
   await controlForm.locator("select").nth(1).selectOption("LOOP");
-  await controlForm.locator("select").nth(2).selectOption("track");
+  await controlForm.locator("select").nth(2).selectOption("song");
   await click(page, "button", "Send Control");
   await controlForm.locator("select").nth(1).selectOption("FILTER");
   await controlForm.locator("select").nth(2).selectOption("nightcore");

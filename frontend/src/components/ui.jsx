@@ -53,7 +53,17 @@ export function NotFound() {
 }
 
 export function SkeletonGrid({ count = 6 }) {
-  return <div className="skeleton-grid">{Array.from({ length: count }, (_, index) => <div className="skeleton-card" key={index} />)}</div>;
+  const tips = [
+    "Live bot state refreshes in the background.",
+    "Saved homes and feedback channels can prefill playback controls.",
+    "Queue orders from the panel default to loop queue.",
+  ];
+  return (
+    <div>
+      <div className="loading-tip">{tips[count % tips.length]}</div>
+      <div className="skeleton-grid">{Array.from({ length: count }, (_, index) => <div className="skeleton-card" key={index} />)}</div>
+    </div>
+  );
 }
 
 export function Segmented({ value, onChange, options }) {

@@ -8,6 +8,23 @@ import { Page, SectionHead } from "../components/ui.jsx";
 import { payloadForAction } from "../utils/control.js";
 import { uniqueBy } from "../utils/format.js";
 
+const FILTER_OPTIONS = [
+  ["none", "None"],
+  ["nightcore", "Nightcore"],
+  ["bassboost", "Bassboost"],
+  ["vaporwave", "Vaporwave"],
+  ["8d", "8D"],
+  ["karaoke", "Karaoke"],
+  ["tremolo", "Tremolo"],
+  ["vibrato", "Vibrato"],
+  ["lowpass", "Low Pass"],
+  ["lofi", "Lo-fi"],
+  ["electronic", "Electronic"],
+  ["party", "Party"],
+  ["radio", "Radio"],
+  ["cinema", "Cinema"],
+];
+
 export default function ControlsPage({ ctx }) {
   const [catalog, setCatalog] = useState({ bots: [], loading: true });
   const [dashboard, setDashboard] = useState(null);
@@ -64,6 +81,18 @@ export default function ControlsPage({ ctx }) {
   useLiveRefresh(loadReadiness, { enabled: Boolean(form.bot_key && form.guild_id), interval: 8_000 });
   useLiveRefresh(loadBase, { interval: 24_000 });
 
+  useEffect(() => {
+    const session = controlState?.session;
+    if (!session) return;
+    setForm((current) => ({
+      ...current,
+      voice_channel_id: current.voice_channel_id || session.home_channel_id || session.channel_id || "",
+      text_channel_id: current.text_channel_id || session.feedback_channel_id || "",
+      loop_mode: session.loop_mode || current.loop_mode || "queue",
+      filter_mode: session.filter_mode || current.filter_mode || "none",
+    }));
+  }, [controlState]);
+
   const guilds = inventory?.guilds || [];
   const selectedGuild = guilds.find((guild) => String(guild.id) === String(form.guild_id));
   const channels = selectedGuild?.channels || inventory?.channels || [];
@@ -72,7 +101,11 @@ export default function ControlsPage({ ctx }) {
   const sessionGuilds = uniqueBy((dashboard?.sessions || []).map((session) => ({ id: session.guild_id, name: session.guild_name || `Guild ${session.guild_id}` })), "id");
 
   function update(key, value) {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(["bot_key", "guild_id"].includes(key) ? { voice_channel_id: "", text_channel_id: "" } : {}),
+    }));
   }
 
   async function submit(event) {
@@ -86,6 +119,7 @@ export default function ControlsPage({ ctx }) {
       });
       clearCache();
       ctx.showToast(data.message || `${form.action} accepted.`, "success");
+      loadReadiness().catch(() => {});
     } catch (error) {
       ctx.showToast(error.message, "error");
     } finally {
@@ -107,8 +141,14 @@ export default function ControlsPage({ ctx }) {
               <label className="field"><span>Text</span><ChannelSelect value={form.text_channel_id} channels={textChannels} onChange={(value) => update("text_channel_id", value)} optional /></label>
             </div>
           ) : null}
-          {form.action === "LOOP" ? <label className="field"><span>Loop</span><select value={form.loop_mode} onChange={(event) => update("loop_mode", event.target.value)}><option value="off">Off</option><option value="track">Track</option><option value="queue">Queue</option></select></label> : null}
-          {form.action === "FILTER" ? <label className="field"><span>Filter</span><select value={form.filter_mode} onChange={(event) => update("filter_mode", event.target.value)}><option value="none">None</option><option value="nightcore">Nightcore</option><option value="bassboost">Bassboost</option><option value="vaporwave">Vaporwave</option><option value="karaoke">Karaoke</option></select></label> : null}
+          {form.action === "LOOP" ? <label className="field"><span>Loop</span><select value={form.loop_mode} onChange={(event) => update("loop_mode", event.target.value)}><option value="off">Off</option><option value="song">Song</option><option value="queue">Queue</option></select></label> : null}
+          {form.action === "FILTER" ? <label className="field"><span>Filter</span><select value={form.filter_mode} onChange={(event) => update("filter_mode", event.target.value)}>{FILTER_OPTIONS.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label> : null}
+          <div className="live-defaults">
+            <strong>Live defaults</strong>
+            <span>Voice: {controlState?.session?.home_channel_name || controlState?.session?.channel_name || form.voice_channel_id || "unknown"}</span>
+            <span>Text: {controlState?.session?.feedback_channel_name || form.text_channel_id || "none"}</span>
+            <span>Loop: {form.loop_mode || "queue"} / Filter: {form.filter_mode || "none"}</span>
+          </div>
           <div className="actions-row">
             <button className="primary" type="submit" disabled={busy}><Send size={16} />{busy ? "Sending" : "Send Control"}</button>
             <button type="button" onClick={() => update("action", "SMART_RECOMMEND")}><WandSparkles size={16} />Smart Rec</button>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, KeyRound, Mail, Save, ShieldCheck } from "lucide-react";
 import { apiFetch, cachedFetch, clearCache } from "../api.js";
 import { Page, SkeletonGrid } from "../components/ui.jsx";
-import { pick } from "../utils/format.js";
+import { initials, pick } from "../utils/format.js";
 
 export default function ProfilePage({ ctx }) {
   const [data, setData] = useState(null);
@@ -25,6 +25,7 @@ export default function ProfilePage({ ctx }) {
       const payload = pick(form, ["display_name", "avatar_url", "bio", "favorite_bot", "theme_accent", "public_profile", "server_invite_url", "server_name", "server_icon_url"]);
       const updated = await apiFetch("/api/users/me", { method: "POST", body: JSON.stringify(payload) });
       setForm(updated.profile);
+      setData((current) => ({ ...(current || {}), ...updated }));
       clearProfileCache();
       ctx.showToast("Profile saved.", "success");
     } catch (error) {
@@ -64,6 +65,13 @@ export default function ProfilePage({ ctx }) {
       {!data ? <SkeletonGrid count={2} /> : (
         <section className="settings-grid">
           <form className="panel form-panel" onSubmit={save}>
+            <div className="profile-preview">
+              <div className="avatar">{form.avatar_url || form.server_icon_url ? <img src={form.avatar_url || form.server_icon_url} alt="" loading="lazy" decoding="async" /> : initials(form.display_name || data.username)}</div>
+              <div>
+                <strong>{form.display_name || data.username}</strong>
+                <p className="muted">{form.server_name || `Guild ${data.guild_id || data.account_guild_id || "profile"}`}</p>
+              </div>
+            </div>
             <label className="field"><span>Display Name</span><input value={form.display_name || ""} onChange={(event) => setForm((current) => ({ ...current, display_name: event.target.value }))} disabled={!data.editable} /></label>
             <label className="field"><span>Server Name</span><input value={form.server_name || ""} onChange={(event) => setForm((current) => ({ ...current, server_name: event.target.value }))} disabled={!data.editable} /></label>
             <label className="field"><span>Avatar URL</span><input value={form.avatar_url || ""} onChange={(event) => setForm((current) => ({ ...current, avatar_url: event.target.value }))} disabled={!data.editable} /></label>

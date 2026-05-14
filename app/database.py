@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import time
@@ -83,6 +84,8 @@ GUILD_SETTINGS_COLUMNS = (
     ("dj_role_id", "BIGINT DEFAULT NULL"),
     ("feedback_channel_id", "BIGINT DEFAULT NULL"),
     ("transition_mode", "VARCHAR(10) DEFAULT 'off'"),
+    ("fade_seconds", "FLOAT DEFAULT 5.0"),
+    ("fade_curve", "VARCHAR(20) DEFAULT 'linear'"),
     ("custom_speed", "FLOAT DEFAULT 1.0"),
     ("custom_pitch", "FLOAT DEFAULT 1.0"),
     ("custom_modifiers_left", "INT DEFAULT 0"),
@@ -174,7 +177,22 @@ def _normalize_loop_mode(value: Any) -> str:
 
 def _normalize_filter_mode(value: Any) -> str:
     mode = str(value or "").strip().lower().replace(" ", "")
-    valid_modes = {"none", "nightcore", "vaporwave", "bassboost", "8d"}
+    valid_modes = {
+        "none",
+        "nightcore",
+        "vaporwave",
+        "bassboost",
+        "8d",
+        "karaoke",
+        "tremolo",
+        "vibrato",
+        "lowpass",
+        "lofi",
+        "electronic",
+        "party",
+        "radio",
+        "cinema",
+    }
     if mode not in valid_modes:
         raise ValueError(f"Invalid filter mode: {value!r}. Expected one of: {', '.join(sorted(valid_modes))}")
     return mode
@@ -1680,7 +1698,7 @@ class PanelDatabase:
         if table_exists["settings"]:
             settings = await self._fetchone(
                 f"SELECT volume, loop_mode, filter_mode, feedback_channel_id, transition_mode, "
-                f"custom_speed, custom_pitch, custom_modifiers_left, dj_only_mode, stay_in_vc "
+                f"fade_seconds, fade_curve, custom_speed, custom_pitch, custom_modifiers_left, dj_only_mode, stay_in_vc "
                 f"FROM `{schema}`.`{settings_table}` WHERE guild_id = %s LIMIT 1",
                 (gid,),
             ) or {}
@@ -1882,6 +1900,8 @@ class PanelDatabase:
                 "loop_mode": settings.get("loop_mode") or "queue",
                 "filter_mode": settings.get("filter_mode") or "none",
                 "transition_mode": settings.get("transition_mode") or "off",
+                "fade_seconds": float(settings.get("fade_seconds") or 5.0),
+                "fade_curve": settings.get("fade_curve") or "linear",
                 "custom_speed": float(settings.get("custom_speed") or 1.0),
                 "custom_pitch": float(settings.get("custom_pitch") or 1.0),
                 "custom_modifiers_left": int(settings.get("custom_modifiers_left") or 0),
@@ -1956,6 +1976,9 @@ class PanelDatabase:
                 filter_map[guild_id] = {
                     "filter_mode": row.get("filter_mode") or "none",
                     "loop_mode": row.get("loop_mode") or "queue",
+                    "transition_mode": row.get("transition_mode") or "off",
+                    "fade_seconds": float(row.get("fade_seconds") or 5.0),
+                    "fade_curve": row.get("fade_curve") or "linear",
                 }
                 known_guilds.add(guild_id)
 
@@ -2092,6 +2115,9 @@ class PanelDatabase:
                     "session_state_label": session_state_label,
                     "filter_mode": settings.get("filter_mode", "none"),
                     "loop_mode": settings.get("loop_mode", "queue"),
+                    "transition_mode": settings.get("transition_mode", "off"),
+                    "fade_seconds": settings.get("fade_seconds", 5.0),
+                    "fade_curve": settings.get("fade_curve", "linear"),
                     "queue_count": queue_count,
                     "backup_queue_count": backup_queue_count,
                     "backup_restore_ready": bool(backup_queue_count > 0 and session_state in {"recovering", "queued", "configured", "idle", "paused"}),
@@ -2947,6 +2973,43 @@ class PanelDatabase:
         except Exception:
             pass
 
+    async def _shuffle_live_queue(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> int:
+        await cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue` "
+            "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
+            "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
+        )
+        await cur.execute(
+            f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC",
+            (gid, bot_key),
+        )
+        rows = list(await cur.fetchall() or [])
+        if len(rows) <= 1:
+            return len(rows)
+
+        first = rows.pop(0)
+        random.shuffle(rows)
+        rows.insert(0, first)
+        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
+        cols = [column for column in rows[0].keys() if column != "id"]
+        col_names = ", ".join(f"`{column}`" for column in cols)
+        placeholders = ", ".join("%s" for _ in cols)
+        for row in rows:
+            await cur.execute(
+                f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})",
+                tuple(row[column] for column in cols),
+            )
+        return len(rows)
+
+    async def _prime_panel_playback_defaults(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> int:
+        await self._ensure_music_guild_settings_schema(cur, schema, prefix)
+        await cur.execute(
+            f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, loop_mode) VALUES (%s, %s) "
+            f"ON DUPLICATE KEY UPDATE loop_mode = VALUES(loop_mode)",
+            (gid, "queue"),
+        )
+        return await self._shuffle_live_queue(cur, schema, prefix, gid, bot_key)
+
     async def control_bot(self, bot_key: str, guild_id: str, action: str, payload: Any = None) -> dict[str, Any]:
         bot = BOT_INDEX.get(bot_key)
         if not bot:
@@ -3063,7 +3126,7 @@ class PanelDatabase:
                     result["message"] = f"Cleared the queue and current playback for guild {gid} on {bot.display_name}."
 
                 elif action == "LOOP":
-                    mode = _normalize_loop_mode(payload)
+                    mode = _normalize_loop_mode(payload.get("loop_mode") if isinstance(payload, dict) else payload)
                     await self._ensure_music_guild_settings_schema(cur, schema, prefix)
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, loop_mode) VALUES (%s, %s) "
@@ -3074,7 +3137,7 @@ class PanelDatabase:
                     result["message"] = f"Loop mode set to {mode} for guild {gid} on {bot.display_name}."
 
                 elif action == "FILTER":
-                    mode = _normalize_filter_mode(payload)
+                    mode = _normalize_filter_mode(payload.get("filter_mode") if isinstance(payload, dict) else payload)
                     await self._ensure_music_guild_settings_schema(cur, schema, prefix)
                     await cur.execute(
                         f"INSERT INTO `{schema}`.`{prefix}_guild_settings` (guild_id, filter_mode) VALUES (%s, %s) "
@@ -3128,6 +3191,7 @@ class PanelDatabase:
                     text_channel_id = _coerce_int(text_channel_raw, "text_channel_id") if text_channel_raw not in (None, "", 0, "0") else 0
                     requester_raw = payload.get("requester_id")
                     requester_id = _coerce_int(requester_raw, "requester_id") if requester_raw not in (None, "", 0, "0") else None
+                    shuffled_count = await self._prime_panel_playback_defaults(cur, schema, prefix, gid, bot_key)
 
                     seed = None
                     reason = "server_favorite"
@@ -3186,6 +3250,8 @@ class PanelDatabase:
                     result["seed_title"] = seed_title
                     result["query_text"] = query_text
                     result["reason"] = reason
+                    result["loop_mode"] = "queue"
+                    result["shuffled_queue_count"] = shuffled_count
                     result["message"] = f"Queued a smart recommendation for {bot.display_name} in guild {gid} using {seed_title[:120]}."
 
                 elif action == "PLAY":
@@ -3200,6 +3266,7 @@ class PanelDatabase:
                     voice_channel_id = _coerce_int(payload.get("voice_channel_id"), "voice_channel_id")
                     text_channel_raw = payload.get("text_channel_id")
                     text_channel_id = _coerce_int(text_channel_raw, "text_channel_id") if text_channel_raw not in (None, "", 0, "0") else 0
+                    shuffled_count = await self._prime_panel_playback_defaults(cur, schema, prefix, gid, bot_key)
 
                     await cur.execute(
                         f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_swarm_direct_orders` ("
@@ -3225,6 +3292,8 @@ class PanelDatabase:
                         "VALUES (%s, %s, %s, %s, %s, %s)",
                         (bot_key, gid, voice_channel_id, text_channel_id, "PLAY", source_url),
                     )
+                    result["loop_mode"] = "queue"
+                    result["shuffled_queue_count"] = shuffled_count
                     result["message"] = f"Queued a direct PLAY order for {bot.display_name} in guild {gid}."
 
                 elif action == "RECOVER":

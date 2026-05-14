@@ -1,15 +1,28 @@
 import { memo } from "react";
-import { PlugZap } from "lucide-react";
+import { Music2, PlugZap } from "lucide-react";
 import { EmptyState, Notice } from "./ui.jsx";
 import { formatCell, formatTime, initials, pick, unique } from "../utils/format.js";
 
+function bestSession(bot) {
+  const sessions = bot.sessions || [];
+  return sessions.find((session) => session.is_playing) || sessions[0] || null;
+}
+
 export function BotCard({ bot }) {
   const sessions = bot.sessions || [];
+  const session = bestSession(bot);
   const accent = bot.accent || "#89b4fa";
+  const thumbnail = session?.thumbnail || session?.thumbnail_url || "";
   return (
     <article className="bot-card" style={{ "--card-accent": accent }}>
       <div className="bot-head"><span className="bot-dot" /><h3>{bot.display_name || bot.name || bot.key}</h3><small>{bot.heartbeat_status || bot.status || "unknown"}</small></div>
-      <p>{sessions[0]?.title || bot.db_error || bot.schema || "Waiting for live playback."}</p>
+      <div className="bot-now">
+        {thumbnail ? <img className="bot-thumb" src={thumbnail} alt="" loading="lazy" decoding="async" /> : <div className="bot-thumb bot-thumb-empty"><Music2 size={22} /></div>}
+        <div>
+          <p>{session?.title || bot.db_error || bot.schema || "Waiting for live playback."}</p>
+          <small>{session?.guild_name || session?.channel_name || "Live state will fill in automatically."}</small>
+        </div>
+      </div>
       <div className="chip-row">
         <span>{bot.active_playing_count || sessions.filter((session) => session.is_playing).length} live</span>
         <span>{bot.known_guild_count || bot.guild_count || 0} guilds</span>
@@ -60,9 +73,10 @@ export function InviteCard({ bot }) {
 }
 
 export function UserCard({ user }) {
+  const imageUrl = user.avatar_url || user.server_icon_url || "";
   return (
     <article className="user-card">
-      <div className="avatar">{initials(user.display_name || user.username)}</div>
+      <div className="avatar">{imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" /> : initials(user.display_name || user.username)}</div>
       <div>
         <h3>{user.display_name || user.username}</h3>
         <p>@{user.username} / {user.server_name || `Guild ${user.guild_id}`}</p>
