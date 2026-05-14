@@ -13,6 +13,7 @@ import {
 import { Denied, NotFound, Page, SkeletonGrid } from "./components/ui.jsx";
 import { Shell } from "./components/Shell.jsx";
 import { DEFAULT_PREFERENCES } from "./config.js";
+import { useLiveRefresh } from "./hooks/useLiveRefresh.js";
 import { panelStyle } from "./utils/control.js";
 import DashboardPage from "./pages/DashboardPage.jsx";
 import ControlsPage from "./pages/ControlsPage.jsx";
@@ -69,6 +70,9 @@ function App() {
   useEffect(() => {
     if (token) loadPreferences();
   }, [loadPreferences, token]);
+
+  useLiveRefresh(loadSession, { interval: 45_000 });
+  useLiveRefresh(loadPreferences, { enabled: Boolean(token), interval: 60_000 });
 
   useEffect(() => {
     if (!token) return;

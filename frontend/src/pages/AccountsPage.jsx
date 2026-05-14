@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { KeyRound, Mail, RefreshCw, Search, Send, Trash2 } from "lucide-react";
 import { apiFetch, query } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { DataTable } from "../components/swarm.jsx";
 import { Page } from "../components/ui.jsx";
 
@@ -8,15 +9,16 @@ export default function AccountsPage({ ctx }) {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState([]);
   const [passwords, setPasswords] = useState({});
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false } = {}) => {
     try {
       const data = await apiFetch(`/api/swarm-accounts/admin${query({ query: q, limit: 100 })}`);
       setRows(data.data?.accounts || data.data || []);
     } catch (error) {
-      ctx.showToast(error.message, "error");
+      if (!background) ctx.showToast(error.message, "error");
     }
   }, [ctx, q]);
   useEffect(() => { load(); }, [load]);
+  useLiveRefresh(() => load({ background: true }), { interval: 30_000 });
   async function mutate(path, payload, message) {
     try {
       await apiFetch(path, { method: "POST", body: JSON.stringify(payload) });

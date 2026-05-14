@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw, Send, WandSparkles } from "lucide-react";
 import { apiFetch, cachedFetch, clearCache, query } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { CONTROL_ACTIONS } from "../config.js";
 import { ChannelSelect, ControlState } from "../components/swarm.jsx";
 import { Page, SectionHead } from "../components/ui.jsx";
@@ -46,11 +47,22 @@ export default function ControlsPage({ ctx }) {
     apiFetch(`/api/bots/${form.bot_key}/inventory`).then(setInventory).catch((error) => setInventory({ error: error.message, guilds: [] }));
   }, [form.bot_key]);
 
-  useEffect(() => {
+  const loadReadiness = useCallback(async () => {
     if (!form.bot_key || !form.guild_id) return;
-    apiFetch(`/api/bots/${form.bot_key}/control-state${query({ guild_id: form.guild_id })}`).then(setControlState).catch((error) => setControlState({ error: error.message }));
-    apiFetch(`/api/guilds/${form.guild_id}/control-matrix`).then(setMatrix).catch((error) => setMatrix({ error: error.message, bots: [] }));
+    const [state, controlMatrix] = await Promise.allSettled([
+      apiFetch(`/api/bots/${form.bot_key}/control-state${query({ guild_id: form.guild_id })}`),
+      apiFetch(`/api/guilds/${form.guild_id}/control-matrix`),
+    ]);
+    setControlState(state.status === "fulfilled" ? state.value : { error: state.reason.message });
+    setMatrix(controlMatrix.status === "fulfilled" ? controlMatrix.value : { error: controlMatrix.reason.message, bots: [] });
   }, [form.bot_key, form.guild_id]);
+
+  useEffect(() => {
+    loadReadiness();
+  }, [loadReadiness]);
+
+  useLiveRefresh(loadReadiness, { enabled: Boolean(form.bot_key && form.guild_id), interval: 8_000 });
+  useLiveRefresh(loadBase, { interval: 24_000 });
 
   const guilds = inventory?.guilds || [];
   const selectedGuild = guilds.find((guild) => String(guild.id) === String(form.guild_id));

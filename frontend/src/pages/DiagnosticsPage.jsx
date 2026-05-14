@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { apiFetch, query } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { JsonPanel } from "../components/swarm.jsx";
 import { Notice, Page } from "../components/ui.jsx";
 
@@ -16,6 +17,7 @@ export default function DiagnosticsPage({ ctx }) {
     }
   }, []);
   useEffect(() => { load(false); }, [load]);
+  useLiveRefresh(() => load(false), { interval: 30_000 });
   return (
     <Page title="System Runtime" eyebrow="Diagnostics" actions={<button type="button" onClick={() => load(true)}><RefreshCw size={16} />Force</button>}>
       {error ? <Notice tone="error">{error}</Notice> : null}

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Image as ImageIcon, KeyRound, Mail, RefreshCw, ShieldCheck, Siren, Table2, Trash2, Users } from "lucide-react";
 import { apiFetch, query } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { DataTable } from "../components/swarm.jsx";
 import { Metric, MetricGrid, Page, SectionHead } from "../components/ui.jsx";
 
@@ -15,16 +16,17 @@ export default function GalleryAdminPage({ ctx }) {
   const [table, setTable] = useState("");
   const [rows, setRows] = useState([]);
   const [passwords, setPasswords] = useState({});
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ background = false } = {}) => {
     try {
       const [admin, tableData] = await Promise.all([apiFetch("/api/image-gallery/admin"), apiFetch("/api/image-gallery/tables")]);
       setSummary(admin.data);
       setTables(tableData.tables || []);
     } catch (error) {
-      ctx.showToast(error.message, "error");
+      if (!background) ctx.showToast(error.message, "error");
     }
   }, [ctx]);
   useEffect(() => { load(); }, [load]);
+  useLiveRefresh(() => load({ background: true }), { interval: 20_000 });
   async function loadTable() {
     try {
       const data = await apiFetch(`/api/image-gallery/table-data${query({ table_name: table, limit: 100 })}`);

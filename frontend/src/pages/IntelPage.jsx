@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { apiFetch } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { EventList, JsonPanel } from "../components/swarm.jsx";
 import { Page, SectionHead } from "../components/ui.jsx";
 
@@ -18,7 +19,8 @@ export default function IntelPage({ ctx }) {
       stability: stability.status === "fulfilled" ? stability.value : { error: stability.reason?.message },
     });
   }, []);
-  useEffect(() => { load(); const timer = window.setInterval(load, 8000); return () => window.clearInterval(timer); }, [load]);
+  useEffect(() => { load(); }, [load]);
+  useLiveRefresh(load, { interval: 8_000 });
   return (
     <Page title="Errors And Metrics" eyebrow="Intel" actions={<button type="button" onClick={load}><RefreshCw size={16} />Refresh</button>}>
       <section className="dashboard-grid">

@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import { useState } from "react";
 import { Activity, Bot, ListMusic, RefreshCw, Siren } from "lucide-react";
 import { apiFetch, cachedFetch, prefetchFetch, query } from "../api.js";
+import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { BotCard, IntelligenceView, SessionTable } from "../components/swarm.jsx";
 import { Metric, MetricGrid, Notice, Page, SectionHead, SkeletonGrid } from "../components/ui.jsx";
 
@@ -78,9 +79,9 @@ export default function DashboardPage({ ctx }) {
   useEffect(() => {
     load();
     prefetchFetch("/api/bots", { ttl: 60_000, staleTtl: 300_000, storage: "local" });
-    const timer = window.setInterval(() => load({ background: true }), 10_000);
-    return () => window.clearInterval(timer);
   }, [load]);
+
+  useLiveRefresh(() => load({ background: true }), { interval: 10_000 });
 
   const dashboard = state.dashboard || {};
   const catalogBots = state.bots?.bots || [];
