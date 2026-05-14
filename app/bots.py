@@ -76,6 +76,8 @@ BOT_ACCENTS = {
     "tunestream": "#b4befe",
     "alucard": "#e06c75",
     "sapphire": "#4fc3f7",
+    "strife": "#ff6b6b",
+    "lockhart": "#f9a8d4",
     "aria": "#cba6f7",
 }
 
@@ -96,6 +98,8 @@ MUSIC_BOTS = [
     BotDefinition("tunestream", "Tunestream", "music", "TUNESTREAM_DISCORD_TOKEN", "discord_music_tunestream", "tunestream"),
     BotDefinition("alucard", "Alucard", "music", "ALUCARD_DISCORD_TOKEN", "discord_music_alucard", "alucard"),
     BotDefinition("sapphire", "Sapphire", "music", "SAPPHIRE_DISCORD_TOKEN", "discord_music_sapphire", "sapphire"),
+    BotDefinition("strife", "Strife", "music", "STRIFE_DISCORD_TOKEN", "discord_music", "strife"),
+    BotDefinition("lockhart", "Lockhart", "music", "LOCKHART_DISCORD_TOKEN", "discord_music", "lockhart"),
 ]
 
 ARIA_BOT = BotDefinition("aria", "Aria", "orchestrator", "ARIA_DISCORD_TOKEN")
