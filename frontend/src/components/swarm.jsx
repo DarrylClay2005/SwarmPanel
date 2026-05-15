@@ -27,6 +27,7 @@ export function BotCard({ bot }) {
         <span>{bot.active_playing_count || sessions.filter((session) => session.is_playing).length} live</span>
         <span>{bot.known_guild_count || bot.guild_count || 0} guilds</span>
         <span>{bot.queue_depth || sessions.reduce((sum, session) => sum + Number(session.queue_count || 0), 0)} queued</span>
+        <span>{bot.backup_queue_depth || sessions.reduce((sum, session) => sum + Number(session.backup_queue_count || 0), 0)} backup</span>
       </div>
     </article>
   );
@@ -34,7 +35,7 @@ export function BotCard({ bot }) {
 
 export function SessionTable({ sessions }) {
   if (!sessions.length) return <EmptyState title="No active sessions" />;
-  return <DataTable rows={sessions.map((session) => pick(session, ["bot_name", "guild_name", "guild_id", "channel_name", "title", "is_playing", "queue_count", "filter_mode", "loop_mode"]))} />;
+  return <DataTable rows={sessions.map((session) => pick(session, ["bot_name", "guild_name", "guild_id", "channel_name", "title", "is_playing", "queue_count", "backup_queue_count", "filter_mode", "loop_mode"]))} />;
 }
 
 export function IntelligenceView({ data }) {
@@ -48,6 +49,7 @@ export function ControlState({ state, compact = false }) {
   if (!state) return <EmptyState title="No state loaded" compact />;
   if (state.error) return <Notice tone="error">{state.error}</Notice>;
   const session = state.session || {};
+  const backupPreview = session.backup_queue_preview || [];
   return (
     <article className={`control-state ${compact ? "compact" : ""}`}>
       <div><strong>{state.display_name || state.key}</strong><small>{state.discord?.status || state.db?.status || "unknown"}</small></div>
@@ -56,7 +58,15 @@ export function ControlState({ state, compact = false }) {
         <span>{session.guild_name || state.guild_id}</span>
         <span>{session.channel_name || "No channel"}</span>
         <span>{session.queue_count || 0} queued</span>
+        <span>{session.backup_queue_count || 0} backup</span>
       </div>
+      {!compact && backupPreview.length ? (
+        <div className="backup-preview">
+          {backupPreview.map((track, index) => (
+            <span key={`${track.video_url || track.title || "track"}-${index}`}>{track.title || track.video_url || "Untitled backup track"}</span>
+          ))}
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -111,7 +121,7 @@ export function ChannelSelect({ value, channels, onChange, optional = false }) {
 
 export function DataTable({ rows = [], actions }) {
   if (!rows?.length) return <EmptyState title="No rows" compact />;
-  const columns = unique(rows.flatMap((row) => Object.keys(row))).slice(0, 9);
+  const columns = unique(rows.flatMap((row) => Object.keys(row))).filter((column) => !String(column).toLowerCase().includes("password_hash")).slice(0, 9);
   return (
     <div className="table-wrap">
       <table>

@@ -1482,7 +1482,7 @@ async def api_verify_session_email(request: Request, token: str):
 
 @app.post("/api/session/resend-verification")
 async def api_resend_session_verification(request: Request):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     _rate_limit_auth(f"session-email-resend:{str(auth.get('username') or '').lower()}", limit=8, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
@@ -1503,7 +1503,7 @@ async def api_resend_session_verification(request: Request):
 
 @app.post("/api/session/email")
 async def api_update_session_email(request: Request, payload: SessionEmailUpdateRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     _rate_limit_auth(f"session-email-update:{str(auth.get('username') or '').lower()}", limit=8, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
@@ -1524,7 +1524,7 @@ async def api_update_session_email(request: Request, payload: SessionEmailUpdate
 
 @app.post("/api/session/email/verify")
 async def api_verify_session_email_code(request: Request, payload: SessionEmailCodeRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     _rate_limit_auth(f"session-email-verify:{str(auth.get('username') or '').lower()}", limit=20, window_seconds=3600)
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
@@ -1542,7 +1542,7 @@ async def api_verify_session_email_code(request: Request, payload: SessionEmailC
 
 @app.post("/api/session/password")
 async def api_update_session_password(request: Request, payload: SessionPasswordUpdateRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -1564,7 +1564,7 @@ async def api_session_logout(request: Request):
 
 @app.get("/api/users/me")
 async def api_user_profile_me(request: Request):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or settings.admin_username)
     if not scoped_guild_id:
@@ -1603,7 +1603,7 @@ async def api_user_profile_me(request: Request):
 
 @app.post("/api/users/me")
 async def api_update_user_profile(request: Request, payload: UserProfileUpdateRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -1623,7 +1623,7 @@ async def api_update_user_profile(request: Request, payload: UserProfileUpdateRe
 
 @app.get("/api/users/preferences")
 async def api_user_panel_preferences(request: Request):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     defaults = _clean_panel_preferences(PanelPreferencesUpdateRequest())
@@ -1641,7 +1641,7 @@ async def api_user_panel_preferences(request: Request):
 
 @app.post("/api/users/preferences")
 async def api_update_user_panel_preferences(request: Request, payload: PanelPreferencesUpdateRequest):
-    auth = _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     scoped_guild_id = _account_guild_id(auth)
     username = str(auth.get("username") or "")
     if not scoped_guild_id or not username:
@@ -2129,7 +2129,7 @@ async def get_table_data(
     _require_admin_auth(request)
     try:
         data = await db.get_table_data(schema_name, table_name, limit)
-        return {"ok": True, "data": data}
+        return {"ok": True, "data": data, "rows": data.get("rows", []), "count": data.get("count", 0)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -2165,7 +2165,7 @@ async def image_gallery_table_data(request: Request, table_name: str, limit: int
     _require_image_gallery_owner_auth(request)
     try:
         data = await db.get_table_data(settings.image_gallery_schema, table_name, limit)
-        return {"ok": True, "data": data}
+        return {"ok": True, "data": data, "rows": data.get("rows", []), "count": data.get("count", 0)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

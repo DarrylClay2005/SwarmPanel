@@ -1665,6 +1665,7 @@ class PanelDatabase:
         settings: dict[str, Any] = {}
         queue_count = 0
         backup_queue_count = 0
+        backup_queue_preview: list[dict[str, Any]] = []
         pending_direct_orders = 0
         latest_direct_order: dict[str, Any] | None = None
         home_channel_id: int | None = None
@@ -1729,6 +1730,18 @@ class PanelDatabase:
                     (gid,),
                 ) or {}
             backup_queue_count = int(row.get("backup_queue_count") or 0)
+            try:
+                backup_queue_preview = await self._fetchall(
+                    f"SELECT title, video_url, requester_id FROM `{schema}`.`{backup_table}` "
+                    f"WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC LIMIT 8",
+                    (gid, bot.key),
+                )
+            except Exception:
+                backup_queue_preview = await self._fetchall(
+                    f"SELECT title, video_url, requester_id FROM `{schema}`.`{backup_table}` "
+                    f"WHERE guild_id = %s ORDER BY id ASC LIMIT 8",
+                    (gid,),
+                )
 
         if table_exists["home"]:
             try:
@@ -1909,6 +1922,7 @@ class PanelDatabase:
                 "stay_in_vc": bool(settings.get("stay_in_vc")),
                 "queue_count": queue_count,
                 "backup_queue_count": backup_queue_count,
+                "backup_queue_preview": backup_queue_preview,
                 "backup_restore_ready": backup_restore_ready,
                 "backup_restore_reason": backup_restore_reason,
                 "pending_direct_orders": pending_direct_orders,
@@ -2161,6 +2175,8 @@ class PanelDatabase:
             "heartbeat_status": heartbeat_status,
             "active_playing_count": active_playing_count,
             "known_guild_count": len(known_guilds),
+            "queue_depth": sum(int(item.get("queue_count") or 0) for item in sessions),
+            "backup_queue_depth": sum(int(item.get("backup_queue_count") or 0) for item in sessions),
             "learned_track_count": sum(int(item.get("learned_tracks") or 0) for item in intelligence_map.values()),
             "smart_recommendation_count": sum(recommendation_map.values()),
             "sessions": sessions,

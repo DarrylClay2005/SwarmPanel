@@ -1,6 +1,6 @@
 import { useCallback, useEffect } from "react";
 import { useState } from "react";
-import { Activity, Bot, ListMusic, RefreshCw, Siren } from "lucide-react";
+import { Activity, Bot, ListMusic, MessageCircle, RefreshCw, Siren } from "lucide-react";
 import { apiFetch, cachedFetch, prefetchFetch, query } from "../api.js";
 import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { BotCard, IntelligenceView, SessionTable } from "../components/swarm.jsx";
@@ -44,6 +44,7 @@ export default function DashboardPage({ ctx }) {
     dashboard: null,
     bots: null,
     intelligence: null,
+    telegram: null,
     loading: true,
     refreshing: false,
     error: "",
@@ -58,15 +59,17 @@ export default function DashboardPage({ ctx }) {
     }));
     const guildId = ctx.session.guild_id || ctx.session.account_guild_id;
     try {
-      const [dashboard, bots, intelligence] = await Promise.allSettled([
+      const [dashboard, bots, intelligence, telegram] = await Promise.allSettled([
         apiFetch("/api/dashboard"),
         cachedFetch("/api/bots", { ttl: 30_000, staleTtl: 180_000, storage: "local" }),
         apiFetch(`/api/music-intelligence${query({ guild_id: guildId, limit: 10 })}`).catch((error) => ({ error: error.message })),
+        ctx.isAdmin ? apiFetch("/api/telegram/status").catch((error) => ({ error: error.message })) : Promise.resolve(null),
       ]);
       setState((current) => ({
         dashboard: dashboard.status === "fulfilled" ? mergeDashboard(current.dashboard, dashboard.value) : current.dashboard,
         bots: bots.status === "fulfilled" ? bots.value : current.bots,
         intelligence: intelligence.status === "fulfilled" ? intelligence.value : current.intelligence,
+        telegram: telegram.status === "fulfilled" ? telegram.value : current.telegram,
         loading: false,
         refreshing: false,
         error: dashboard.status === "rejected" ? dashboard.reason.message : "",
@@ -74,7 +77,7 @@ export default function DashboardPage({ ctx }) {
     } catch (error) {
       setState((current) => ({ ...current, loading: false, refreshing: false, error: error.message }));
     }
-  }, [ctx.session.account_guild_id, ctx.session.guild_id]);
+  }, [ctx.isAdmin, ctx.session.account_guild_id, ctx.session.guild_id]);
 
   useEffect(() => {
     load();
@@ -89,7 +92,9 @@ export default function DashboardPage({ ctx }) {
   const sessions = Array.isArray(dashboard.sessions) ? dashboard.sessions : sessionsFromBots(bots);
   const active = sessions.filter((session) => session.is_playing || session.session_state === "playing").length;
   const stale = bots.filter((bot) => String(bot.heartbeat_status || "").includes("stale") || bot.status === "offline").length;
+  const backupQueued = sessions.reduce((sum, item) => sum + Number(item.backup_queue_count || 0), 0);
   const isInitialLoad = state.loading && !bots.length;
+  const telegram = state.telegram?.telegram;
 
   return (
     <Page
@@ -103,7 +108,14 @@ export default function DashboardPage({ ctx }) {
         <Metric icon={Activity} label="Live Sessions" value={active} />
         <Metric icon={Siren} label="Stale Nodes" value={stale} />
         <Metric icon={ListMusic} label="Queued" value={sessions.reduce((sum, item) => sum + Number(item.queue_count || 0), 0)} />
+        <Metric icon={ListMusic} label="Backup Queue" value={backupQueued} />
+        {ctx.isAdmin && telegram ? <Metric icon={MessageCircle} label="Telegram Live" value={telegram.running ? 1 : 0} /> : null}
       </MetricGrid>
+      {ctx.isAdmin && telegram ? (
+        <Notice tone={telegram.running ? "info" : "error"}>
+          Telegram bridge {telegram.running ? `connected as @${telegram.bot_username || "unknown"}` : (telegram.last_error || "is configured and still starting")}.
+        </Notice>
+      ) : null}
       {isInitialLoad ? <SkeletonGrid count={6} /> : (
         <section className="dashboard-grid" aria-busy={state.refreshing ? "true" : "false"}>
           <div className="panel wide live-bots-panel">

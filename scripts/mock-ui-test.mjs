@@ -220,6 +220,9 @@ async function installMocks(context, options = {}) {
 
     if (path === "/api/bots" && method === "GET") return route.fulfill(json(botsPayload()));
     if (path === "/api/dashboard" && method === "GET") return route.fulfill(json(dashboardPayload()));
+    if (path === "/api/telegram/status" && method === "GET") {
+      return route.fulfill(json({ telegram: { enabled: true, running: true, bot_username: "SwarmPanelBot", allowed_chat_count: 1, last_error: "" } }));
+    }
     if (path === "/api/music-intelligence" && method === "GET") {
       return route.fulfill(json({ recommendations: [{ bot: "lockhart", title: "Mock recommendation", score: 0.91 }] }));
     }
@@ -250,8 +253,12 @@ async function installMocks(context, options = {}) {
     if (path === "/api/image-gallery/table-data" && method === "GET") return route.fulfill(json({ data: [{ id: 14, title: "Mock gallery row" }] }));
     if (path.startsWith("/api/image-gallery/") && method === "POST") return route.fulfill(json({ ok: true }));
     if (path === "/api/events" && method === "GET") return route.fulfill(json({ events: [{ timestamp: new Date().toISOString(), level: "info", title: "Mock event", source: "test", message: "Event ready" }] }));
-    if (path === "/api/metrics" && method === "GET") return route.fulfill(json({ ok: true, counters: { controls: 3 } }));
-    if (path === "/api/stability" && method === "GET") return route.fulfill(json({ ok: true, status: "stable" }));
+    if (path === "/api/metrics" && method === "GET") {
+      return route.fulfill(json({ ok: true, totals: { bots: 2, queued_tracks: 5, backup_tracks: 8 }, bots: [{ key: "lockhart", display_name: "Lockhart", status: "online", metrics: [{ queue_count: 2, backup_queue_count: 4, recovery_pending: false, stale: false }] }] }));
+    }
+    if (path === "/api/stability" && method === "GET") {
+      return route.fulfill(json({ ok: true, status: "stable", cooldowns: [], recent_repairs: [{ bot: "lockhart", action: "mock repair", status: "ok" }] }));
+    }
 
     unhandled.push(`${method} ${path}${url.search}`);
     return route.fulfill(json({ detail: `Unhandled mock route: ${method} ${path}` }, 599));

@@ -3,11 +3,19 @@ import { Image as ImageIcon, KeyRound, Mail, RefreshCw, ShieldCheck, Siren, Tabl
 import { apiFetch, query } from "../api.js";
 import { useLiveRefresh } from "../hooks/useLiveRefresh.js";
 import { DataTable } from "../components/swarm.jsx";
-import { Metric, MetricGrid, Page, SectionHead } from "../components/ui.jsx";
+import { Metric, MetricGrid, Notice, Page, SectionHead, SkeletonGrid } from "../components/ui.jsx";
 
 function tableName(table) {
   if (!table || typeof table !== "object") return String(table || "");
   return table.name || table.table_name || table.TABLE_NAME || "";
+}
+
+function rowsFromPayload(payload) {
+  const data = payload?.data;
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.rows)) return data.rows;
+  if (Array.isArray(payload?.rows)) return payload.rows;
+  return [];
 }
 
 export default function GalleryAdminPage({ ctx }) {
@@ -15,12 +23,15 @@ export default function GalleryAdminPage({ ctx }) {
   const [tables, setTables] = useState([]);
   const [table, setTable] = useState("");
   const [rows, setRows] = useState([]);
+  const [tableLoading, setTableLoading] = useState(false);
+  const [tableError, setTableError] = useState("");
   const [passwords, setPasswords] = useState({});
   const load = useCallback(async ({ background = false } = {}) => {
     try {
       const [admin, tableData] = await Promise.all([apiFetch("/api/image-gallery/admin"), apiFetch("/api/image-gallery/tables")]);
       setSummary(admin.data);
       setTables(tableData.tables || []);
+      setTable((current) => current || tableName(tableData.tables?.[0]) || "");
     } catch (error) {
       if (!background) ctx.showToast(error.message, "error");
     }
@@ -28,11 +39,18 @@ export default function GalleryAdminPage({ ctx }) {
   useEffect(() => { load(); }, [load]);
   useLiveRefresh(() => load({ background: true }), { interval: 20_000 });
   async function loadTable() {
+    if (!table) return;
+    setTableLoading(true);
+    setTableError("");
     try {
       const data = await apiFetch(`/api/image-gallery/table-data${query({ table_name: table, limit: 100 })}`);
-      setRows(data.data || []);
+      setRows(rowsFromPayload(data));
     } catch (error) {
+      setRows([]);
+      setTableError(error.message);
       ctx.showToast(error.message, "error");
+    } finally {
+      setTableLoading(false);
     }
   }
   async function mutate(path, payload, message) {
@@ -77,8 +95,9 @@ export default function GalleryAdminPage({ ctx }) {
           <div className="toolbar"><select value={table} onChange={(event) => setTable(event.target.value)}><option value="">Choose table</option>{tables.map((item) => {
             const name = tableName(item);
             return <option key={name} value={name}>{name}</option>;
-          })}</select><button type="button" onClick={loadTable}><Table2 size={16} />Load</button></div>
-          <DataTable rows={rows} />
+          })}</select><button type="button" onClick={loadTable} disabled={tableLoading || !table}><Table2 size={16} />{tableLoading ? "Loading" : "Load"}</button></div>
+          {tableError ? <Notice tone="error">{tableError}</Notice> : null}
+          {tableLoading ? <SkeletonGrid count={3} /> : <DataTable rows={rows} />}
         </div>
       </section>
     </Page>
