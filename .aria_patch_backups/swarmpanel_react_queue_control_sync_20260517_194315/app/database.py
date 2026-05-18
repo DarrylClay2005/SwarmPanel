@@ -3022,37 +3022,16 @@ class PanelDatabase:
         col_names = ", ".join(f"`{column}`" for column in cols)
         placeholders = ", ".join("%s" for _ in cols)
 
-        # Queue-control sync fix: panel-side shuffle must behave like the hardened
-        # bot shuffle path. Use one transaction, bulk INSERTs, and mirror the
-        # shuffled order into the backup queue so bot recovery does not resurrect
-        # the old pre-shuffle order.
-        insert_values = [tuple(row[column] for column in cols) for row in rows]
+        # Queue leak fix: make panel-side shuffle atomic. The old path deleted
+        # the queue and reinserted rows under autocommit, so a DB interruption
+        # could drop tracks while the backup still showed they existed.
         try:
             await cur.execute("START TRANSACTION")
             await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
-            if insert_values:
-                await cur.executemany(
-                    f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})",
-                    insert_values,
-                )
-            try:
+            for row in rows:
                 await cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue_backup` "
-                    "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
-                    "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
-                )
-                await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue_backup` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
-                if insert_values:
-                    await cur.executemany(
-                        f"INSERT INTO `{schema}`.`{prefix}_queue_backup` ({col_names}) VALUES ({placeholders})",
-                        insert_values,
-                    )
-            except Exception:
-                logger.warning(
-                    "Could not mirror shuffled queue into backup for %s/%s; keeping live shuffle atomic.",
-                    bot_key,
-                    gid,
-                    exc_info=True,
+                    f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})",
+                    tuple(row[column] for column in cols),
                 )
             await cur.execute("COMMIT")
         except Exception:

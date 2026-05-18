@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111622" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>SwarmPanel</title>
+  <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260511191451" />
+</head>
+<body class="{% if not session_site_owner %}non-owner-session{% endif %}{% if not session_admin_mode and session_guild_id %} guild-scoped-session{% endif %}{% if session_image_gallery_owner %} image-gallery-owner-session{% endif %}">
+  <header class="topbar">
+    <h1>SwarmPanel</h1>
+    <div class="topbar-actions">
+      <span id="admin-mode-status" class="topbar-status" data-tone="{% if session_admin_mode %}online{% else %}idle{% endif %}" role="button" tabindex="0" aria-pressed="{% if session_admin_mode %}true{% else %}false{% endif %}">
+        {% if session_admin_mode %}Admin Mode{% elif session_guild_id %}Guild {{ session_guild_id }}{% else %}{{ session_username }}{% endif %}
+      </span>
+      <input id="global-panel-search" class="topbar-search" type="search" placeholder="Find bot, guild, track..." />
+      <select id="refresh-interval-select" class="topbar-select" aria-label="Dashboard refresh interval">
+        <option value="5000">5s refresh</option>
+        <option value="10000">10s refresh</option>
+        <option value="30000">30s refresh</option>
+      </select>
+      <button id="pause-refresh-toggle" type="button" aria-pressed="false">Pause Sync</button>
+      <button id="export-snapshot" type="button">Export</button>
+      <label id="admin-mode-toggle-wrap" class="admin-mode-toggle" {% if not session_site_owner or not session_guild_id %}hidden{% endif %}>
+        <input id="admin-mode-toggle" type="checkbox" {% if session_admin_mode %}checked{% endif %} />
+        <span>Admin Mode</span>
+      </label>
+      <div id="account-menu" class="account-menu">
+        <span id="topbar-user-name" class="topbar-user-name">{{ session_username }}</span>
+        <button id="topbar-profile-button" class="topbar-profile-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Open profile menu">
+          <span id="topbar-profile-avatar" class="topbar-profile-avatar">{{ session_username[:1]|upper }}</span>
+        </button>
+        <div id="account-dropdown" class="account-dropdown" role="menu" hidden>
+          <button type="button" role="menuitem" data-account-tab="appearance-tab">Panel Appearance</button>
+          <button type="button" role="menuitem" data-account-tab="profile-tab">Profile Settings</button>
+          <button type="button" role="menuitem" data-account-tab="users-tab">User Directory</button>
+          <button type="button" role="menuitem" data-account-tab="controls-tab">Controls</button>
+        </div>
+      </div>
+      <button id="logout-button" type="button">Logout</button>
+    </div>
+  </header>
+
+  <main class="container">
+  <nav class="swarm-tabs" aria-label="Swarm sections">
+    <button class="swarm-tab active" data-tab-target="overview-tab" type="button">Overview</button>
+    <button class="swarm-tab admin-only" data-tab-target="diagnostics-tab" type="button">Diagnostics</button>
+    <button class="swarm-tab" data-tab-target="controls-tab" type="button">Controls</button>
+    <button class="swarm-tab" data-tab-target="invites-tab" type="button">Invite Bots</button>
+    <button class="swarm-tab" data-tab-target="users-tab" type="button">Users</button>
+    <button class="swarm-tab admin-only" data-tab-target="accounts-tab" type="button">Accounts</button>
+    <button class="swarm-tab admin-only gallery-owner-only" data-tab-target="image-gallery-tab" type="button">Image Gallery</button>
+    <button class="swarm-tab admin-only" data-tab-target="intel-tab" type="button">Intel + Errors</button>
+  </nav>
+
+  <section class="panel swarm-section-hero" id="swarm-section-hero">
+    <div class="swarm-section-hero-copy">
+      <p id="swarm-section-eyebrow" class="swarm-section-eyebrow">Overview</p>
+      <h2 id="swarm-section-title">Swarm Command Deck</h2>
+      <p id="swarm-section-description" class="muted">Live command posture, alerting, sessions, and system visibility for the swarm.</p>
+    </div>
+    <div id="swarm-section-meta" class="swarm-section-meta"></div>
+  </section>
+
+  <div class="swarm-tab-panel" id="invites-tab">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Invite Bots</h2>
+          <p class="muted" id="invite-panel-copy">Add the swarm nodes your server needs, then refresh once Discord finishes the invite.</p>
+        </div>
+        <button id="refresh-invite-catalog" type="button">Refresh Invites</button>
+      </div>
+      <div id="invite-lockout-message" class="invite-lockout-message" hidden></div>
+      <div id="invite-bot-grid" class="invite-bot-grid"></div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="profile-tab">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Profile Settings</h2>
+          <p class="muted">Build a public server card for the swarm directory.</p>
+        </div>
+      </div>
+      <div class="user-profile-shell">
+        <aside class="user-profile-preview">
+          <div class="user-profile-banner">
+            <p class="swarm-section-eyebrow">Public Card</p>
+            <h3>Server Identity</h3>
+            <p class="muted">This is how your SwarmPanel account appears in the public directory.</p>
+          </div>
+          <div id="user-avatar-preview" class="user-avatar-preview">S</div>
+          <div>
+            <h3 id="user-profile-preview-name">Swarm User</h3>
+            <p id="user-profile-preview-server" class="muted">No server card yet.</p>
+          </div>
+          <div id="user-profile-preview-chips" class="user-chip-row"></div>
+          <div id="user-profile-preview-stats" class="user-profile-preview-stats"></div>
+          <div id="user-profile-preview-layout" class="user-chip-row"></div>
+        </aside>
+        <div class="user-profile-editor">
+          <div id="user-profile-locked" class="invite-lockout-message" hidden></div>
+          <div class="user-profile-grid">
+            <label class="control-field">
+              <span>Display Name</span>
+              <input id="profile-display-name" type="text" maxlength="80" placeholder="Your public display name" />
+            </label>
+            <label class="control-field">
+              <span>Email</span>
+              <input id="profile-email" type="email" autocomplete="email" placeholder="you@example.com" />
+            </label>
+            <label class="control-field">
+              <span>Email Code</span>
+              <input id="profile-email-code" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" />
+            </label>
+            <label class="control-field">
+              <span>Avatar URL</span>
+              <input id="profile-avatar-url" type="url" placeholder="https://..." />
+            </label>
+            <label class="control-field">
+              <span>Server Name</span>
+              <input id="profile-server-name" type="text" maxlength="120" placeholder="Your Discord server" />
+            </label>
+            <label class="control-field">
+              <span>Server Icon URL</span>
+              <input id="profile-server-icon-url" type="url" placeholder="https://..." />
+            </label>
+            <label class="control-field">
+              <span>Server Invite</span>
+              <input id="profile-server-invite-url" type="url" placeholder="https://discord.gg/..." />
+            </label>
+            <label class="control-field">
+              <span>Favorite Bot</span>
+              <select id="profile-favorite-bot"></select>
+            </label>
+            <label class="control-field">
+              <span>Accent</span>
+              <input id="profile-theme-accent" type="color" value="#89b4fa" />
+            </label>
+            <label class="control-field user-public-toggle">
+              <span>Public Profile</span>
+              <input id="profile-public-profile" type="checkbox" checked />
+            </label>
+          </div>
+          <label class="control-field control-field-wide">
+            <span>Bio</span>
+            <textarea id="profile-bio" maxlength="280" rows="3" placeholder="Short server vibe, music taste, or community note"></textarea>
+          </label>
+          <div class="user-profile-grid">
+            <label class="control-field">
+              <span>Current Password</span>
+              <input id="profile-current-password" type="password" autocomplete="current-password" placeholder="Current password or legacy guild ID" />
+            </label>
+            <label class="control-field">
+              <span>New Password</span>
+              <input id="profile-new-password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+            </label>
+            <label class="control-field">
+              <span>Confirm Password</span>
+              <input id="profile-confirm-password" type="password" autocomplete="new-password" placeholder="Repeat new password" />
+            </label>
+          </div>
+          <div class="row">
+            <button id="save-user-profile" type="button">Save Profile</button>
+            <button id="save-panel-email" type="button">Save Email + Send Code</button>
+            <button id="verify-panel-email-code" type="button">Verify Email Code</button>
+            <button id="resend-panel-email-verification" type="button" hidden>Resend Email Verification</button>
+            <button id="change-panel-password" type="button">Change Password</button>
+            <span id="user-profile-status" class="status"></span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="appearance-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Panel Appearance</h2>
+          <p class="muted">Account-specific look and layout preferences.</p>
+        </div>
+        <button id="reset-panel-preferences" type="button">Reset Look</button>
+      </div>
+      <div class="appearance-grid">
+        <label class="control-field">
+          <span>Accent Color</span>
+          <input id="panel-accent-color" type="color" value="#89b4fa" />
+        </label>
+        <label class="control-field">
+          <span>Background</span>
+          <select id="panel-background-mode">
+            <option value="default">Default</option>
+            <option value="midnight">Midnight</option>
+            <option value="aurora">Aurora</option>
+            <option value="ember">Ember</option>
+            <option value="custom_color">Custom Color</option>
+            <option value="custom_image">Custom Image</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Background Color</span>
+          <input id="panel-background-color" type="color" value="#0b0e18" />
+        </label>
+        <label class="control-field">
+          <span>Background Image URL</span>
+          <input id="panel-background-image-url" type="url" placeholder="https://..." />
+        </label>
+        <label class="control-field">
+          <span>Layout Width</span>
+          <select id="panel-layout-mode">
+            <option value="standard">Standard</option>
+            <option value="focused">Focused</option>
+            <option value="wide">Wide</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Density</span>
+          <select id="panel-density">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Card Shape</span>
+          <select id="panel-card-shape">
+            <option value="soft">Soft</option>
+            <option value="crisp">Crisp</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Font Scale</span>
+          <select id="panel-font-scale">
+            <option value="normal">Normal</option>
+            <option value="large">Large</option>
+            <option value="dense">Dense</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Motion</span>
+          <select id="panel-motion">
+            <option value="standard">Standard</option>
+            <option value="reduced">Reduced</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Profile Layout</span>
+          <select id="panel-profile-layout">
+            <option value="spotlight">Spotlight</option>
+            <option value="studio">Studio</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>User Directory Layout</span>
+          <select id="panel-directory-layout">
+            <option value="grid">Grid</option>
+            <option value="magazine">Magazine</option>
+            <option value="stack">Stack</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Tab Style</span>
+          <select id="panel-tab-style">
+            <option value="pills">Pills</option>
+            <option value="underline">Underline</option>
+            <option value="minimal">Minimal</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Surface Opacity</span>
+          <input id="panel-surface-opacity" type="range" min="0.35" max="1" step="0.05" value="0.92" />
+        </label>
+        <label class="control-field">
+          <span>Surface Blur</span>
+          <input id="panel-surface-blur" type="range" min="0" max="36" step="1" value="18" />
+        </label>
+        <label class="control-field">
+          <span>Live Stream Cards</span>
+          <select id="panel-stream-card-style">
+            <option value="editorial">Editorial</option>
+            <option value="compact">Compact</option>
+            <option value="cinematic">Cinematic</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Dashboard Density</span>
+          <select id="panel-dashboard-density">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </label>
+      </div>
+      <div class="appearance-preview-card">
+        <div class="appearance-preview-surface">
+          <div class="appearance-preview-head">
+            <span class="appearance-preview-dot"></span>
+            <strong>Live Preview</strong>
+          </div>
+          <div class="appearance-preview-body">
+            <div class="appearance-preview-card-block">
+              <span class="appearance-preview-label">Section</span>
+              <strong id="appearance-preview-title">Overview</strong>
+              <p id="appearance-preview-copy" class="muted">Preview your active color, layout, and tab styling together.</p>
+            </div>
+            <div id="appearance-preview-chips" class="user-chip-row"></div>
+          </div>
+        </div>
+      </div>
+      <div class="row">
+        <button id="save-panel-preferences" type="button">Save Look</button>
+        <span id="panel-preferences-status" class="status"></span>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="users-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>User Search</h2>
+          <p class="muted">Find public swarm users, server cards, and music activity.</p>
+        </div>
+        <button id="refresh-user-directory" type="button">Refresh Users</button>
+      </div>
+      <div class="row user-search-row">
+        <input id="user-search-input" type="search" placeholder="Search users, servers, or favorite bots..." />
+        <button id="user-search-button" type="button">Search</button>
+      </div>
+      <div class="user-directory-shell">
+        <aside id="user-directory-featured" class="user-directory-featured">
+          <div class="control-context-empty">Run a search or refresh the directory to spotlight a public profile.</div>
+        </aside>
+        <div class="user-directory-main">
+          <div id="user-directory-summary" class="user-directory-summary"></div>
+          <div id="user-directory-grid" class="user-directory-grid"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel" id="accounts-tab">
+    <section class="panel admin-only">
+      <div class="section-title-row">
+        <div>
+          <h2>SwarmPanel Account Admin</h2>
+          <p class="muted">Admin-only recovery and account management for SwarmPanel logins.</p>
+        </div>
+        <button id="refresh-swarm-accounts-admin" type="button">Refresh Accounts</button>
+      </div>
+      <div class="invite-lockout-message">
+        SwarmPanel accounts now use passwords while keeping guild IDs linked to each account.
+        Admins can reset passwords, update linked guild IDs, and manage email verification from here.
+      </div>
+      <div id="swarm-accounts-admin-status" class="status"></div>
+      <div class="diagnostic-grid" id="swarm-accounts-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="SwarmPanel account controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="swarm-accounts-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="swarm-accounts-search" type="search" placeholder="username, guild, email, server" />
+        </label>
+        <label class="control-field">
+          <span>Email State</span>
+          <select id="swarm-accounts-email-filter">
+            <option value="all">All</option>
+            <option value="verified">Verified</option>
+            <option value="pending">Pending</option>
+            <option value="missing">No Email</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Profile State</span>
+          <select id="swarm-accounts-visibility-filter">
+            <option value="all">All</option>
+            <option value="public">Public</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="swarm-accounts-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="recent-login">Recent Login</option>
+            <option value="email">Email Status</option>
+          </select>
+        </label>
+        <button id="swarm-accounts-clear-filters" type="button">Clear Filters</button>
+      </div>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead>
+            <tr><th>ID</th><th>Account</th><th>Login Key</th><th>Email</th><th>Profile</th><th>Activity</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="swarm-accounts-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <div class="swarm-tab-panel active" id="overview-tab">
+    <section class="panel deck-panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Swarm Command Deck</h2>
+          <p class="muted">Live command posture for Aria and the worker swarm.</p>
+        </div>
+        <span id="overview-generated" class="muted deck-timestamp">Waiting for dashboard sync...</span>
+      </div>
+      <div class="utility-toolbar">
+        <label class="control-inline"><span>Overview Filter</span><input id="overview-filter" type="search" placeholder="bot, guild, track" /></label>
+        <label class="control-inline"><input id="pinned-only-toggle" type="checkbox" /> Pinned only</label>
+        <button id="clear-local-qol" type="button">Clear Local QOL</button>
+      </div>
+      <div id="overview-stats" class="overview-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Alert Rules</h2>
+          <p class="muted">Local watchdog rules for stale nodes, offline nodes, live sessions, and queue pressure.</p>
+        </div>
+        <button id="save-alert-rules" type="button">Save Rules</button>
+      </div>
+      <div class="alert-rule-grid">
+        <label class="check-row"><input id="alert-offline" type="checkbox" checked /> Offline nodes</label>
+        <label class="check-row"><input id="alert-stale" type="checkbox" checked /> Stale heartbeats</label>
+        <label class="check-row"><input id="alert-live" type="checkbox" /> Live session changes</label>
+        <label class="control-field"><span>Queue threshold</span><input id="alert-queue-threshold" type="number" min="0" step="1" value="25" /></label>
+      </div>
+      <div id="alert-center" class="alert-center"></div>
+    </section>
+
+    <section class="panel live-stream-panel">
+      <div class="section-title-row">
+        <h2 class="live-panel-title">
+          <span class="live-panel-dot"></span>
+          <span>Live Swarm Streams</span>
+        </h2>
+        <span class="muted live-sync-pill" id="live-sync-status">Live Sync: 2s</span>
+      </div>
+      <p class="muted">Real-time media feeds across all active worker nodes.</p>
+      <div id="now-playing-cards" class="cards live-stream-grid"></div>
+    </section>
+
+    <section class="panel live-dashboard-panel">
+      <div class="section-title-row">
+        <h2>Live Bot Dashboard</h2>
+        <button id="refresh-dashboard" type="button">Refresh</button>
+      </div>
+      <p class="muted">What each bot is doing right now (status, track, channel, filter, queue).</p>
+      <div id="dashboard-meta" class="muted"></div>
+      <h3 class="live-dashboard-group live-dashboard-group-aria">Swarm Orchestrator</h3>
+      <div id="aria-card-container" class="cards" style="margin-bottom: 25px;"></div>
+      <h3 class="live-dashboard-group live-dashboard-group-workers">Swarm Worker Nodes</h3>
+      <div id="bot-cards" class="cards"></div>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>Guild</th>
+              <th>Channel</th>
+              <th>Status</th>
+              <th>Track</th>
+              <th>Filter</th>
+              <th>Loop</th>
+              <th>Queue</th>
+              <th>Recovery</th>
+              <th>Signals</th>
+              <th>Position</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="sessions-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+  <div class="swarm-tab-panel" id="diagnostics-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>System Diagnostics</h2>
+          <p class="muted">Runtime status for shared env wiring, bot database reachability, Discord inventory access, and Aria's Gemini health.</p>
+        </div>
+        <button id="refresh-diagnostics" type="button">Refresh Diagnostics</button>
+      </div>
+      <div id="diagnostics-summary" class="overview-grid"></div>
+      <div class="diagnostics-layout">
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Shared Runtime</h3>
+              <span class="muted">Music/.env</span>
+            </div>
+            <div id="shared-runtime-card" class="diagnostic-stack"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Health</h3>
+              <span class="muted">DB + Gemini</span>
+            </div>
+            <div id="aria-diagnostic-card" class="diagnostic-stack"></div>
+          </div>
+        </div>
+
+        <div class="diagnostics-column">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Worker Nodes</h3>
+              <span class="muted">DB + Discord</span>
+            </div>
+            <div id="worker-diagnostic-grid" class="worker-diagnostic-grid"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+  <div class="swarm-tab-panel" id="controls-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <h2>Direct Bot Controls</h2>
+      </div>
+      <p class="muted">Queue a track or playlist straight from the panel and set loop behavior per guild without using Discord commands.</p>
+
+      <div class="command-presets">
+        <div class="section-title-row">
+          <div>
+            <h3>Command Presets</h3>
+            <p class="muted">Save reusable bot, guild, voice, source, loop, and filter combinations for fast dispatch.</p>
+          </div>
+          <div class="row">
+            <input id="preset-name" type="text" maxlength="80" placeholder="Preset name" />
+            <button id="save-command-preset" type="button">Save Preset</button>
+          </div>
+        </div>
+        <div class="preset-runner">
+          <select id="command-preset-select"></select>
+          <button id="apply-command-preset" type="button">Apply</button>
+          <button id="run-command-preset" type="button">Run</button>
+          <button id="delete-command-preset" type="button">Delete</button>
+        </div>
+        <div id="command-history" class="command-history"></div>
+      </div>
+
+      <div class="control-shell">
+        <div class="control-main">
+          <div class="direct-control-grid">
+            <label class="control-field">
+              <span>Bot</span>
+              <select id="control-bot-select"></select>
+            </label>
+
+            <label class="control-field">
+              <span>Guild</span>
+              <select id="control-guild-select"></select>
+            </label>
+
+            <label class="control-field">
+              <span>Voice Channel</span>
+              <select id="control-voice-select"></select>
+            </label>
+          </div>
+
+          <label class="control-field control-field-wide">
+            <span>Track / Playlist URL</span>
+            <input id="control-source-input" type="text" placeholder="Paste a YouTube or SoundCloud link, livestream, playlist URL, or search text" />
+          </label>
+          <p class="muted">Direct play is routed by bot, guild, and voice channel. Text feedback stays on the bot's configured feedback channel, so there is no separate text-channel selector here.</p>
+
+          <div class="row">
+            <button id="queue-from-panel" type="button">Queue On Selected Bot</button>
+
+            <label class="control-inline">
+              <span>Loop Mode</span>
+              <select id="control-loop-select">
+                <option value="queue" selected>Queue</option>
+                <option value="off">Off</option>
+                <option value="song">Song</option>
+              </select>
+            </label>
+
+            <button id="apply-loop-mode" type="button">Apply Loop Mode</button>
+
+            <label class="control-inline">
+              <span>Filter</span>
+              <select id="control-filter-select">
+                <option value="none">None</option>
+                <option value="nightcore">Nightcore</option>
+                <option value="vaporwave">Vaporwave</option>
+                <option value="bassboost">Bassboost</option>
+                <option value="8d">8D</option>
+              </select>
+            </label>
+
+            <button id="apply-filter-mode" type="button">Apply Filter</button>
+            <button id="set-home-channel" type="button">Set Home Channel</button>
+          </div>
+
+          <div class="control-actions" aria-label="Direct playback controls">
+            <button class="control-action-btn" data-panel-action="PAUSE" type="button">Pause</button>
+            <button class="control-action-btn" data-panel-action="RESUME" type="button">Resume</button>
+            <button class="control-action-btn" data-panel-action="SKIP" type="button">Skip</button>
+            <button class="control-action-btn control-action-btn-stop" data-panel-action="STOP" type="button">Stop</button>
+            <button class="control-action-btn" data-panel-action="LEAVE" type="button">Leave Voice</button>
+            <button class="control-action-btn" data-panel-action="SHUFFLE" type="button">Shuffle Queue</button>
+            <button class="control-action-btn control-action-btn-danger" data-panel-action="CLEAR" type="button">Clear Queue + Track</button>
+            <button class="control-action-btn admin-only" data-panel-action="RESTART" type="button">Restart Bot</button>
+          </div>
+
+          <div id="control-status" class="status"></div>
+        </div>
+
+        <aside class="control-sidebar">
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Selected Session</h3>
+              <span class="muted">Auto-synced</span>
+            </div>
+            <div id="control-context-card" class="control-context-card"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Session Notes</h3>
+              <button id="save-session-note" type="button">Save</button>
+            </div>
+            <textarea id="session-note-input" class="session-note-input" rows="5" maxlength="800" placeholder="Local note for this bot and guild"></textarea>
+            <div id="session-note-status" class="muted"></div>
+          </div>
+
+          <div class="control-side-card">
+            <div class="control-side-title-row">
+              <h3>Aria Syntax</h3>
+              <span class="muted">Discord-ready</span>
+            </div>
+            <div id="aria-command-guide" class="aria-command-guide"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>Capability Matrix</h2>
+          <p class="muted">What the selected bot and guild are ready to do right now, plus how the whole swarm is positioned inside that guild.</p>
+        </div>
+      </div>
+      <div class="capability-layout">
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Bot Actions</h3>
+            <span class="muted">Live readiness</span>
+          </div>
+          <div id="selected-bot-capabilities" class="capability-list"></div>
+        </div>
+
+        <div class="control-side-card">
+          <div class="control-side-title-row">
+            <h3>Selected Guild Across The Swarm</h3>
+            <span class="muted">Real data</span>
+          </div>
+          <div id="selected-guild-matrix" class="swarm-guild-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Bot Server + Channel Explorer</h2>
+      <p class="muted">This shows exactly what each bot can currently see in Discord: guilds, text channels, voice channels, categories, and where your selected control routes can actually go.</p>
+      <div class="row">
+        <select id="bot-select"></select>
+        <button id="load-inventory" type="button">Load inventory</button>
+      </div>
+      <div class="row">
+        <input id="inventory-search" type="text" placeholder="Filter guilds/channels..." />
+        <select id="inventory-sort">
+          <option value="name">Sort by name</option>
+          <option value="channels_desc">Most channels</option>
+          <option value="voice_desc">Most voice channels</option>
+        </select>
+      </div>
+      <div id="inventory-output" class="inventory-browser"></div>
+    </section>
+
+    <section class="panel admin-only">
+      <h2>Database Controls</h2>
+      <p class="muted">Danger zone: clear one table or clear an entire schema.</p>
+      <div class="row">
+        <select id="schema-select"></select>
+        <select id="table-select"></select>
+        <button id="refresh-db" type="button">Refresh DB metadata</button>
+      </div>
+
+      <div class="row">
+        <button id="view-table-data" type="button" style="background-color: #3b4252;">👀 View table data</button>
+        <button id="truncate-table" class="danger" type="button">Truncate selected table</button>
+        <button id="truncate-schema" class="danger" type="button">Truncate selected schema</button>
+      </div>
+      <p class="muted">Table confirm text: <code id="confirm-table-text"></code></p>
+      <p class="muted">Schema confirm text: <code id="confirm-schema-text"></code></p>
+      <div id="db-status" class="status"></div>
+      <div id="data-viewer-container" style="display: none; margin-top: 20px; overflow-x: auto; max-height: 400px; border: 1px solid #283042; border-radius: 8px; background: #101727;">
+        <h3 id="data-viewer-title" style="margin: 0; padding: 12px; border-bottom: 1px solid #283042; position: sticky; top: 0; background: #141a28;">Table Data</h3>
+        <table>
+          <thead id="data-table-head"></thead>
+          <tbody id="data-table-body"></tbody>
+        </table>
+      </div>
+    </section>
+  
+  </div>
+  <div class="swarm-tab-panel gallery-owner-only" id="image-gallery-tab">
+    <section class="panel admin-only">
+      <div class="section-title-row">
+        <div>
+          <h2>Image Gallery Admin</h2>
+          <p class="muted">Account recovery, moderation, and database operations for the Image Gallery.</p>
+        </div>
+        <button id="refresh-image-gallery-admin" type="button">Refresh Gallery Data</button>
+      </div>
+      <div id="image-gallery-admin-status" class="status"></div>
+      <div class="diagnostic-grid" id="image-gallery-summary"></div>
+      <div class="gallery-admin-toolbar" aria-label="Image Gallery controls">
+        <label class="control-field">
+          <span>Limit</span>
+          <select id="image-gallery-limit-select">
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+          </select>
+        </label>
+        <label class="control-field gallery-search-field">
+          <span>Search</span>
+          <input id="image-gallery-search" type="search" placeholder="users, titles, reports" />
+        </label>
+        <label class="control-field">
+          <span>Scope</span>
+          <select id="image-gallery-scope-select">
+            <option value="all">All</option>
+            <option value="users">Users</option>
+            <option value="media">Media</option>
+            <option value="reports">Reports</option>
+            <option value="comments">Comments</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Media Status</span>
+          <select id="image-gallery-media-status-select">
+            <option value="all">All</option>
+            <option value="clear">Clear</option>
+            <option value="review">Review</option>
+            <option value="blocked">Blocked</option>
+            <option value="adult">18+</option>
+          </select>
+        </label>
+        <label class="control-field">
+          <span>Sort</span>
+          <select id="image-gallery-sort-select">
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="activity">Most Active</option>
+            <option value="reports">Open Reports</option>
+          </select>
+        </label>
+        <button id="image-gallery-clear-filters" type="button">Clear Filters</button>
+      </div>
+      <h3>Database Tables</h3>
+      <div class="row">
+        <select id="image-gallery-table-select"></select>
+        <button id="refresh-image-gallery-tables" type="button">Refresh Tables</button>
+        <button id="view-image-gallery-table" type="button">View Table Rows</button>
+      </div>
+      <div id="image-gallery-table-status" class="status"></div>
+      <div id="image-gallery-table-viewer" class="table-wrap gallery-table-viewer" hidden>
+        <h4 id="image-gallery-table-title">Table Rows</h4>
+        <table class="sessions-table">
+          <thead id="image-gallery-table-head"></thead>
+          <tbody id="image-gallery-table-body"></tbody>
+        </table>
+      </div>
+      <h3>Users</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>ID</th><th>User</th><th>Email</th><th>Flags</th><th>Activity</th><th>Last Login</th><th>Actions</th></tr></thead>
+          <tbody id="image-gallery-users-body"></tbody>
+        </table>
+      </div>
+      <h3>Reports</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>ID</th><th>User</th><th>Post</th><th>Reason</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="image-gallery-reports-body"></tbody>
+        </table>
+      </div>
+      <h3>Recent Comments</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>ID</th><th>User</th><th>Post</th><th>Comment</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="image-gallery-comments-body"></tbody>
+        </table>
+      </div>
+      <h3>Recent Media</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>ID</th><th>User</th><th>Title</th><th>Kind</th><th>State</th><th>Views</th><th>Created</th><th>Actions</th></tr></thead>
+          <tbody id="image-gallery-media-body"></tbody>
+        </table>
+      </div>
+      <h3>Categories + Collections</h3>
+      <div class="table-wrap">
+        <table class="sessions-table">
+          <thead><tr><th>Type</th><th>Name</th><th>Owner</th><th>Items</th><th>Created</th></tr></thead>
+          <tbody id="image-gallery-taxonomy-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+  <div class="swarm-tab-panel" id="intel-tab">
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>🚨 Intel + Live Error Feed</h2>
+          <p class="muted">Recent panel, bot, Aria medic, and live swarm events. This loads from /api/events and keeps polling if the websocket is offline.</p>
+        </div>
+        <button id="refresh-event-feed" type="button">Refresh Feed</button>
+      </div>
+      <div class="row">
+        <label class="control-inline"><span>Level</span><select id="error-feed-level"><option value="all">All</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option></select></label>
+        <label class="control-inline"><span>Source</span><select id="error-feed-source"><option value="all">All</option><option value="panel">Panel</option><option value="worker">Worker</option><option value="bot_error">Bot Errors</option><option value="aria">Aria</option><option value="system">System</option></select></label>
+        <label class="control-inline"><span>Sort</span><select id="error-feed-sort"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="level">Severity</option></select></label>
+      </div>
+      <pre id="error-feed" class="pre"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="section-title-row">
+        <div>
+          <h2>📊 Metrics Dashboard</h2>
+          <p class="muted">Live bot observability from bot-written metrics tables: voice state, Lavalink readiness, queue depth, stale heartbeats, and recovery flags.</p>
+        </div>
+        <button id="refresh-metrics" type="button">Refresh Metrics</button>
+      </div>
+      <div id="metrics-dashboard" class="diagnostic-grid"></div>
+    </section>
+
+  </div>
+</main>
+  <script src="/static/final_app.js?v=20260511191451"></script>
+</body>
+</html>

@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlencode
@@ -12,17 +11,6 @@ class BotDefinition:
     token_env: str
     db_schema: Optional[str] = None
     table_prefix: Optional[str] = None
-
-
-def _music_schema(bot_key: str, fallback: str) -> str:
-    """Resolve a music bot database schema from the runtime environment.
-
-    SwarmPanel runs from its own .env, while the music stack may define
-    per-bot DB names in the Music .env. Keeping the schema configurable
-    prevents a single renamed/shared bot schema from breaking login.
-    """
-    value = os.getenv(f"{bot_key.upper()}_DB_NAME", fallback).strip()
-    return value or fallback
 
 
 DISCORD_PERMISSION_BITS = {
@@ -100,18 +88,18 @@ BOT_CAPABILITY_SUMMARIES = {
 
 
 MUSIC_BOTS = [
-    BotDefinition("gws", "GWS", "music", "GWS_DISCORD_TOKEN", _music_schema("gws", "discord_music_gws"), "gws"),
-    BotDefinition("harmonic", "Harmonic", "music", "HARMONIC_DISCORD_TOKEN", _music_schema("harmonic", "discord_music_harmonic"), "harmonic"),
-    BotDefinition("maestro", "Maestro", "music", "MAESTRO_DISCORD_TOKEN", _music_schema("maestro", "discord_music_maestro"), "maestro"),
-    BotDefinition("melodic", "Melodic", "music", "MELODIC_DISCORD_TOKEN", _music_schema("melodic", "discord_music_melodic"), "melodic"),
-    BotDefinition("nexus", "Nexus", "music", "NEXUS_DISCORD_TOKEN", _music_schema("nexus", "discord_music_nexus"), "nexus"),
-    BotDefinition("rhythm", "Rhythm", "music", "RHYTHM_DISCORD_TOKEN", _music_schema("rhythm", "discord_music_rhythm"), "rhythm"),
-    BotDefinition("symphony", "Symphony", "music", "SYMPHONY_DISCORD_TOKEN", _music_schema("symphony", "discord_music_symphony"), "symphony"),
-    BotDefinition("tunestream", "Tunestream", "music", "TUNESTREAM_DISCORD_TOKEN", _music_schema("tunestream", "discord_music_tunestream"), "tunestream"),
-    BotDefinition("alucard", "Alucard", "music", "ALUCARD_DISCORD_TOKEN", _music_schema("alucard", "discord_music_alucard"), "alucard"),
-    BotDefinition("sapphire", "Sapphire", "music", "SAPPHIRE_DISCORD_TOKEN", _music_schema("sapphire", "discord_music_sapphire"), "sapphire"),
-    BotDefinition("strife", "Strife", "music", "STRIFE_DISCORD_TOKEN", _music_schema("strife", "discord_music_strife"), "strife"),
-    BotDefinition("lockhart", "Lockhart", "music", "LOCKHART_DISCORD_TOKEN", _music_schema("lockhart", "discord_music_lockhart"), "lockhart"),
+    BotDefinition("gws", "GWS", "music", "GWS_DISCORD_TOKEN", "discord_music_gws", "gws"),
+    BotDefinition("harmonic", "Harmonic", "music", "HARMONIC_DISCORD_TOKEN", "discord_music_harmonic", "harmonic"),
+    BotDefinition("maestro", "Maestro", "music", "MAESTRO_DISCORD_TOKEN", "discord_music_maestro", "maestro"),
+    BotDefinition("melodic", "Melodic", "music", "MELODIC_DISCORD_TOKEN", "discord_music_melodic", "melodic"),
+    BotDefinition("nexus", "Nexus", "music", "NEXUS_DISCORD_TOKEN", "discord_music_nexus", "nexus"),
+    BotDefinition("rhythm", "Rhythm", "music", "RHYTHM_DISCORD_TOKEN", "discord_music_rhythm", "rhythm"),
+    BotDefinition("symphony", "Symphony", "music", "SYMPHONY_DISCORD_TOKEN", "discord_music_symphony", "symphony"),
+    BotDefinition("tunestream", "Tunestream", "music", "TUNESTREAM_DISCORD_TOKEN", "discord_music_tunestream", "tunestream"),
+    BotDefinition("alucard", "Alucard", "music", "ALUCARD_DISCORD_TOKEN", "discord_music_alucard", "alucard"),
+    BotDefinition("sapphire", "Sapphire", "music", "SAPPHIRE_DISCORD_TOKEN", "discord_music_sapphire", "sapphire"),
+    BotDefinition("strife", "Strife", "music", "STRIFE_DISCORD_TOKEN", "discord_music_strife", "strife"),
+    BotDefinition("lockhart", "Lockhart", "music", "LOCKHART_DISCORD_TOKEN", "discord_music_lockhart", "lockhart"),
 ]
 
 ARIA_BOT = BotDefinition("aria", "Aria", "orchestrator", "ARIA_DISCORD_TOKEN")

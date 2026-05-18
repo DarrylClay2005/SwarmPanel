@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111622" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>SwarmPanel — Sign in</title>
+  <link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1247394560007471134/d59474d8cefd69059ad4c95541c5614e.webp?size=1024" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260506-mobile-v1" />
+</head>
+<body class="login-body">
+
+  <!-- Animated background orbs -->
+  <div class="login-bg" aria-hidden="true">
+    <div class="login-bg-orb login-bg-orb-1"></div>
+    <div class="login-bg-orb login-bg-orb-2"></div>
+    <div class="login-bg-orb login-bg-orb-3"></div>
+  </div>
+
+  <main class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-icon">🎵</div>
+      <h1>SwarmPanel</h1>
+    </div>
+    <p class="login-subtitle">Sign in with your password. Guild IDs stay linked to accounts for routing, access, and recovery.</p>
+
+    {% if error %}
+    <div class="login-error">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/login" class="stack">
+      <div class="login-field">
+        <label for="username">Username</label>
+        <input type="text" id="username" name="username" autocomplete="username" required placeholder="your-name" />
+      </div>
+      <div class="login-field">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" placeholder="admin or account password" />
+      </div>
+      <button type="submit" class="login-submit">Sign in</button>
+    </form>
+
+    <div class="login-divider"><span>Create account</span></div>
+
+    {% if register_error %}
+    <div class="login-error">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ register_error }}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/register" class="stack">
+      <div class="login-field">
+        <label for="register_username">Username</label>
+        <input type="text" id="register_username" name="username" autocomplete="username" required placeholder="your-name" />
+      </div>
+      <div class="login-field">
+        <label for="register_guild_id">Guild ID</label>
+        <input type="text" id="register_guild_id" name="guild_id" inputmode="numeric" autocomplete="off" required placeholder="123456789012345678" />
+      </div>
+      <div class="login-field">
+        <label for="register_email">Email</label>
+        <input type="email" id="register_email" name="email" autocomplete="email" placeholder="you@example.com" />
+      </div>
+      <div class="login-field">
+        <label for="register_password">Password</label>
+        <input type="password" id="register_password" name="password" autocomplete="new-password" required placeholder="At least 8 characters" />
+      </div>
+      <button type="submit" class="login-submit login-submit-secondary">Create Account</button>
+    </form>
+  </main>
+</body>
+</html>

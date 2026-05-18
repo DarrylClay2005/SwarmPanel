@@ -11,13 +11,14 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -532,18 +533,10 @@ def _is_site_owner_email(email: Any) -> bool:
     return bool(normalized and normalized == settings.site_owner_email)
 
 
-def _owner_email_requires_verification() -> bool:
-    return str(os.getenv("SWARM_PANEL_OWNER_EMAIL_REQUIRES_VERIFICATION", "0") or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _is_site_owner_account(account: dict[str, Any] | None) -> bool:
     if not account:
         return False
-    if not _is_site_owner_email(account.get("email")):
-        return False
-    if _owner_email_requires_verification():
-        return bool(account.get("email_verified") or account.get("email_verified_at"))
-    return True
+    return bool(account.get("email_verified")) and _is_site_owner_email(account.get("email"))
 
 
 def _is_site_owner_auth(auth: dict[str, Any] | None) -> bool:
@@ -699,13 +692,11 @@ async def _authenticate_login(username: str, password: str = "", guild_id: str |
         return None
     if not account:
         return None
-    site_owner = _is_site_owner_account(account)
     return {
         "username": account["username"],
         "role": "account",
         "guild_id": account["guild_id"],
-        "site_owner": site_owner,
-        "admin_mode": site_owner,
+        "site_owner": _is_site_owner_account(account),
     }
 
 
@@ -1197,6 +1188,7 @@ app.add_middleware(
     https_only=settings.session_https_only,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 @app.middleware("http")
@@ -1234,15 +1226,14 @@ async def login_submit(
         if auth["role"] == "admin":
             _set_admin_session(request, auth["username"])
         else:
-            _set_account_session(
-                request,
-                auth["username"],
-                auth["guild_id"],
-                admin_mode=bool(auth.get("admin_mode")),
-                site_owner=bool(auth.get("site_owner")),
-            )
+            _set_account_session(request, auth["username"], auth["guild_id"], site_owner=bool(auth.get("site_owner")))
         return RedirectResponse(url="/", status_code=303)
-    return RedirectResponse(url="/login?error=invalid-login", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"error": "Invalid username or password", "register_error": None},
+        status_code=401,
+    )
 
 
 @app.post("/register")
@@ -1260,15 +1251,24 @@ async def register_submit(
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
         account = await db.register_account_login(username, registerable_guild_id, password, email, email_token)
     except ValueError as exc:
-        return RedirectResponse(url=f"/login?mode=register&error={quote(str(exc)[:220])}", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": str(exc)},
+            status_code=400,
+        )
     except Exception as exc:
         action_logger.warning("SwarmPanel registration failed for %s: %s", username, exc)
-        return RedirectResponse(url="/login?mode=register&error=registration-failed", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": "Registration failed. Please try again in a moment."},
+            status_code=503,
+        )
 
     if account.get("email") and email_token:
         send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
-    site_owner = _is_site_owner_account(account)
-    _set_account_session(request, account["username"], account["guild_id"], admin_mode=site_owner, site_owner=site_owner)
+    _set_account_session(request, account["username"], account["guild_id"], site_owner=_is_site_owner_account(account))
     return RedirectResponse(url="/", status_code=303)
 
 
@@ -1401,13 +1401,13 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         verification_sent = send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)
 
     site_owner = _is_site_owner_account(account)
-    _set_account_session(request, account["username"], account["guild_id"], admin_mode=site_owner, site_owner=site_owner)
+    _set_account_session(request, account["username"], account["guild_id"], site_owner=site_owner)
     token = issue_api_token(
         settings.session_secret,
         account["username"],
         role="account",
         guild_id=account["guild_id"],
-        admin_mode=site_owner,
+        admin_mode=False,
         site_owner=site_owner,
     )
     return {
@@ -1418,8 +1418,8 @@ async def api_session_register(request: Request, payload: SessionRegisterRequest
         "guild_id": account["guild_id"],
         "account_guild_id": account["guild_id"],
         "site_owner": site_owner,
-        "admin_mode": site_owner,
-        "image_gallery_owner": site_owner,
+        "admin_mode": False,
+        "image_gallery_owner": False,
         "email_verification_sent": verification_sent,
         "pages_public_url": settings.pages_public_url,
         "expires_in": settings.api_token_ttl_seconds,

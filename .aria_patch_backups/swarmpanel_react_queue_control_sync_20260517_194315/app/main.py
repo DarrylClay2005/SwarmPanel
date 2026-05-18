@@ -11,13 +11,14 @@ from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from typing import Any
 
 from fastapi import FastAPI, Form, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -1197,6 +1198,7 @@ app.add_middleware(
     https_only=settings.session_https_only,
 )
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
 @app.middleware("http")
@@ -1242,7 +1244,12 @@ async def login_submit(
                 site_owner=bool(auth.get("site_owner")),
             )
         return RedirectResponse(url="/", status_code=303)
-    return RedirectResponse(url="/login?error=invalid-login", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"error": "Invalid username or password", "register_error": None},
+        status_code=401,
+    )
 
 
 @app.post("/register")
@@ -1260,10 +1267,20 @@ async def register_submit(
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
         account = await db.register_account_login(username, registerable_guild_id, password, email, email_token)
     except ValueError as exc:
-        return RedirectResponse(url=f"/login?mode=register&error={quote(str(exc)[:220])}", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": str(exc)},
+            status_code=400,
+        )
     except Exception as exc:
         action_logger.warning("SwarmPanel registration failed for %s: %s", username, exc)
-        return RedirectResponse(url="/login?mode=register&error=registration-failed", status_code=303)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": None, "register_error": "Registration failed. Please try again in a moment."},
+            status_code=503,
+        )
 
     if account.get("email") and email_token:
         send_verification_email(settings, account["email"], _verification_url(request, email_token), email_token)

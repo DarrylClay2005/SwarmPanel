@@ -3018,49 +3018,15 @@ class PanelDatabase:
         first = rows.pop(0)
         random.shuffle(rows)
         rows.insert(0, first)
+        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
         cols = [column for column in rows[0].keys() if column != "id"]
         col_names = ", ".join(f"`{column}`" for column in cols)
         placeholders = ", ".join("%s" for _ in cols)
-
-        # Queue-control sync fix: panel-side shuffle must behave like the hardened
-        # bot shuffle path. Use one transaction, bulk INSERTs, and mirror the
-        # shuffled order into the backup queue so bot recovery does not resurrect
-        # the old pre-shuffle order.
-        insert_values = [tuple(row[column] for column in cols) for row in rows]
-        try:
-            await cur.execute("START TRANSACTION")
-            await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
-            if insert_values:
-                await cur.executemany(
-                    f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})",
-                    insert_values,
-                )
-            try:
-                await cur.execute(
-                    f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue_backup` "
-                    "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
-                    "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
-                )
-                await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue_backup` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
-                if insert_values:
-                    await cur.executemany(
-                        f"INSERT INTO `{schema}`.`{prefix}_queue_backup` ({col_names}) VALUES ({placeholders})",
-                        insert_values,
-                    )
-            except Exception:
-                logger.warning(
-                    "Could not mirror shuffled queue into backup for %s/%s; keeping live shuffle atomic.",
-                    bot_key,
-                    gid,
-                    exc_info=True,
-                )
-            await cur.execute("COMMIT")
-        except Exception:
-            try:
-                await cur.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
+        for row in rows:
+            await cur.execute(
+                f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})",
+                tuple(row[column] for column in cols),
+            )
         return len(rows)
 
     async def _prime_panel_playback_defaults(self, cur: aiomysql.DictCursor, schema: str, prefix: str, gid: int, bot_key: str) -> int:
@@ -3218,9 +3184,30 @@ class PanelDatabase:
                     result["message"] = f"Filter mode set to {mode} for guild {gid} on {bot.display_name}."
 
                 elif action == "SHUFFLE":
-                    shuffled_count = await self._shuffle_live_queue(cur, schema, prefix, gid, bot_key)
-                    result["queue_count"] = shuffled_count
-                    result["message"] = f"Shuffled {shuffled_count} queued tracks for guild {gid} on {bot.display_name}."
+                    await cur.execute(
+                        f"CREATE TABLE IF NOT EXISTS `{schema}`.`{prefix}_queue` "
+                        "(id INT AUTO_INCREMENT PRIMARY KEY, guild_id BIGINT, "
+                        "bot_name VARCHAR(50), video_url TEXT, title TEXT, requester_id BIGINT DEFAULT NULL)"
+                    )
+                    await cur.execute(f"SELECT * FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s ORDER BY id ASC", (gid, bot_key))
+                    q = await cur.fetchall()
+                    if len(q) > 1:
+                        import random
+                        l = list(q)
+                        first = l.pop(0) # Preserve the currently playing song at the top
+                        random.shuffle(l)
+                        l.insert(0, first)
+                        
+                        await cur.execute(f"DELETE FROM `{schema}`.`{prefix}_queue` WHERE guild_id = %s AND bot_name = %s", (gid, bot_key))
+                        
+                        cols = [k for k in l[0].keys() if k != 'id']
+                        col_names = ", ".join(f"`{c}`" for c in cols)
+                        placeholders = ", ".join("%s" for _ in cols)
+                        
+                        for row in l:
+                            values = tuple(row[c] for c in cols)
+                            await cur.execute(f"INSERT INTO `{schema}`.`{prefix}_queue` ({col_names}) VALUES ({placeholders})", values)
+                    result["message"] = f"Shuffled the queue for guild {gid} on {bot.display_name}."
 
                 elif action == "SMART_RECOMMEND":
                     if not isinstance(payload, dict):
