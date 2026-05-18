@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -101,12 +102,18 @@ class RuntimeDiagnosticsService:
 
     def _load_shared_env(self) -> tuple[Path, dict[str, str]]:
         env_path = self._resolve_shared_env_path()
+        values: dict[str, str] = {}
         if not env_path.is_file():
-            return env_path, {}
+            for key, value in os.environ.items():
+                if key:
+                    values[str(key).strip()] = str(value or "").strip()
+            return env_path, values
 
         raw_values = dotenv_values(env_path)
-        values: dict[str, str] = {}
         for key, value in raw_values.items():
+            if key:
+                values[str(key).strip()] = str(value or "").strip()
+        for key, value in os.environ.items():
             if key:
                 values[str(key).strip()] = str(value or "").strip()
         return env_path, values
@@ -385,6 +392,15 @@ class RuntimeDiagnosticsService:
     async def _build_snapshot(self) -> dict[str, Any]:
         env_path, env_values = self._load_shared_env()
         env_found = env_path.is_file()
+        runtime_env_keys = [
+            "ARIA_DB_PASSWORD",
+            "ARIA_SWARM_DB_PASSWORD",
+            "GEMINI_API_KEY",
+            "ARIA_GEMINI_API_KEY",
+            *(f"{bot.key.upper()}_DB_PASSWORD" for bot in MUSIC_BOTS),
+            *(f"{bot.key.upper()}_LAVALINK_PASSWORD" for bot in MUSIC_BOTS),
+        ]
+        runtime_env_found = any(bool(env_values.get(key)) for key in runtime_env_keys)
         aria_env = self._aria_env_config(env_values)
 
         panel_db_probe, panel_db_details, aria_db_probe, aria_db_details, aria_swarm_probe, aria_discord_probe, gemini_probe = await asyncio.gather(
@@ -497,12 +513,21 @@ class RuntimeDiagnosticsService:
             )
 
         shared_env_summary = {
-            "status": self._status_from_bool(env_found, ok_label="online", fail_label="missing"),
+            "status": self._status_from_bool(env_found or runtime_env_found, ok_label="online", fail_label="missing"),
             "found": env_found,
+            "process_environment_loaded": runtime_env_found,
             "path": str(env_path),
             "last_modified": datetime.fromtimestamp(env_path.stat().st_mtime, timezone.utc).isoformat() if env_found else None,
             "last_modified_central": self._format_central(datetime.fromtimestamp(env_path.stat().st_mtime, timezone.utc).isoformat()) if env_found else None,
-            "message": "Shared Music/.env loaded for diagnostics." if env_found else "Shared Music/.env was not found.",
+            "message": (
+                "Shared Music/.env loaded for diagnostics."
+                if env_found
+                else (
+                    "Shared Music diagnostics values loaded from the process environment."
+                    if runtime_env_found
+                    else "Shared Music/.env was not found."
+                )
+            ),
         }
 
         return {
