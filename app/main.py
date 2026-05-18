@@ -349,11 +349,13 @@ class TruncateTableRequest(BaseModel):
     schema_name: str
     table_name: str
     confirm_text: str
+    owner_confirm_text: str = ""
 
 
 class TruncateSchemaRequest(BaseModel):
     schema_name: str
     confirm_text: str
+    owner_confirm_text: str = ""
 
 
 class SessionLoginRequest(BaseModel):
@@ -2087,6 +2089,12 @@ async def truncate_table(request: Request, payload: TruncateTableRequest):
             status_code=400,
             detail=f"Confirmation mismatch. Expected exact text: {expected_confirmation}",
         )
+    expected_owner_confirmation = settings.destructive_confirmation_phrase.strip()
+    if expected_owner_confirmation and payload.owner_confirm_text.strip() != expected_owner_confirmation:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Owner confirmation mismatch. Expected exact text: {expected_owner_confirmation}",
+        )
     try:
         await db.truncate_table(payload.schema_name, payload.table_name)
     except Exception as exc:
@@ -2103,6 +2111,12 @@ async def truncate_schema(request: Request, payload: TruncateSchemaRequest):
         raise HTTPException(
             status_code=400,
             detail=f"Confirmation mismatch. Expected exact text: {expected_confirmation}",
+        )
+    expected_owner_confirmation = settings.destructive_confirmation_phrase.strip()
+    if expected_owner_confirmation and payload.owner_confirm_text.strip() != expected_owner_confirmation:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Owner confirmation mismatch. Expected exact text: {expected_owner_confirmation}",
         )
     try:
         result = await db.truncate_schema(payload.schema_name)

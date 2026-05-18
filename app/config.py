@@ -68,6 +68,7 @@ class Settings:
     telegram_bot_token: str
     telegram_allowed_chat_ids: set[int]
     telegram_polling_enabled: bool
+    destructive_confirmation_phrase: str
 
 
 def load_settings() -> Settings:
@@ -101,6 +102,10 @@ def load_settings() -> Settings:
         telegram_bot_token=_env("PANEL_TELEGRAM_BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN"),
         telegram_allowed_chat_ids=_env_int_set("PANEL_TELEGRAM_ALLOWED_CHAT_IDS") or _env_int_set("TELEGRAM_ALLOWED_CHAT_IDS"),
         telegram_polling_enabled=_env_bool("PANEL_TELEGRAM_POLLING_ENABLED", bool(_env("PANEL_TELEGRAM_BOT_TOKEN") or _env("TELEGRAM_BOT_TOKEN"))),
+        destructive_confirmation_phrase=_env(
+            "PANEL_DESTRUCTIVE_CONFIRMATION_PHRASE",
+            "I understand this permanently deletes SwarmPanel data",
+        ),
     )
     validate_settings(settings)
     return settings
