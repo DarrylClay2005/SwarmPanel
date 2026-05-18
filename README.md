@@ -1,5 +1,5 @@
 # SwarmPanel
-Web control panel for all 8 music bots plus Aria.
+Web control panel for all 12 music bots plus Aria.
 
 ## Features
 - Live dashboard across all bot nodes (track, guild/channel, filter, queue depth, heartbeat).
@@ -8,7 +8,7 @@ Web control panel for all 8 music bots plus Aria.
 - Bot explorer to view each bot's guilds and channels.
 - Database control section to truncate a specific table or all tables in a schema.
 - Session login protection for panel access.
-- GitHub Pages remote front-end at `https://darrylclay2005.github.io/SwarmPanel/` for phone-friendly access.
+- GitHub Pages remote front-end at `https://heavenlyxenusvr.github.io/SwarmPanel/` for phone-friendly access.
 
 ## Setup
 1. Create and activate a virtual environment.
@@ -40,10 +40,14 @@ Web control panel for all 8 music bots plus Aria.
   - `RHYTHM_DISCORD_TOKEN`
   - `SYMPHONY_DISCORD_TOKEN`
   - `TUNESTREAM_DISCORD_TOKEN`
+  - `ALUCARD_DISCORD_TOKEN`
+  - `SAPPHIRE_DISCORD_TOKEN`
+  - `STRIFE_DISCORD_TOKEN`
+  - `LOCKHART_DISCORD_TOKEN`
   - `ARIA_DISCORD_TOKEN`
 
 ## Run
-- `uvicorn app.main:app --host 0.0.0.0 --port 8787`
+- `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 - Live GitHub Pages backend tunnel:
   - `scripts/start_live_backend.sh 8000`
   - Keep the script running while you want the GitHub Pages site connected.
