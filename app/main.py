@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -83,6 +84,35 @@ background_tasks: list[asyncio.Task[Any]] = []
 VOICE_CHANNEL_TYPES = {2, 13}
 TEXT_CHANNEL_TYPES = {0, 5}
 VALID_ACTIONS = {"PAUSE", "RESUME", "SKIP", "STOP", "CLEAR", "SHUFFLE", "LOOP", "PLAY", "RESTART", "FILTER", "LEAVE", "SET_HOME", "RECOVER", "SMART_RECOMMEND"}
+CONTROL_PAYLOAD_KEYS = {
+    "source_url",
+    "query",
+    "voice_channel_id",
+    "text_channel_id",
+    "mode",
+    "filter",
+    "filter_mode",
+    "loop_mode",
+    "shuffle_before_play",
+    "save_playlist",
+    "webhook_url",
+}
+REQUEST_ID_RE = re.compile(r"[^A-Za-z0-9_.:-]+")
+PERSONAL_API_PREFIXES = (
+    "/api/session",
+    "/api/users",
+    "/api/swarm-accounts",
+    "/api/bots",
+    "/api/dashboard",
+    "/api/music-intelligence",
+    "/api/database",
+    "/api/databases",
+    "/api/image-gallery",
+    "/api/events",
+    "/api/stability",
+    "/api/system-diagnostics",
+    "/api/telegram",
+)
 PROFILE_ACCENT_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 PANEL_BACKGROUND_MODES = {"default", "midnight", "aurora", "ember", "custom_color", "custom_image"}
 PANEL_LAYOUT_MODES = {"standard", "focused", "wide"}
@@ -220,6 +250,31 @@ def _rate_limit_auth(key: str, *, limit: int, window_seconds: int) -> None:
     AUTH_RATE_BUCKETS[key] = bucket
 
 
+def _bounded_query_limit(value: Any, *, default: int = 50, max_limit: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    ceiling = max(1, int(max_limit or settings.api_max_rows))
+    return max(1, min(parsed, ceiling))
+
+
+def _request_id_for(request: Request) -> str:
+    incoming = request.headers.get("x-request-id") or request.headers.get("x-correlation-id")
+    cleaned = REQUEST_ID_RE.sub("", str(incoming or ""))[:80]
+    return cleaned or secrets.token_hex(12)
+
+
+def _set_no_store_headers(response: Response) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+
+def _should_no_store(path: str) -> bool:
+    return path in APP_SHELL_PATHS or any(path.startswith(prefix) for prefix in PERSONAL_API_PREFIXES)
+
+
 def _normalize_origin(value: str | None) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -292,7 +347,7 @@ def _ensure_allowed_websocket_origin(websocket: WebSocket) -> bool:
     return origin == current or origin in _allowed_browser_origins()
 
 
-def _security_headers(request: Request, response: JSONResponse | HTMLResponse | RedirectResponse) -> None:
+def _security_headers(request: Request, response: Response) -> None:
     csp = "; ".join([
         "default-src 'self'",
         "base-uri 'self'",
@@ -310,16 +365,21 @@ def _security_headers(request: Request, response: JSONResponse | HTMLResponse | 
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")
+    response.headers.setdefault("Origin-Agent-Cluster", "?1")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
     response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if getattr(request.state, "request_id", None):
+        response.headers.setdefault("X-Request-ID", request.state.request_id)
     if request.url.scheme == "https":
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/static/react/assets/"):
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     elif request.url.path.startswith("/static/"):
         response.headers.setdefault("Cache-Control", "public, max-age=86400")
-    if request.url.path in APP_SHELL_PATHS or request.url.path.startswith("/api/session"):
-        response.headers.setdefault("Cache-Control", "no-store")
+    if _should_no_store(request.url.path):
+        _set_no_store_headers(response)
 
 
 def _wants_json(request: Request) -> bool:
@@ -491,10 +551,10 @@ class PanelPreferencesUpdateRequest(BaseModel):
 def _feed_event(level: str, title: str, description: str, *, source: str = "panel", event_type: str = "feed_event") -> dict[str, str]:
     return {
         "type": event_type,
-        "level": level,
-        "title": title,
-        "description": description,
-        "source": source,
+        "level": str(level or "info")[:24],
+        "title": str(title or "")[:160],
+        "description": str(description or "")[:2000],
+        "source": str(source or "panel")[:48],
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -976,18 +1036,36 @@ def _normalize_control_action(value: str) -> str:
     return action
 
 
+def _normalize_control_payload(value: Any) -> Any | None:
+    if value is None or not isinstance(value, dict):
+        return value
+    unexpected = sorted(str(key) for key in value if str(key) not in CONTROL_PAYLOAD_KEYS)
+    if unexpected:
+        raise ValueError(f"Unsupported control payload field(s): {', '.join(unexpected)}")
+    normalized = dict(value)
+    for key, field_value in list(normalized.items()):
+        if "webhook" in str(key).lower() and field_value:
+            normalized[key] = _validate_discord_webhook_url(field_value)
+    return normalized
+
+
+def _normalize_control_source(value: Any) -> str:
+    source = re.sub(r"\s+", " ", str(value or "").strip())
+    if not source:
+        raise ValueError("Missing source_url for PLAY action")
+    if len(source) > settings.bot_control_source_max_chars:
+        raise ValueError(f"PLAY source must be {settings.bot_control_source_max_chars} characters or fewer")
+    return source
+
+
 async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str, str, Any | None]:
     action = _normalize_control_action(req.action)
 
     if action == "RESTART":
-        return action, "0", req.payload
+        return action, "0", _normalize_control_payload(req.payload)
 
     guild_id = _coerce_control_int(req.guild_id, "guild_id")
-    normalized_payload = req.payload
-    if isinstance(normalized_payload, dict):
-        for key, value in list(normalized_payload.items()):
-            if "webhook" in str(key).lower() and value:
-                normalized_payload[key] = _validate_discord_webhook_url(value)
+    normalized_payload = _normalize_control_payload(req.payload)
 
     if action not in {"PLAY", "SET_HOME", "SMART_RECOMMEND"}:
         return action, str(guild_id), normalized_payload
@@ -1000,7 +1078,7 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
     if not token:
         raise ValueError(f"Missing Discord token for {bot.display_name}; cannot validate the selected guild/channel route.")
 
-    if not isinstance(req.payload, dict):
+    if not isinstance(normalized_payload, dict):
         expected = "source_url and voice_channel_id" if action == "PLAY" else "voice_channel_id"
         raise ValueError(f"{action} payload must be an object with {expected}")
 
@@ -1011,7 +1089,7 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
         raise ValueError(f"{bot.display_name} cannot validate guild {guild_id} via Discord: {exc}") from exc
 
     channel_map = {int(channel["id"]): channel for channel in channels}
-    voice_channel_id = _coerce_control_int(req.payload.get("voice_channel_id"), "voice_channel_id")
+    voice_channel_id = _coerce_control_int(normalized_payload.get("voice_channel_id"), "voice_channel_id")
     voice_channel = channel_map.get(voice_channel_id)
     if not voice_channel or int(voice_channel.get("type", -1)) not in VOICE_CHANNEL_TYPES:
         guild_name = guild.get("name") or f"Guild {guild_id}"
@@ -1019,11 +1097,11 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
             f"Voice channel {voice_channel_id} is not a voice/stage channel visible to {bot.display_name} in {guild_name}."
         )
 
-    normalized_payload = dict(req.payload)
+    normalized_payload = dict(normalized_payload)
     normalized_payload["voice_channel_id"] = voice_channel_id
 
     if action == "SMART_RECOMMEND":
-        text_channel_raw = req.payload.get("text_channel_id")
+        text_channel_raw = normalized_payload.get("text_channel_id")
         text_channel_id = 0
         if text_channel_raw not in (None, "", 0, "0"):
             text_channel_id = _coerce_control_int(text_channel_raw, "text_channel_id")
@@ -1039,11 +1117,9 @@ async def _normalize_bot_control_request(req: "BotControlRequest") -> tuple[str,
         }
 
     if action == "PLAY":
-        source_url = str(req.payload.get("source_url") or req.payload.get("query") or "").strip()
-        if not source_url:
-            raise ValueError("Missing source_url for PLAY action")
+        source_url = _normalize_control_source(normalized_payload.get("source_url") or normalized_payload.get("query"))
 
-        text_channel_raw = req.payload.get("text_channel_id")
+        text_channel_raw = normalized_payload.get("text_channel_id")
         text_channel_id = 0
         if text_channel_raw not in (None, "", 0, "0"):
             text_channel_id = _coerce_control_int(text_channel_raw, "text_channel_id")
@@ -1189,7 +1265,7 @@ if settings.cors_allowed_origins:
         allow_origins=settings.cors_allowed_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With", "X-Request-ID"],
     )
 app.add_middleware(
     SessionMiddleware,
@@ -1203,12 +1279,17 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 
 @app.middleware("http")
 async def browser_origin_and_headers(request: Request, call_next):
+    started = time.perf_counter()
+    request.state.request_id = _request_id_for(request)
     try:
         if request.method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             _ensure_allowed_browser_origin(request)
         response = await call_next(request)
     except HTTPException as exc:
         response = JSONResponse({"detail": exc.detail or "Request blocked"}, status_code=exc.status_code)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers.setdefault("X-Response-Time-ms", f"{elapsed_ms:.2f}")
+    response.headers.setdefault("Server-Timing", f"app;dur={elapsed_ms:.2f}")
     _security_headers(request, response)
     return response
 
@@ -1230,7 +1311,11 @@ async def login_submit(
     guild_id: str = Form(""),
 ):
     ip = _client_ip(request)
-    _rate_limit_auth(f"login-form:{ip}:{str(username or '').strip().lower()[:80]}", limit=12, window_seconds=900)
+    _rate_limit_auth(
+        f"login-form:{ip}:{str(username or '').strip().lower()[:80]}",
+        limit=settings.login_form_rate_limit_per_15m,
+        window_seconds=900,
+    )
     auth = await _authenticate_login(username, password, guild_id)
     if auth:
         if auth["role"] == "admin":
@@ -1256,7 +1341,7 @@ async def register_submit(
     email: str = Form(""),
 ):
     ip = _client_ip(request)
-    _rate_limit_auth(f"register-form:{ip}", limit=8, window_seconds=3600)
+    _rate_limit_auth(f"register-form:{ip}", limit=settings.register_form_rate_limit_per_hour, window_seconds=3600)
     email_token = _verification_code() if email else None
     try:
         registerable_guild_id = await _ensure_registerable_guild(guild_id)
@@ -1658,26 +1743,26 @@ async def api_update_user_panel_preferences(request: Request, payload: PanelPref
 @app.get("/api/users/search")
 async def api_search_users(request: Request):
     _require_api_auth(request)
-    query = str(request.query_params.get("q") or "").strip()
-    try:
-        limit = int(request.query_params.get("limit") or 24)
-    except ValueError:
-        limit = 24
+    query = " ".join(str(request.query_params.get("q") or "").split())[:80]
+    limit = _bounded_query_limit(request.query_params.get("limit"), default=24, max_limit=50)
     users = await db.search_account_profiles(query, limit)
-    return {"ok": True, "query": query, "users": users}
+    return {"ok": True, "query": query, "users": users, "limit": limit}
 
 
 @app.get("/api/users/directory")
 async def api_user_directory(request: Request):
     _require_api_auth(request)
-    query = str(request.query_params.get("q") or "").strip()
-    users = await db.search_account_profiles(query, 24)
-    return {"ok": True, "query": query, "users": users}
+    query = " ".join(str(request.query_params.get("q") or "").split())[:80]
+    limit = _bounded_query_limit(request.query_params.get("limit"), default=24, max_limit=50)
+    users = await db.search_account_profiles(query, limit)
+    return {"ok": True, "query": query, "users": users, "limit": limit}
 
 
 @app.get("/api/swarm-accounts/admin")
 async def api_swarm_accounts_admin(request: Request, query: str = "", limit: int = 100):
     _require_admin_auth(request)
+    limit = _bounded_query_limit(limit, default=100)
+    query = " ".join(str(query or "").split())[:120]
     try:
         return {"ok": True, "data": await db.get_account_admin_data(query=query, limit=limit)}
     except ValueError as exc:
@@ -1755,7 +1840,12 @@ async def api_swarm_accounts_delete(request: Request, payload: SwarmAccountDelet
 @app.get("/api/health")
 async def api_health(request: Request):
     _require_api_auth(request)
-    return {"ok": True}
+    return {
+        "ok": True,
+        "request_id": getattr(request.state, "request_id", ""),
+        "api_max_rows": settings.api_max_rows,
+        "bot_control_source_max_chars": settings.bot_control_source_max_chars,
+    }
 
 
 @app.get("/api/bots")
@@ -2030,6 +2120,7 @@ async def guild_control_matrix(request: Request, guild_id: str):
 @app.get("/api/music-intelligence")
 async def music_intelligence(request: Request, guild_id: str | None = None, bot_key: str | None = None, limit: int = 8):
     auth = _require_api_auth(request)
+    limit = _bounded_query_limit(limit, default=8, max_limit=50)
     scoped_guild = _scoped_guild_id(auth)
     if scoped_guild:
         guild_id = str(scoped_guild)
@@ -2138,6 +2229,7 @@ async def get_table_data(
     limit: int = 100
 ):
     _require_admin_auth(request)
+    limit = _bounded_query_limit(limit, default=100)
     try:
         data = await db.get_table_data(schema_name, table_name, limit)
         return {"ok": True, "data": data, "rows": data.get("rows", []), "count": data.get("count", 0)}
@@ -2151,6 +2243,7 @@ async def get_table_data(
 @app.get("/api/image-gallery/admin")
 async def image_gallery_admin(request: Request, limit: int = 50):
     _require_image_gallery_owner_auth(request)
+    limit = _bounded_query_limit(limit, default=50)
     try:
         return {"ok": True, "data": await db.get_image_gallery_admin_data(limit)}
     except Exception as exc:
@@ -2174,6 +2267,7 @@ async def image_gallery_tables(request: Request):
 @app.get("/api/image-gallery/table-data")
 async def image_gallery_table_data(request: Request, table_name: str, limit: int = 100):
     _require_image_gallery_owner_auth(request)
+    limit = _bounded_query_limit(limit, default=100)
     try:
         data = await db.get_table_data(settings.image_gallery_schema, table_name, limit)
         return {"ok": True, "data": data, "rows": data.get("rows", []), "count": data.get("count", 0)}
@@ -2295,6 +2389,9 @@ class BotControlRequest(BaseModel):
 
     @model_validator(mode="after")
     def _sync_action_aliases(self):
+        self.bot_key = str(self.bot_key or "").strip().lower()
+        if self.bot_key not in BOT_INDEX:
+            raise ValueError("Unknown bot key")
         normalized_action = (self.action or self.command or "").strip()
         if not normalized_action:
             raise ValueError("Missing action")
@@ -2501,7 +2598,7 @@ async def metrics_data(request: Request):
 @app.get("/api/events")
 async def list_events(request: Request, limit: int = 50):
     _require_admin_auth(request)
-    bounded_limit = max(1, min(int(limit), 100))
+    bounded_limit = _bounded_query_limit(limit, default=50, max_limit=100)
     events = list(recent_feed_events)
     try:
         bot_error_events = await db.get_recent_bot_error_events(limit=bounded_limit)

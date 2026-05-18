@@ -69,6 +69,10 @@ class Settings:
     telegram_allowed_chat_ids: set[int]
     telegram_polling_enabled: bool
     destructive_confirmation_phrase: str
+    api_max_rows: int
+    bot_control_source_max_chars: int
+    login_form_rate_limit_per_15m: int
+    register_form_rate_limit_per_hour: int
 
 
 def load_settings() -> Settings:
@@ -106,6 +110,10 @@ def load_settings() -> Settings:
             "PANEL_DESTRUCTIVE_CONFIRMATION_PHRASE",
             "I understand this permanently deletes SwarmPanel data",
         ),
+        api_max_rows=max(1, min(500, int(_env("PANEL_API_MAX_ROWS", "200")))),
+        bot_control_source_max_chars=max(50, min(2000, int(_env("PANEL_BOT_CONTROL_SOURCE_MAX_CHARS", "500")))),
+        login_form_rate_limit_per_15m=max(1, int(_env("PANEL_LOGIN_FORM_RATE_LIMIT_PER_15M", "12"))),
+        register_form_rate_limit_per_hour=max(1, int(_env("PANEL_REGISTER_FORM_RATE_LIMIT_PER_HOUR", "8"))),
     )
     validate_settings(settings)
     return settings
