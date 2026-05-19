@@ -31,7 +31,7 @@ class DummyDatabase:
         self.truncated_schemas.append(schema)
         return {"truncated_tables": [f"{schema}.example"], "count": 1}
 
-    async def search_account_profiles(self, query: str, limit: int) -> list[dict[str, object]]:
+    async def search_account_profiles(self, query: str, limit: int, viewer_account_id: int | None = None) -> list[dict[str, object]]:
         self.searches.append((query, limit))
         return []
 

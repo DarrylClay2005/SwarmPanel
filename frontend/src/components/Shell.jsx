@@ -6,6 +6,7 @@ import {
   LayoutDashboard,
   LogIn,
   LogOut,
+  MessageCircle,
   Palette,
   Play,
   PlugZap,
@@ -32,6 +33,8 @@ export function Shell({ ctx, children }) {
             <NavItem to="/controls" icon={Play} label="Controls" />
             <NavItem to="/invites" icon={PlugZap} label="Invites" />
             <NavItem to="/users" icon={Users} label="Users" />
+            <NavItem to="/friends" icon={UserRound} label="Friends" />
+            <NavItem to="/messages" icon={MessageCircle} label="Messages" />
             <NavItem to="/profile" icon={UserRound} label="Profile" />
             <NavItem to="/appearance" icon={Palette} label="Look" />
             {ctx.isAdmin ? <NavItem to="/diagnostics" icon={HeartPulse} label="Diagnostics" /> : null}

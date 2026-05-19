@@ -487,6 +487,10 @@ class PanelDatabase:
                     await self._ensure_account_profile_schema(cur)
                 except Exception as exc:
                     logger.warning("Could not ensure account profile columns: %s", exc)
+                try:
+                    await self._ensure_account_social_schema(cur)
+                except Exception as exc:
+                    logger.warning("Could not ensure account social tables: %s", exc)
 
     async def close(self) -> None:
         if self.pool:
@@ -613,6 +617,58 @@ class PanelDatabase:
             ), timeout=15)
         except Exception:
             pass
+
+    async def _ensure_account_social_schema(self, cur) -> None:
+        await asyncio.wait_for(cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`account_follows` (
+                follower_account_id INT NOT NULL,
+                followed_account_id INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (follower_account_id, followed_account_id),
+                KEY idx_account_follows_followed (followed_account_id, created_at),
+                CONSTRAINT fk_account_follows_follower FOREIGN KEY (follower_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT fk_account_follows_followed FOREIGN KEY (followed_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT chk_account_no_self_follow CHECK (follower_account_id <> followed_account_id)
+            )
+            """
+        ), timeout=15)
+        await asyncio.wait_for(cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                requester_account_id INT NOT NULL,
+                addressee_account_id INT NOT NULL,
+                status ENUM('pending','accepted','declined','cancelled') NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                responded_at TIMESTAMP NULL DEFAULT NULL,
+                UNIQUE KEY uniq_account_friend_pair (requester_account_id, addressee_account_id),
+                KEY idx_account_friend_addressee (addressee_account_id, status, created_at),
+                KEY idx_account_friend_requester (requester_account_id, status, created_at),
+                CONSTRAINT fk_account_friend_requester FOREIGN KEY (requester_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT fk_account_friend_addressee FOREIGN KEY (addressee_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT chk_account_no_self_friend CHECK (requester_account_id <> addressee_account_id)
+            )
+            """
+        ), timeout=15)
+        await asyncio.wait_for(cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages` (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                sender_account_id INT NOT NULL,
+                recipient_account_id INT NOT NULL,
+                body VARCHAR(2000) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                read_at TIMESTAMP NULL DEFAULT NULL,
+                KEY idx_account_messages_sender (sender_account_id, created_at),
+                KEY idx_account_messages_recipient (recipient_account_id, read_at, created_at),
+                KEY idx_account_messages_thread (sender_account_id, recipient_account_id, created_at),
+                CONSTRAINT fk_account_messages_sender FOREIGN KEY (sender_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT fk_account_messages_recipient FOREIGN KEY (recipient_account_id) REFERENCES `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`(id) ON DELETE CASCADE,
+                CONSTRAINT chk_account_no_self_message CHECK (sender_account_id <> recipient_account_id)
+            )
+            """
+        ), timeout=15)
 
     async def register_account_login(
         self,
@@ -840,7 +896,7 @@ class PanelDatabase:
         gid = _coerce_int(guild_id, "guild_id")
         row = await self._fetchone(
             f"""
-            SELECT username, guild_id, email, email_verified_at, password_hash, display_name, avatar_url, bio, favorite_bot, theme_accent,
+            SELECT id, username, guild_id, email, email_verified_at, password_hash, display_name, avatar_url, bio, favorite_bot, theme_accent,
                    public_profile, server_invite_url, server_name, server_icon_url,
                    panel_preferences, created_at, last_login_at, updated_at
             FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
@@ -1173,16 +1229,22 @@ class PanelDatabase:
         )
         return await self.get_account_admin(account_id)
 
-    async def search_account_profiles(self, query: str = "", limit: int = 24) -> list[dict[str, Any]]:
+    async def search_account_profiles(self, query: str = "", limit: int = 24, viewer_account_id: int | None = None) -> list[dict[str, Any]]:
         normalized_query = str(query or "").strip()
         safe_limit = max(1, min(50, int(limit or 24)))
         like = f"%{normalized_query}%"
+        viewer_id = int(viewer_account_id or 0)
         rows = await self._fetchall(
             f"""
-            SELECT username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
+            SELECT id, username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
                    public_profile, server_invite_url, server_name, server_icon_url,
-                   created_at, last_login_at, updated_at
-            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+                   created_at, last_login_at, updated_at,
+                   EXISTS(
+                     SELECT 1
+                     FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_follows` mine
+                     WHERE mine.follower_account_id=%s AND mine.followed_account_id=u.id
+                   ) AS followed_by_me
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` u
             WHERE public_profile = 1
               AND (
                   %s = ''
@@ -1194,13 +1256,252 @@ class PanelDatabase:
             ORDER BY COALESCE(updated_at, created_at) DESC, username ASC
             LIMIT %s
             """,
-            (normalized_query, like, like, like, like, safe_limit),
+            (viewer_id, normalized_query, like, like, like, like, safe_limit),
         )
         profiles = [self._serialize_account_profile(row) for row in rows]
+        for profile in profiles:
+            profile["followed_by_me"] = bool(profile.get("followed_by_me"))
         summaries = await self.get_music_activity_summary_for_guilds([profile["guild_id"] for profile in profiles])
         for profile in profiles:
             profile["activity"] = summaries.get(profile["guild_id"], self._empty_music_activity_summary())
         return profiles
+
+    async def get_account_by_id(self, account_id: int) -> dict[str, Any] | None:
+        row = await self._fetchone(
+            f"""
+            SELECT id, username, guild_id, email, email_verified_at, display_name, avatar_url, bio, favorite_bot, theme_accent,
+                   public_profile, server_invite_url, server_name, server_icon_url, panel_preferences,
+                   created_at, last_login_at, updated_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}`
+            WHERE id=%s
+            LIMIT 1
+            """,
+            (_coerce_int(account_id, "account_id"),),
+        )
+        return self._serialize_account_profile(row) if row else None
+
+    async def set_account_follow(self, follower_account_id: int, followed_account_id: int, following: bool) -> dict[str, Any]:
+        if int(follower_account_id) == int(followed_account_id):
+            raise ValueError("You cannot follow yourself.")
+        if not await self.get_account_by_id(followed_account_id):
+            raise ValueError("Account not found.")
+        if following:
+            await self._execute(
+                f"INSERT IGNORE INTO `{ACCOUNT_LOGIN_SCHEMA}`.`account_follows` (follower_account_id, followed_account_id) VALUES (%s, %s)",
+                (_coerce_int(follower_account_id, "follower_account_id"), _coerce_int(followed_account_id, "followed_account_id")),
+            )
+        else:
+            await self._execute(
+                f"DELETE FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_follows` WHERE follower_account_id=%s AND followed_account_id=%s",
+                (_coerce_int(follower_account_id, "follower_account_id"), _coerce_int(followed_account_id, "followed_account_id")),
+            )
+        row = await self._fetchone(
+            f"SELECT COUNT(*) AS followers FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_follows` WHERE followed_account_id=%s",
+            (_coerce_int(followed_account_id, "followed_account_id"),),
+        )
+        return {"account_id": int(followed_account_id), "following": bool(following), "follower_count": int((row or {}).get("followers") or 0)}
+
+    async def send_account_friend_request(self, requester_account_id: int, addressee_account_id: int) -> dict[str, Any]:
+        if int(requester_account_id) == int(addressee_account_id):
+            raise ValueError("You cannot friend yourself.")
+        if not await self.get_account_by_id(addressee_account_id):
+            raise ValueError("Account not found.")
+        existing = await self._fetchone(
+            f"""
+            SELECT *
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests`
+            WHERE (requester_account_id=%s AND addressee_account_id=%s)
+               OR (requester_account_id=%s AND addressee_account_id=%s)
+            ORDER BY FIELD(status, 'accepted', 'pending', 'declined', 'cancelled'), created_at DESC
+            LIMIT 1
+            """,
+            (requester_account_id, addressee_account_id, addressee_account_id, requester_account_id),
+        )
+        if existing and existing.get("status") == "accepted":
+            return {"status": "friends", "request": self._serialize_social_row(existing)}
+        if existing and existing.get("status") == "pending":
+            if int(existing.get("requester_account_id") or 0) == int(addressee_account_id):
+                await self._execute(
+                    f"UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` SET status='accepted', responded_at=CURRENT_TIMESTAMP WHERE id=%s",
+                    (existing["id"],),
+                )
+                existing["status"] = "accepted"
+                return {"status": "friends", "request": self._serialize_social_row(existing)}
+            return {"status": "pending_out", "request": self._serialize_social_row(existing)}
+        if existing:
+            await self._execute(
+                f"""
+                UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests`
+                SET requester_account_id=%s, addressee_account_id=%s, status='pending', created_at=CURRENT_TIMESTAMP, responded_at=NULL
+                WHERE id=%s
+                """,
+                (requester_account_id, addressee_account_id, existing["id"]),
+            )
+            request_id = existing["id"]
+        else:
+            await self._execute(
+                f"INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` (requester_account_id, addressee_account_id) VALUES (%s, %s)",
+                (requester_account_id, addressee_account_id),
+            )
+            request_id = None
+        row = await self._fetchone(
+            f"""
+            SELECT *
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests`
+            WHERE (%s IS NULL OR id=%s)
+              AND requester_account_id=%s
+              AND addressee_account_id=%s
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (request_id, request_id, requester_account_id, addressee_account_id),
+        )
+        return {"status": "pending_out", "request": self._serialize_social_row(row or {})}
+
+    async def list_account_friend_requests(self, account_id: int, mode: str = "incoming") -> list[dict[str, Any]]:
+        own_col, other_col = ("requester_account_id", "addressee_account_id") if mode == "outgoing" else ("addressee_account_id", "requester_account_id")
+        rows = await self._fetchall(
+            f"""
+            SELECT fr.*, u.id AS user_id, u.username, u.guild_id, u.display_name, u.avatar_url, u.server_name, u.server_icon_url, u.public_profile
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` fr
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` u ON u.id=fr.{other_col}
+            WHERE fr.{own_col}=%s AND fr.status='pending'
+            ORDER BY fr.created_at DESC
+            LIMIT 100
+            """,
+            (_coerce_int(account_id, "account_id"),),
+        )
+        return [self._serialize_social_row(row) for row in rows]
+
+    async def respond_account_friend_request(self, account_id: int, request_id: int, action: str) -> dict[str, Any] | None:
+        status = {"accept": "accepted", "decline": "declined", "cancel": "cancelled"}.get(str(action or "").lower())
+        if not status:
+            raise ValueError("Action must be accept, decline, or cancel.")
+        if action == "cancel":
+            where = "id=%s AND requester_account_id=%s AND status='pending'"
+        else:
+            where = "id=%s AND addressee_account_id=%s AND status='pending'"
+        row = await self._fetchone(f"SELECT * FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` WHERE {where}", (request_id, account_id))
+        if not row:
+            return None
+        await self._execute(
+            f"UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` SET status=%s, responded_at=CURRENT_TIMESTAMP WHERE id=%s",
+            (status, request_id),
+        )
+        row["status"] = status
+        return self._serialize_social_row(row)
+
+    async def list_account_friends(self, account_id: int) -> list[dict[str, Any]]:
+        rows = await self._fetchall(
+            f"""
+            SELECT u.id, u.username, u.guild_id, u.display_name, u.avatar_url, u.server_name, u.server_icon_url, u.public_profile,
+                   fr.responded_at AS friended_at
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_friend_requests` fr
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` u
+              ON u.id = CASE WHEN fr.requester_account_id=%s THEN fr.addressee_account_id ELSE fr.requester_account_id END
+            WHERE fr.status='accepted' AND (fr.requester_account_id=%s OR fr.addressee_account_id=%s)
+            ORDER BY fr.responded_at DESC, fr.created_at DESC
+            LIMIT 200
+            """,
+            (account_id, account_id, account_id),
+        )
+        return [self._serialize_account_profile(row) for row in rows]
+
+    async def send_account_message(self, sender_account_id: int, recipient_account_id: int, body: str) -> dict[str, Any]:
+        if int(sender_account_id) == int(recipient_account_id):
+            raise ValueError("You cannot message yourself.")
+        cleaned = " ".join(str(body or "").split())
+        if not cleaned:
+            raise ValueError("Message cannot be empty.")
+        if len(cleaned) > 2000:
+            raise ValueError("Message must be 2000 characters or fewer.")
+        if not await self.get_account_by_id(recipient_account_id):
+            raise ValueError("Account not found.")
+        await self._execute(
+            f"INSERT INTO `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages` (sender_account_id, recipient_account_id, body) VALUES (%s, %s, %s)",
+            (sender_account_id, recipient_account_id, cleaned),
+        )
+        message = await self._fetchone(
+            f"""
+            SELECT msg.*, u.username, u.guild_id, u.display_name, u.avatar_url, u.server_name, u.server_icon_url, u.public_profile
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages` msg
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` u ON u.id=msg.sender_account_id
+            WHERE msg.sender_account_id=%s AND msg.recipient_account_id=%s AND msg.body=%s
+            ORDER BY msg.id DESC
+            LIMIT 1
+            """,
+            (sender_account_id, recipient_account_id, cleaned),
+        )
+        return self._serialize_social_row(message or {})
+
+    async def list_account_message_threads(self, account_id: int) -> list[dict[str, Any]]:
+        rows = await self._fetchall(
+            f"""
+            SELECT
+              other_user.id, other_user.id AS account_id, other_user.username, other_user.guild_id,
+              other_user.display_name, other_user.avatar_url, other_user.server_name, other_user.server_icon_url, other_user.public_profile,
+              latest.id AS last_message_id, latest.body AS last_message, latest.created_at AS last_message_at,
+              latest.sender_account_id AS last_sender_account_id, unread.unread_count
+            FROM (
+              SELECT CASE WHEN sender_account_id=%s THEN recipient_account_id ELSE sender_account_id END AS other_id, MAX(id) AS last_id
+              FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages`
+              WHERE sender_account_id=%s OR recipient_account_id=%s
+              GROUP BY other_id
+            ) threads
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages` latest ON latest.id=threads.last_id
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` other_user ON other_user.id=threads.other_id
+            LEFT JOIN (
+              SELECT sender_account_id AS other_id, COUNT(*) AS unread_count
+              FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages`
+              WHERE recipient_account_id=%s AND read_at IS NULL
+              GROUP BY sender_account_id
+            ) unread ON unread.other_id=threads.other_id
+            ORDER BY latest.created_at DESC
+            LIMIT 100
+            """,
+            (account_id, account_id, account_id, account_id),
+        )
+        return [self._serialize_social_row(row) for row in rows]
+
+    async def list_account_messages(self, account_id: int, other_account_id: int, limit: int = 80) -> list[dict[str, Any]]:
+        if int(account_id) == int(other_account_id):
+            raise ValueError("Pick another account to view messages.")
+        if not await self.get_account_by_id(other_account_id):
+            raise ValueError("Account not found.")
+        await self._execute(
+            f"""
+            UPDATE `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages`
+            SET read_at=COALESCE(read_at, CURRENT_TIMESTAMP)
+            WHERE sender_account_id=%s AND recipient_account_id=%s AND read_at IS NULL
+            """,
+            (other_account_id, account_id),
+        )
+        rows = await self._fetchall(
+            f"""
+            SELECT msg.*, u.username, u.guild_id, u.display_name, u.avatar_url, u.server_name, u.server_icon_url, u.public_profile
+            FROM `{ACCOUNT_LOGIN_SCHEMA}`.`account_messages` msg
+            JOIN `{ACCOUNT_LOGIN_SCHEMA}`.`{ACCOUNT_LOGIN_TABLE}` u ON u.id=msg.sender_account_id
+            WHERE (msg.sender_account_id=%s AND msg.recipient_account_id=%s)
+               OR (msg.sender_account_id=%s AND msg.recipient_account_id=%s)
+            ORDER BY msg.created_at DESC, msg.id DESC
+            LIMIT %s
+            """,
+            (account_id, other_account_id, other_account_id, account_id, max(1, min(limit, 200))),
+        )
+        rows = list(rows)
+        rows.reverse()
+        return [self._serialize_social_row(row) for row in rows]
+
+    def _serialize_social_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        item = dict(row or {})
+        for key, value in list(item.items()):
+            if hasattr(value, "isoformat"):
+                item[key] = value.isoformat()
+        if "public_profile" in item:
+            item["public_profile"] = bool(item.get("public_profile"))
+        if "unread_count" in item:
+            item["unread_count"] = int(item.get("unread_count") or 0)
+        return item
 
     def _empty_music_activity_summary(self) -> dict[str, Any]:
         return {

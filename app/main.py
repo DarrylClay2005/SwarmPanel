@@ -64,6 +64,8 @@ APP_SHELL_PATHS = {
     "/controls",
     "/invites",
     "/users",
+    "/friends",
+    "/messages",
     "/profile",
     "/appearance",
     "/diagnostics",
@@ -448,6 +450,18 @@ class SessionPasswordUpdateRequest(BaseModel):
     new_password: str
 
 
+class SocialFollowRequest(BaseModel):
+    following: bool = True
+
+
+class SocialFriendActionRequest(BaseModel):
+    action: str
+
+
+class SocialMessageRequest(BaseModel):
+    body: str
+
+
 class SwarmAccountDeleteRequest(BaseModel):
     account_id: int
 
@@ -628,6 +642,17 @@ def _scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
 def _account_guild_id(auth: dict[str, Any] | None) -> str | None:
     guild_id = auth.get("guild_id") if auth else None
     return str(guild_id) if guild_id not in (None, "") else None
+
+
+async def _account_id_for_auth(auth: dict[str, Any]) -> int:
+    username = str(auth.get("username") or "").strip()
+    guild_id = _account_guild_id(auth)
+    if not username or not guild_id:
+        raise HTTPException(status_code=403, detail="Guild account access required")
+    profile = await db.get_account_profile(username, guild_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Account profile not found")
+    return int(profile["id"])
 
 
 def _public_scoped_guild_id(auth: dict[str, Any] | None) -> str | None:
@@ -1208,6 +1233,43 @@ async def _handle_telegram_command(message: dict[str, Any]) -> str:
     return "Unknown command. Use /help for SwarmPanel Telegram commands."
 
 
+TELEGRAM_HEALTH_INTERVAL_SECONDS = max(60.0, float(os.getenv("PANEL_TELEGRAM_HEALTH_INTERVAL_SECONDS", "300") or "300"))
+TELEGRAM_ALERT_COOLDOWN_SECONDS = max(300.0, float(os.getenv("PANEL_TELEGRAM_ALERT_COOLDOWN_SECONDS", "900") or "900"))
+_telegram_alert_last: dict[str, float] = {}
+
+
+async def _send_panel_telegram_alert(key: str, title: str, detail: str) -> None:
+    if not telegram_service or not settings.telegram_allowed_chat_ids:
+        return
+    now = time.monotonic()
+    if now - _telegram_alert_last.get(key, 0.0) < TELEGRAM_ALERT_COOLDOWN_SECONDS:
+        return
+    _telegram_alert_last[key] = now
+    message = f"{title}\n{str(detail or '').strip()[:1200]}"
+    for chat_id in sorted(settings.telegram_allowed_chat_ids):
+        try:
+            await telegram_service.send_message(chat_id, message)
+        except Exception:
+            action_logger.exception("SwarmPanel Telegram alert delivery failed for chat %s.", chat_id)
+
+
+async def _telegram_health_watch_loop() -> None:
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await db._fetchone("SELECT 1 AS ok")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            action_logger.exception("SwarmPanel database health check failed.")
+            await _send_panel_telegram_alert("db", "SwarmPanel database problem", str(exc))
+            try:
+                await db.connect()
+            except Exception:
+                action_logger.exception("SwarmPanel database reconnect failed after health alert.")
+        await asyncio.sleep(TELEGRAM_HEALTH_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global telegram_service
@@ -1220,6 +1282,7 @@ async def lifespan(_: FastAPI):
     background_tasks.clear()
     # Commands execute directly through /api/bots/control. The old command_queue
     # worker is intentionally not started because no endpoint enqueues work.
+    background_tasks.append(asyncio.create_task(_telegram_health_watch_loop(), name="panel-telegram-health-watch"))
     recent_feed_events.append(
         _feed_event(
             "info",
@@ -1370,6 +1433,8 @@ async def logout(request: Request):
 @app.get("/controls")
 @app.get("/invites")
 @app.get("/users")
+@app.get("/friends")
+@app.get("/messages")
 @app.get("/profile")
 @app.get("/appearance")
 @app.get("/diagnostics")
@@ -1742,20 +1807,110 @@ async def api_update_user_panel_preferences(request: Request, payload: PanelPref
 
 @app.get("/api/users/search")
 async def api_search_users(request: Request):
-    _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     query = " ".join(str(request.query_params.get("q") or "").split())[:80]
     limit = _bounded_query_limit(request.query_params.get("limit"), default=24, max_limit=50)
-    users = await db.search_account_profiles(query, limit)
+    viewer_id = None
+    try:
+        viewer_id = await _account_id_for_auth(auth)
+    except Exception:
+        viewer_id = None
+    users = await db.search_account_profiles(query, limit, viewer_account_id=viewer_id)
     return {"ok": True, "query": query, "users": users, "limit": limit}
 
 
 @app.get("/api/users/directory")
 async def api_user_directory(request: Request):
-    _require_api_auth(request)
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
     query = " ".join(str(request.query_params.get("q") or "").split())[:80]
     limit = _bounded_query_limit(request.query_params.get("limit"), default=24, max_limit=50)
-    users = await db.search_account_profiles(query, limit)
+    viewer_id = None
+    try:
+        viewer_id = await _account_id_for_auth(auth)
+    except Exception:
+        viewer_id = None
+    users = await db.search_account_profiles(query, limit, viewer_account_id=viewer_id)
     return {"ok": True, "query": query, "users": users, "limit": limit}
+
+
+@app.post("/api/users/{account_id}/follow")
+async def api_follow_account(account_id: int, request: Request, payload: SocialFollowRequest):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    try:
+        return {"ok": True, **await db.set_account_follow(actor_id, account_id, payload.following)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.post("/api/users/{account_id}/friend-request")
+async def api_send_account_friend_request(account_id: int, request: Request):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    try:
+        return {"ok": True, **await db.send_account_friend_request(actor_id, account_id)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@app.get("/api/friends/requests")
+async def api_account_friend_requests(request: Request):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    return {
+        "ok": True,
+        "incoming": await db.list_account_friend_requests(actor_id, mode="incoming"),
+        "outgoing": await db.list_account_friend_requests(actor_id, mode="outgoing"),
+    }
+
+
+@app.post("/api/friends/requests/{request_id}")
+async def api_account_friend_request_action(request_id: int, request: Request, payload: SocialFriendActionRequest):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    try:
+        result = await db.respond_account_friend_request(actor_id, request_id, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not result:
+        raise HTTPException(status_code=404, detail="Friend request not found")
+    return {"ok": True, "request": result}
+
+
+@app.get("/api/me/friends")
+async def api_account_friends(request: Request):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    return {"ok": True, "friends": await db.list_account_friends(actor_id)}
+
+
+@app.get("/api/messages/threads")
+async def api_account_message_threads(request: Request):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    return {"ok": True, "threads": await db.list_account_message_threads(actor_id)}
+
+
+@app.get("/api/messages/{account_id}")
+async def api_account_messages(account_id: int, request: Request, limit: int = 80):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    try:
+        messages = await db.list_account_messages(actor_id, account_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"ok": True, "messages": messages}
+
+
+@app.post("/api/messages/{account_id}")
+async def api_send_account_message(account_id: int, request: Request, payload: SocialMessageRequest):
+    auth = await _hydrate_site_owner_auth(request, _require_api_auth(request))
+    actor_id = await _account_id_for_auth(auth)
+    try:
+        message = await db.send_account_message(actor_id, account_id, payload.body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    return {"ok": True, "message": message}
 
 
 @app.get("/api/swarm-accounts/admin")

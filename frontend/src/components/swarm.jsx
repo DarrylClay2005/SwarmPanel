@@ -1,5 +1,7 @@
 import { memo } from "react";
-import { Music2, PlugZap } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Heart, MessageCircle, Music2, PlugZap, UserPlus } from "lucide-react";
+import { apiFetch, clearCache } from "../api.js";
 import { EmptyState, Notice } from "./ui.jsx";
 import { formatCell, formatTime, initials, pick, unique } from "../utils/format.js";
 
@@ -82,8 +84,25 @@ export function InviteCard({ bot }) {
   );
 }
 
-export function UserCard({ user }) {
+export function UserCard({ user, ctx, onChanged }) {
   const imageUrl = user.avatar_url || user.server_icon_url || "";
+  async function follow() {
+    try {
+      await apiFetch(`/api/users/${user.id}/follow`, { method: "POST", body: JSON.stringify({ following: !user.followed_by_me }) });
+      clearCache("/api/users");
+      onChanged?.();
+    } catch (error) {
+      ctx?.showToast(error.message, "error");
+    }
+  }
+  async function friend() {
+    try {
+      await apiFetch(`/api/users/${user.id}/friend-request`, { method: "POST" });
+      onChanged?.();
+    } catch (error) {
+      ctx?.showToast(error.message, "error");
+    }
+  }
   return (
     <article className="user-card">
       <div className="avatar">{imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" /> : initials(user.display_name || user.username)}</div>
@@ -92,6 +111,13 @@ export function UserCard({ user }) {
         <p>@{user.username} / {user.server_name || `Guild ${user.guild_id}`}</p>
         <div className="chip-row"><span>{user.favorite_bot || "no favorite"}</span><span>{user.public_profile === false ? "private" : "public"}</span></div>
       </div>
+      {ctx ? (
+        <div className="inline-controls">
+          <button type="button" onClick={follow}><Heart size={16} />{user.followed_by_me ? "Unfollow" : "Follow"}</button>
+          <button type="button" onClick={friend}><UserPlus size={16} />Friend</button>
+          <Link className="button-link" to="/messages" state={{ user }}><MessageCircle size={16} />Message</Link>
+        </div>
+      ) : null}
     </article>
   );
 }

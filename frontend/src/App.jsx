@@ -19,6 +19,8 @@ import DashboardPage from "./pages/DashboardPage.jsx";
 import ControlsPage from "./pages/ControlsPage.jsx";
 import InvitesPage from "./pages/InvitesPage.jsx";
 import UsersPage from "./pages/UsersPage.jsx";
+import FriendsPage from "./pages/FriendsPage.jsx";
+import MessagesPage from "./pages/MessagesPage.jsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
 import AppearancePage from "./pages/AppearancePage.jsx";
 import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
@@ -165,6 +167,8 @@ function App() {
           <Route path="/controls" element={<Protected ctx={ctx}><ControlsPage ctx={ctx} /></Protected>} />
           <Route path="/invites" element={<Protected ctx={ctx}><InvitesPage ctx={ctx} /></Protected>} />
           <Route path="/users" element={<Protected ctx={ctx}><UsersPage ctx={ctx} /></Protected>} />
+          <Route path="/friends" element={<Protected ctx={ctx}><FriendsPage ctx={ctx} /></Protected>} />
+          <Route path="/messages" element={<Protected ctx={ctx}><MessagesPage ctx={ctx} /></Protected>} />
           <Route path="/profile" element={<Protected ctx={ctx}><ProfilePage ctx={ctx} /></Protected>} />
           <Route path="/appearance" element={<Protected ctx={ctx}><AppearancePage ctx={ctx} /></Protected>} />
           <Route path="/diagnostics" element={<Protected ctx={ctx} admin><DiagnosticsPage ctx={ctx} /></Protected>} />
